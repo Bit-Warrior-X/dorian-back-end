@@ -62,6 +62,7 @@ type L4Config struct {
 	GeoDbIpv4Path           string   `json:"geoDbIpv4Path"`
 	GeoDbLocationPath       string   `json:"geoDbLocationPath"`
 	GeoAllowCountries       []string `json:"geoAllowCountries"`
+	GeoCountriesBlockMode   bool     `json:"geoCountriesBlockMode"`
 	TcpConnectionLimitCheck bool     `json:"tcpConnectionLimitCheck"`
 	TcpConnectionLimitCnt   int      `json:"tcpConnectionLimitCnt"`
 }
@@ -127,7 +128,7 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 			udp_fixed_threshold, udp_fixed_check_duration, udp_protection_duration,
 			gre_valid, gre_threshold, gre_burst_pkt, gre_burst_count_per_sec,
 			gre_fixed_threshold, gre_fixed_check_duration, gre_protection_duration,
-			tcp_seg_check, geo_check, geo_db_ipv4_path, geo_db_location_path, geo_allow_countries,
+			tcp_seg_check, geo_check, geo_db_ipv4_path, geo_db_location_path, geo_allow_countries, geo_countries_block_mode,
 			tcp_connection_limit_check, tcp_connection_limit_cnt
 		FROM l4_ddos_defense
 		WHERE id = ?`, id)
@@ -140,6 +141,7 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 	var geoDbIpv4 sql.NullString
 	var geoDbLocation sql.NullString
 	var geoAllow sql.NullString
+	var geoCountriesBlock sql.NullInt64
 	if err := row.Scan(
 		&cfg.ID,
 		&dev,
@@ -195,6 +197,7 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 		&geoDbIpv4,
 		&geoDbLocation,
 		&geoAllow,
+		&geoCountriesBlock,
 		&cfg.TcpConnectionLimitCheck,
 		&cfg.TcpConnectionLimitCnt,
 	); err != nil {
@@ -211,6 +214,7 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 	cfg.GeoDbIpv4Path = nullStringValue(geoDbIpv4)
 	cfg.GeoDbLocationPath = nullStringValue(geoDbLocation)
 	cfg.GeoAllowCountries = splitCSV(nullStringValue(geoAllow))
+	cfg.GeoCountriesBlockMode = geoCountriesBlock.Valid && geoCountriesBlock.Int64 != 0
 
 	return cfg, nil
 }
@@ -231,7 +235,7 @@ func (store *l4Store) update(ctx context.Context, cfg L4Config) error {
 			udp_fixed_threshold = ?, udp_fixed_check_duration = ?, udp_protection_duration = ?,
 			gre_valid = ?, gre_threshold = ?, gre_burst_pkt = ?, gre_burst_count_per_sec = ?,
 			gre_fixed_threshold = ?, gre_fixed_check_duration = ?, gre_protection_duration = ?,
-			tcp_seg_check = ?, geo_check = ?, geo_db_ipv4_path = ?, geo_db_location_path = ?, geo_allow_countries = ?,
+			tcp_seg_check = ?, geo_check = ?, geo_db_ipv4_path = ?, geo_db_location_path = ?, geo_allow_countries = ?, geo_countries_block_mode = ?,
 			tcp_connection_limit_check = ?, tcp_connection_limit_cnt = ?
 		WHERE id = ?`,
 		nullableServerString(cfg.Dev),
@@ -287,6 +291,7 @@ func (store *l4Store) update(ctx context.Context, cfg L4Config) error {
 		nullableServerString(cfg.GeoDbIpv4Path),
 		nullableServerString(cfg.GeoDbLocationPath),
 		nullableServerString(strings.Join(cfg.GeoAllowCountries, ",")),
+		boolToInt(cfg.GeoCountriesBlockMode),
 		boolToInt(cfg.TcpConnectionLimitCheck),
 		cfg.TcpConnectionLimitCnt,
 		cfg.ID,
