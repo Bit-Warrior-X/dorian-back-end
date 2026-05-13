@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS servers (
   name VARCHAR(255),
   ip VARCHAR(255),
   status ENUM('Normal','Pause','Expired'),
-  license_type ENUM('Enterprise','Professional','Trial'),
+  license_type ENUM('Trial','L4','L7','Unified'),
   license_file VARCHAR(1024),
   version VARCHAR(50),
   created DATETIME,

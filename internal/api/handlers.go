@@ -130,13 +130,19 @@ func apiHTTPError(status int, message string) error {
 	return &httpAPIErr{status: status, message: message}
 }
 
-// storeLicenseTypeFromDeployResponse maps deploy_license JSON license_type (trial|paid) to servers.license_type labels.
+// storeLicenseTypeFromDeployResponse maps deploy_license JSON license_type
+// (trial | l4 | l7 | unified) back to the dashboard / servers.license_type label
+// (Trial | L4 | L7 | Unified).
 func storeLicenseTypeFromDeployResponse(deploy deployCreateServerResponse, fallback string) string {
 	switch strings.ToLower(strings.TrimSpace(deploy.LicenseType)) {
 	case "trial":
 		return "Trial"
-	case "paid":
-		return "Enterprise"
+	case "l4":
+		return "L4"
+	case "l7":
+		return "L7"
+	case "unified":
+		return "Unified"
 	}
 	fb := strings.TrimSpace(fallback)
 	if fb != "" {
@@ -2391,14 +2397,25 @@ func normalizeDeployLicenseCreateResponse(d *deployCreateServerResponse) {
 	}
 }
 
-// deployLicenseServiceLicenseType maps dashboard license labels to deploy_license /create_server values (trial | paid).
-// The UI uses "Enterprise" for an existing license file; deploy_license expects "paid".
+// deployLicenseServiceLicenseType maps dashboard license labels
+// (Trial | L4 | L7 | Unified) to deploy_license /create_server values
+// (trial | l4 | l7 | unified). Comparison is case-insensitive.
+//
+// Legacy labels ("Enterprise" / "Professional" / "paid") that may still arrive
+// from older clients are best-effort mapped to "unified" so deployments do not
+// hard-fail during the transition.
 func deployLicenseServiceLicenseType(licenseType string) string {
 	switch strings.ToLower(strings.TrimSpace(licenseType)) {
 	case "trial":
 		return "trial"
+	case "l4":
+		return "l4"
+	case "l7":
+		return "l7"
+	case "unified":
+		return "unified"
 	case "enterprise", "professional", "paid":
-		return "paid"
+		return "unified"
 	default:
 		return strings.ToLower(strings.TrimSpace(licenseType))
 	}
