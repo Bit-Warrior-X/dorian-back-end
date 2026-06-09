@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"vue-project-backend/internal/config"
+	"vue-project-backend/internal/remotesvc"
 	"vue-project-backend/internal/store"
 
 	"golang.org/x/sync/singleflight"
@@ -385,6 +386,7 @@ func registerRoutes(
 	mux.HandleFunc("/api/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
 	mux.HandleFunc("/api/v1/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
 	mux.HandleFunc("/api/v1/deploy-versions", deployLicenseVersionsHandler(cfg))
+	mux.HandleFunc("/api/v1/servers/probe-host-versions", probeHostVersionsHandler(cfg))
 	mux.HandleFunc("/servers", serversHandler(cfg, servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, blacklist))
 	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(servers, blacklist))
@@ -2642,6 +2644,87 @@ func deployLicenseVersionsHandler(cfg config.Config) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, out)
+	}
+}
+
+type probeHostVersionsRequest struct {
+	IP          string `json:"ip"`
+	SSHUser     string `json:"sshUser"`
+	SSHPassword string `json:"sshPassword"`
+	SSHPort     string `json:"sshPort"`
+}
+
+type probeHostVersionsResponse struct {
+	OS       string                     `json:"os"`
+	Versions []deployLicenseVersionItem `json:"versions"`
+}
+
+func filterDeployVersionsForHostOS(versions []deployLicenseVersionItem, hostOS string) []deployLicenseVersionItem {
+	target := remotesvc.NormalizeHostOS(hostOS)
+	if target == "" {
+		return nil
+	}
+	out := make([]deployLicenseVersionItem, 0, len(versions))
+	for _, item := range versions {
+		itemOS := ""
+		if item.OS != nil {
+			itemOS = remotesvc.NormalizeHostOS(*item.OS)
+		}
+		if itemOS == target {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+func probeHostVersionsHandler(cfg config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		var payload probeHostVersionsRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		ip := strings.TrimSpace(payload.IP)
+		sshUser := strings.TrimSpace(payload.SSHUser)
+		sshPass := strings.TrimSpace(payload.SSHPassword)
+		sshPort := strings.TrimSpace(payload.SSHPort)
+		if ip == "" || sshUser == "" || sshPass == "" {
+			writeError(w, http.StatusBadRequest, "ip, sshUser, and sshPassword are required")
+			return
+		}
+
+		probeCtx, cancelProbe := context.WithTimeout(r.Context(), 45*time.Second)
+		defer cancelProbe()
+		hostOS, err := remotesvc.DetectHostOS(probeCtx, remotesvc.SSHTarget{
+			Host:     ip,
+			User:     sshUser,
+			Password: sshPass,
+			Port:     sshPort,
+		})
+		if err != nil {
+			log.Printf("[api] POST /api/v1/servers/probe-host-versions: detect os failed ip=%q sshUser=%q: %v",
+				ip, sshUser, err)
+			writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to detect host OS: %v", err))
+			return
+		}
+
+		catalog, err := fetchDeployLicenseVersions(r.Context(), cfg)
+		if err != nil {
+			log.Printf("[api] POST /api/v1/servers/probe-host-versions: get_versions failed: %v", err)
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		filtered := filterDeployVersionsForHostOS(catalog.Versions, hostOS)
+		log.Printf("[api] POST /api/v1/servers/probe-host-versions: ip=%q os=%q versions=%d",
+			ip, hostOS, len(filtered))
+		writeJSON(w, http.StatusOK, probeHostVersionsResponse{
+			OS:       hostOS,
+			Versions: filtered,
+		})
 	}
 }
 

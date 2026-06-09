@@ -42,7 +42,8 @@ func Load() Config {
 	cfg := Config{
 		Port:                        "8080",
 		AllowAllCORS:                true,
-		DBUser:                      "root",
+		DBUser:                      "dorian",
+		DBPassword:                  "StrongPassword123!",
 		DBHost:                      "127.0.0.1",
 		DBPort:                      "3306",
 		DBName:                      "cdnproxy",

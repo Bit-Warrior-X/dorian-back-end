@@ -69,12 +69,12 @@ func main() {
 	worker.StartIPRequestStatsCollector(ctx, cfg, connection, serverStore)
 
 	server := &http.Server{
-		Addr:              ":" + cfg.Port,
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		Addr:    ":" + cfg.Port,
+		Handler: handler,
+		// Do not set ReadTimeout/WriteTimeout globally: they break long-lived
+		// WebSocket streams (access log tail). Per-request limits use ReadHeaderTimeout.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

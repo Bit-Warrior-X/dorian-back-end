@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -49,6 +50,7 @@ func streamAccessLog(w http.ResponseWriter, r *http.Request, servers store.Serve
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		log.Printf("[api] GET /servers/%d/access-log/stream: websocket upgrade failed: %v", serverID, err)
 		return
 	}
 	defer conn.Close()
