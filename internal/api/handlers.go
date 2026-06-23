@@ -287,6 +287,7 @@ func registerRoutes(
 	wafResponse store.WafResponseStore,
 	wafUserAgent store.WafUserAgentStore,
 	upstreamServers store.UpstreamServerStore,
+	listeningPorts store.ListeningPortStore,
 	blacklist store.BlacklistStore,
 ) {
 	mux.HandleFunc("/health", healthHandler)
@@ -393,7 +394,7 @@ func registerRoutes(
 	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
-	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers))
+	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -3223,6 +3224,17 @@ type upstreamServerBatchPayload struct {
 	IDs []int64 `json:"ids"`
 }
 
+type listeningPortPayload struct {
+	Port        int    `json:"port"`
+	Protocol    string `json:"protocol"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+}
+
+type listeningPortBatchPayload struct {
+	IDs []int64 `json:"ids"`
+}
+
 type serverBlacklistPayload struct {
 	ServerID    int64  `json:"serverId"`
 	IPAddress   string `json:"ipAddress"`
@@ -4126,23 +4138,7 @@ type upstreamServerPayloadL7 struct {
 	Description string `json:"description"`
 }
 
-// callL7UpdateUpstreamServers loads all upstream servers for the given server
-// and sends them to api_parser via the l7_update_upstreamservers API using POST.
-func callL7UpdateUpstreamServers(ctx context.Context, servers store.ServerStore, serverID int64, upstreamServers store.UpstreamServerStore) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	list, err := upstreamServers.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load upstream servers: %w", err)
-	}
-
+func upstreamServersToL7Payload(list []store.UpstreamServer) []upstreamServerPayloadL7 {
 	upstreams := make([]upstreamServerPayloadL7, 0, len(list))
 	for _, u := range list {
 		upstreams = append(upstreams, upstreamServerPayloadL7{
@@ -4151,6 +4147,18 @@ func callL7UpdateUpstreamServers(ctx context.Context, servers store.ServerStore,
 			IpPort:      strings.TrimSpace(u.Address),
 			Description: strings.TrimSpace(u.Description),
 		})
+	}
+	return upstreams
+}
+
+func postL7UpstreamServers(ctx context.Context, servers store.ServerStore, serverID int64, upstreams []upstreamServerPayloadL7) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
 	}
 
 	payload := l7UpstreamServersUpdatePayload{
@@ -4184,6 +4192,99 @@ func callL7UpdateUpstreamServers(ctx context.Context, servers store.ServerStore,
 	return nil
 }
 
+// callL7UpdateUpstreamServers loads all upstream servers for the given server
+// and sends them to api_parser via the l7_update_upstreamservers API using POST.
+func callL7UpdateUpstreamServers(ctx context.Context, servers store.ServerStore, serverID int64, upstreamServers store.UpstreamServerStore) error {
+	list, err := upstreamServers.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load upstream servers: %w", err)
+	}
+	return postL7UpstreamServers(ctx, servers, serverID, upstreamServersToL7Payload(list))
+}
+
+// l7ListeningPortsUpdatePayload is sent to api_parser's
+// /API/L7/l7_update_listeningports endpoint when listening ports change.
+type l7ListeningPortsUpdatePayload struct {
+	ServerID       int64                     `json:"serverId"`
+	ListeningPorts []listeningPortPayloadL7 `json:"listeningports"`
+}
+
+// listeningPortPayloadL7 is the per-port shape expected by api_parser.
+type listeningPortPayloadL7 struct {
+	ID          int64  `json:"id"`
+	ServerID    int64  `json:"serverId"`
+	Port        int    `json:"port"`
+	Protocol    string `json:"protocol"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+}
+
+func listeningPortsToL7Payload(list []store.ListeningPort) []listeningPortPayloadL7 {
+	ports := make([]listeningPortPayloadL7, 0, len(list))
+	for _, p := range list {
+		ports = append(ports, listeningPortPayloadL7{
+			ID:          p.ID,
+			ServerID:    p.ServerID,
+			Port:        p.Port,
+			Protocol:    strings.TrimSpace(p.Protocol),
+			Description: strings.TrimSpace(p.Description),
+			Status:      strings.TrimSpace(p.Status),
+		})
+	}
+	return ports
+}
+
+func postL7ListeningPorts(ctx context.Context, servers store.ServerStore, serverID int64, ports []listeningPortPayloadL7) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	payload := l7ListeningPortsUpdatePayload{
+		ServerID:       serverID,
+		ListeningPorts: ports,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 listeningports payload: %w", err)
+	}
+
+	l7ListeningPortsUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_listeningports"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7ListeningPortsUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_listeningports request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_listeningports request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_listeningports returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
+// callL7UpdateListeningPorts loads all listening ports for the given server
+// and sends them to api_parser via the l7_update_listeningports API using POST.
+func callL7UpdateListeningPorts(ctx context.Context, servers store.ServerStore, serverID int64, listeningPorts store.ListeningPortStore) error {
+	list, err := listeningPorts.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load listening ports: %w", err)
+	}
+	return postL7ListeningPorts(ctx, servers, serverID, listeningPortsToL7Payload(list))
+}
+
 func serverDetailHandler(
 	cfg config.Config,
 	agentClient *AgentClient,
@@ -4201,6 +4302,7 @@ func serverDetailHandler(
 	wafResponse store.WafResponseStore,
 	wafUserAgent store.WafUserAgentStore,
 	upstreamServers store.UpstreamServerStore,
+	listeningPorts store.ListeningPortStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/host-metrics") {
@@ -5850,6 +5952,175 @@ func serverDetailHandler(
 			return
 		}
 
+		if strings.Contains(r.URL.Path, "/listening-ports") {
+			serverID, portID, isBatch, ok := parseListeningPortsPath(r.URL.Path)
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+
+			switch r.Method {
+			case http.MethodGet:
+				if portID != 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := listeningPorts.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load listening ports")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				if isBatch {
+					var payload listeningPortBatchPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+					list, err := listeningPorts.ListByServer(r.Context(), serverID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to load listening ports")
+						return
+					}
+					deleteIDs := make(map[int64]struct{}, len(payload.IDs))
+					for _, id := range payload.IDs {
+						deleteIDs[id] = struct{}{}
+					}
+					remaining := make([]store.ListeningPort, 0, len(list))
+					for _, port := range list {
+						if _, ok := deleteIDs[port.ID]; ok {
+							continue
+						}
+						remaining = append(remaining, port)
+					}
+					if err := postL7ListeningPorts(r.Context(), servers, serverID, listeningPortsToL7Payload(remaining)); err != nil {
+						writeError(w, http.StatusBadGateway, err.Error())
+						return
+					}
+					if err := listeningPorts.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to delete listening ports")
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				var payload listeningPortPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				created, err := listeningPorts.Create(r.Context(), serverID, store.ListeningPortInput{
+					Port:        payload.Port,
+					Protocol:    strings.TrimSpace(payload.Protocol),
+					Description: strings.TrimSpace(payload.Description),
+					Status:      strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create listening port")
+					return
+				}
+				if err := callL7UpdateListeningPorts(r.Context(), servers, serverID, listeningPorts); err != nil {
+					_ = listeningPorts.Delete(r.Context(), serverID, created.ID)
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodPut:
+				if portID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				var payload listeningPortPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				existingList, err := listeningPorts.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load listening ports")
+					return
+				}
+				var previous store.ListeningPort
+				found := false
+				for _, port := range existingList {
+					if port.ID == portID {
+						previous = port
+						found = true
+						break
+					}
+				}
+				if !found {
+					writeError(w, http.StatusNotFound, "listening port not found")
+					return
+				}
+				updated, err := listeningPorts.Update(r.Context(), serverID, portID, store.ListeningPortInput{
+					Port:        payload.Port,
+					Protocol:    strings.TrimSpace(payload.Protocol),
+					Description: strings.TrimSpace(payload.Description),
+					Status:      strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "listening port not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to update listening port")
+					return
+				}
+				if err := callL7UpdateListeningPorts(r.Context(), servers, serverID, listeningPorts); err != nil {
+					_, _ = listeningPorts.Update(r.Context(), serverID, portID, store.ListeningPortInput{
+						Port:        previous.Port,
+						Protocol:    previous.Protocol,
+						Description: previous.Description,
+						Status:      previous.Status,
+					})
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				writeJSON(w, http.StatusOK, updated)
+			case http.MethodDelete:
+				if portID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := listeningPorts.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load listening ports")
+					return
+				}
+				remaining := make([]store.ListeningPort, 0, len(list))
+				found := false
+				for _, port := range list {
+					if port.ID == portID {
+						found = true
+						continue
+					}
+					remaining = append(remaining, port)
+				}
+				if !found {
+					writeError(w, http.StatusNotFound, "listening port not found")
+					return
+				}
+				if err := postL7ListeningPorts(r.Context(), servers, serverID, listeningPortsToL7Payload(remaining)); err != nil {
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				if err := listeningPorts.Delete(r.Context(), serverID, portID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete listening port")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
 		if strings.Contains(r.URL.Path, "/upstream-servers") {
 			serverID, upstreamID, isBatch, ok := parseUpstreamPath(r.URL.Path)
 			if !ok {
@@ -5876,12 +6147,28 @@ func serverDetailHandler(
 						writeError(w, http.StatusBadRequest, "invalid JSON body")
 						return
 					}
-					if err := upstreamServers.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete upstream servers")
+					list, err := upstreamServers.ListByServer(r.Context(), serverID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
 						return
 					}
-					if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
+					deleteIDs := make(map[int64]struct{}, len(payload.IDs))
+					for _, id := range payload.IDs {
+						deleteIDs[id] = struct{}{}
+					}
+					remaining := make([]store.UpstreamServer, 0, len(list))
+					for _, upstream := range list {
+						if _, ok := deleteIDs[upstream.ID]; ok {
+							continue
+						}
+						remaining = append(remaining, upstream)
+					}
+					if err := postL7UpstreamServers(r.Context(), servers, serverID, upstreamServersToL7Payload(remaining)); err != nil {
+						writeError(w, http.StatusBadGateway, err.Error())
+						return
+					}
+					if err := upstreamServers.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to delete upstream servers")
 						return
 					}
 					w.WriteHeader(http.StatusNoContent)
@@ -5906,7 +6193,8 @@ func serverDetailHandler(
 					return
 				}
 				if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
+					_ = upstreamServers.Delete(r.Context(), serverID, created.ID)
+					writeError(w, http.StatusBadGateway, err.Error())
 					return
 				}
 				writeJSON(w, http.StatusCreated, created)
@@ -5918,6 +6206,24 @@ func serverDetailHandler(
 				var payload upstreamServerPayload
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				existingList, err := upstreamServers.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
+					return
+				}
+				var previous store.UpstreamServer
+				found := false
+				for _, upstream := range existingList {
+					if upstream.ID == upstreamID {
+						previous = upstream
+						found = true
+						break
+					}
+				}
+				if !found {
+					writeError(w, http.StatusNotFound, "upstream server not found")
 					return
 				}
 				updated, err := upstreamServers.Update(r.Context(), serverID, upstreamID, store.UpstreamServerInput{
@@ -5934,7 +6240,12 @@ func serverDetailHandler(
 					return
 				}
 				if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
+					_, _ = upstreamServers.Update(r.Context(), serverID, upstreamID, store.UpstreamServerInput{
+						Address:     previous.Address,
+						Description: previous.Description,
+						Status:      previous.Status,
+					})
+					writeError(w, http.StatusBadGateway, err.Error())
 					return
 				}
 				writeJSON(w, http.StatusOK, updated)
@@ -5943,12 +6254,30 @@ func serverDetailHandler(
 					writeError(w, http.StatusNotFound, "not found")
 					return
 				}
-				if err := upstreamServers.Delete(r.Context(), serverID, upstreamID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete upstream server")
+				list, err := upstreamServers.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
 					return
 				}
-				if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync upstream servers")
+				remaining := make([]store.UpstreamServer, 0, len(list))
+				found := false
+				for _, upstream := range list {
+					if upstream.ID == upstreamID {
+						found = true
+						continue
+					}
+					remaining = append(remaining, upstream)
+				}
+				if !found {
+					writeError(w, http.StatusNotFound, "upstream server not found")
+					return
+				}
+				if err := postL7UpstreamServers(r.Context(), servers, serverID, upstreamServersToL7Payload(remaining)); err != nil {
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				if err := upstreamServers.Delete(r.Context(), serverID, upstreamID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete upstream server")
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
@@ -6311,6 +6640,35 @@ func parseWafUserAgentPath(path string) (serverID int64, ruleID int64, isBatch b
 			return 0, 0, false, false
 		}
 		return serverID, ruleID, false, true
+	}
+	return 0, 0, false, false
+}
+
+func parseListeningPortsPath(path string) (serverID int64, portID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/servers/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 2 {
+		return 0, 0, false, false
+	}
+	if parts[1] != "listening-ports" {
+		return 0, 0, false, false
+	}
+	serverID, ok = parsePositiveInt(parts[0])
+	if !ok {
+		return 0, 0, false, false
+	}
+	if len(parts) == 2 {
+		return serverID, 0, false, true
+	}
+	if len(parts) == 3 && parts[2] == "batch-delete" {
+		return serverID, 0, true, true
+	}
+	if len(parts) == 3 {
+		portID, ok = parsePositiveInt(parts[2])
+		if !ok {
+			return 0, 0, false, false
+		}
+		return serverID, portID, false, true
 	}
 	return 0, 0, false, false
 }

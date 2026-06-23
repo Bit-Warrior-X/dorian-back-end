@@ -21,7 +21,7 @@ Go API server for the [Dorian Front-End](../dorian-front-end) dashboard. Manages
 
 ## Prerequisites
 
-- **Go 1.22+** (see `go.mod`)
+- **Go 1.22+** (see `go.mod`) 
 - **MySQL** with the `cdnproxy` database (schema below)
 - **Redis** running on `127.0.0.1:6379` by default
 
