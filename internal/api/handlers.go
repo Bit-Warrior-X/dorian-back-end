@@ -5952,6 +5952,20 @@ func serverDetailHandler(
 			return
 		}
 
+		if strings.HasSuffix(r.URL.Path, "/listening-ports/bound") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/listening-ports/bound")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			handleServerBoundPorts(w, r, servers, serverID)
+			return
+		}
+
 		if strings.Contains(r.URL.Path, "/listening-ports") {
 			serverID, portID, isBatch, ok := parseListeningPortsPath(r.URL.Path)
 			if !ok {
@@ -6010,6 +6024,10 @@ func serverDetailHandler(
 					writeError(w, http.StatusBadRequest, "invalid JSON body")
 					return
 				}
+				if err := validateListeningPortAvailable(r.Context(), servers, listeningPorts, serverID, payload.Port, 0); err != nil {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
 				created, err := listeningPorts.Create(r.Context(), serverID, store.ListeningPortInput{
 					Port:        payload.Port,
 					Protocol:    strings.TrimSpace(payload.Protocol),
@@ -6056,6 +6074,10 @@ func serverDetailHandler(
 				}
 				if !found {
 					writeError(w, http.StatusNotFound, "listening port not found")
+					return
+				}
+				if err := validateListeningPortAvailable(r.Context(), servers, listeningPorts, serverID, payload.Port, portID); err != nil {
+					writeError(w, http.StatusBadRequest, err.Error())
 					return
 				}
 				updated, err := listeningPorts.Update(r.Context(), serverID, portID, store.ListeningPortInput{

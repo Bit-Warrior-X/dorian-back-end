@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -93,6 +94,77 @@ func handleServerHostMetrics(w http.ResponseWriter, r *http.Request, servers sto
 		return
 	}
 	writeJSON(w, http.StatusOK, metrics)
+}
+
+func handleServerBoundPorts(w http.ResponseWriter, r *http.Request, servers store.ServerStore, serverID int64) {
+	view, ok := loadServerViewOrWriteError(w, r, servers, serverID)
+	if !ok {
+		return
+	}
+
+	probeCtx, cancel := context.WithTimeout(r.Context(), remoteHostMetricsTimeout)
+	defer cancel()
+
+	ports, err := remotesvc.ProbeBoundPorts(probeCtx, sshTargetFromView(view))
+	if err != nil {
+		log.Printf("[api] GET /servers/%d/listening-ports/bound failed ssh_target=%s@%s:%s: %v",
+			serverID,
+			strings.TrimSpace(view.SSHUser),
+			strings.TrimSpace(view.IP),
+			strings.TrimSpace(view.SSHPort),
+			err,
+		)
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, ports)
+}
+
+func validateListeningPortAvailable(
+	ctx context.Context,
+	servers store.ServerStore,
+	listeningPorts store.ListeningPortStore,
+	serverID int64,
+	port int,
+	excludePortID int64,
+) error {
+	if port < 1 || port > 65535 {
+		return fmt.Errorf("port must be between 1 and 65535")
+	}
+
+	list, err := listeningPorts.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("failed to load listening ports: %w", err)
+	}
+	managedPorts := make(map[int]struct{}, len(list))
+	for _, existing := range list {
+		managedPorts[existing.Port] = struct{}{}
+		if existing.ID == excludePortID {
+			continue
+		}
+		if existing.Port == port {
+			return fmt.Errorf("port %d is already configured", port)
+		}
+	}
+
+	view, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("failed to load server: %w", err)
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, remoteHostMetricsTimeout)
+	defer cancel()
+
+	bound, err := remotesvc.ProbeBoundPorts(probeCtx, sshTargetFromView(view))
+	if err != nil {
+		return fmt.Errorf("failed to check system ports: %w", err)
+	}
+	if _, inUse := remotesvc.BoundPortNumbers(bound)[port]; inUse {
+		if _, managed := managedPorts[port]; !managed {
+			return fmt.Errorf("port %d is already in use on the system", port)
+		}
+	}
+	return nil
 }
 
 type serverHostPowerRequest struct {
