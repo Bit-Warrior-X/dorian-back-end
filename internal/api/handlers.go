@@ -6201,8 +6201,22 @@ func serverDetailHandler(
 					writeError(w, http.StatusBadRequest, "invalid JSON body")
 					return
 				}
+				address := strings.TrimSpace(payload.Address)
+				if address == "" {
+					writeError(w, http.StatusBadRequest, "address is required")
+					return
+				}
+				existingList, err := upstreamServers.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
+					return
+				}
+				if store.UpstreamAddressExists(existingList, address, 0) {
+					writeError(w, http.StatusBadRequest, "upstream server "+address+" is already registered")
+					return
+				}
 				created, err := upstreamServers.Create(r.Context(), serverID, store.UpstreamServerInput{
-					Address:     strings.TrimSpace(payload.Address),
+					Address:     address,
 					Description: strings.TrimSpace(payload.Description),
 					Status:      strings.TrimSpace(payload.Status),
 				})
@@ -6248,8 +6262,17 @@ func serverDetailHandler(
 					writeError(w, http.StatusNotFound, "upstream server not found")
 					return
 				}
+				address := strings.TrimSpace(payload.Address)
+				if address == "" {
+					writeError(w, http.StatusBadRequest, "address is required")
+					return
+				}
+				if store.UpstreamAddressExists(existingList, address, upstreamID) {
+					writeError(w, http.StatusBadRequest, "upstream server "+address+" is already registered")
+					return
+				}
 				updated, err := upstreamServers.Update(r.Context(), serverID, upstreamID, store.UpstreamServerInput{
-					Address:     strings.TrimSpace(payload.Address),
+					Address:     address,
 					Description: strings.TrimSpace(payload.Description),
 					Status:      strings.TrimSpace(payload.Status),
 				})

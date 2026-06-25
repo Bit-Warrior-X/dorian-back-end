@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"net"
+	"strconv"
 	"strings"
 )
 
@@ -34,6 +36,40 @@ type upstreamServerStore struct {
 
 func NewUpstreamServerStore(db *sql.DB) UpstreamServerStore {
 	return &upstreamServerStore{db: db}
+}
+
+// NormalizeUpstreamAddress canonicalizes an upstream ip:port for duplicate checks.
+func NormalizeUpstreamAddress(address string) string {
+	address = strings.TrimSpace(address)
+	if address == "" {
+		return ""
+	}
+
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return strings.ToLower(address)
+	}
+
+	if portNum, err := strconv.Atoi(port); err == nil {
+		return strings.ToLower(host) + ":" + strconv.Itoa(portNum)
+	}
+	return strings.ToLower(host) + ":" + strings.ToLower(port)
+}
+
+func UpstreamAddressExists(list []UpstreamServer, address string, excludeID int64) bool {
+	normalized := NormalizeUpstreamAddress(address)
+	if normalized == "" {
+		return false
+	}
+	for _, existing := range list {
+		if existing.ID == excludeID {
+			continue
+		}
+		if NormalizeUpstreamAddress(existing.Address) == normalized {
+			return true
+		}
+	}
+	return false
 }
 
 func (store *upstreamServerStore) ListByServer(ctx context.Context, serverID int64) ([]UpstreamServer, error) {
