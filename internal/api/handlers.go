@@ -3253,6 +3253,17 @@ type cacheRuleBatchPayload struct {
 	IDs []int64 `json:"ids"`
 }
 
+type clearUrlCachePayload struct {
+	MatchType    string `json:"matchType"`
+	MatchContent string `json:"matchContent"`
+}
+
+type l7ClearUrlCachePayload struct {
+	ServerID     int64  `json:"serverId"`
+	MatchType    string `json:"match_type"`
+	MatchContent string `json:"match_content"`
+}
+
 type serverBlacklistPayload struct {
 	ServerID    int64  `json:"serverId"`
 	IPAddress   string `json:"ipAddress"`
@@ -4394,6 +4405,128 @@ func callL7UpdateCacheRules(ctx context.Context, servers store.ServerStore, serv
 		return fmt.Errorf("load cache rules: %w", err)
 	}
 	return postL7CacheRules(ctx, servers, serverID, cacheRulesToL7Payload(list))
+}
+
+type l7CacheActionPayload struct {
+	ServerID int64 `json:"serverId"`
+}
+
+func postL7CacheClear(ctx context.Context, servers store.ServerStore, serverID int64, endpoint string) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+	if strings.TrimSpace(endpoint) == "" {
+		return fmt.Errorf("invalid l7 cache endpoint")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	payload := l7CacheActionPayload{ServerID: serverID}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 %s payload: %w", endpoint, err)
+	}
+
+	l7URL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/" + endpoint
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7URL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build %s request: %w", endpoint, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("%s request failed: %w", endpoint, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("%s returned status %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
+func normalizeClearUrlCacheMatchType(matchType string) (string, string) {
+	switch strings.ToLower(strings.TrimSpace(matchType)) {
+	case "prefix", "prefix_match", "prefix match":
+		return "prefix_match", ""
+	case "exact", "exact_match", "exact match":
+		return "exact_match", ""
+	case "advanced", "advanced_match", "advanced match":
+		return "advanced_match", ""
+	default:
+		return "", "match type must be prefix, exact, or advanced"
+	}
+}
+
+func validateClearUrlCacheContent(matchType, content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return "match content is required"
+	}
+
+	lower := strings.ToLower(trimmed)
+	switch matchType {
+	case "prefix_match":
+		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+			return "match content must start with http:// or https://"
+		}
+		if !strings.HasSuffix(trimmed, "/") {
+			return "prefix match content must end with /"
+		}
+	case "exact_match":
+		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+			return "match content must start with http:// or https://"
+		}
+	}
+
+	return ""
+}
+
+func postL7ClearUrlCache(ctx context.Context, servers store.ServerStore, serverID int64, matchType, matchContent string) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	payload := l7ClearUrlCachePayload{
+		ServerID:     serverID,
+		MatchType:    matchType,
+		MatchContent: matchContent,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7_clear_url_cache payload: %w", err)
+	}
+
+	l7URL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_clear_url_cache"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7URL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_clear_url_cache request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_clear_url_cache request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_clear_url_cache returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
 }
 
 func cacheRulePayloadToInput(payload cacheRulePayload) (store.CacheRuleInput, string) {
@@ -6328,6 +6461,49 @@ func serverDetailHandler(
 			default:
 				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			}
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/cache-rules/clear-url-cache") && r.Method == http.MethodPost {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/cache-rules/clear-url-cache")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			var payload clearUrlCachePayload
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			matchType, validationErr := normalizeClearUrlCacheMatchType(payload.MatchType)
+			if validationErr != "" {
+				writeError(w, http.StatusBadRequest, validationErr)
+				return
+			}
+			matchContent := strings.TrimSpace(payload.MatchContent)
+			if validationErr := validateClearUrlCacheContent(matchType, matchContent); validationErr != "" {
+				writeError(w, http.StatusBadRequest, validationErr)
+				return
+			}
+			if err := postL7ClearUrlCache(r.Context(), servers, serverID, matchType, matchContent); err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/cache-rules/clear-cache") && r.Method == http.MethodPost {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/cache-rules/clear-cache")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if err := postL7CacheClear(r.Context(), servers, serverID, "l7_clear_cache"); err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
