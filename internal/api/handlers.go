@@ -288,6 +288,7 @@ func registerRoutes(
 	wafUserAgent store.WafUserAgentStore,
 	upstreamServers store.UpstreamServerStore,
 	listeningPorts store.ListeningPortStore,
+	cacheRules store.CacheRuleStore,
 	blacklist store.BlacklistStore,
 ) {
 	mux.HandleFunc("/health", healthHandler)
@@ -394,7 +395,7 @@ func registerRoutes(
 	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
-	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts))
+	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -3235,6 +3236,23 @@ type listeningPortBatchPayload struct {
 	IDs []int64 `json:"ids"`
 }
 
+type cacheRulePayload struct {
+	RuleName         string `json:"ruleName"`
+	RuleType         string `json:"ruleType"`
+	CachingTime      int    `json:"cachingTime"`
+	URL              string `json:"url"`
+	FileTypes        string `json:"fileTypes"`
+	Priority         int    `json:"priority"`
+	CacheSlice       float64 `json:"cacheSlice"`
+	WithoutParameter string `json:"withoutParameter"`
+	CacheMode        string `json:"cacheMode"`
+	Status           string `json:"status"`
+}
+
+type cacheRuleBatchPayload struct {
+	IDs []int64 `json:"ids"`
+}
+
 type serverBlacklistPayload struct {
 	ServerID    int64  `json:"serverId"`
 	IPAddress   string `json:"ipAddress"`
@@ -4285,6 +4303,175 @@ func callL7UpdateListeningPorts(ctx context.Context, servers store.ServerStore, 
 	return postL7ListeningPorts(ctx, servers, serverID, listeningPortsToL7Payload(list))
 }
 
+// l7CacheRulesUpdatePayload is sent to api_parser's
+// /API/L7/l7_update_cacherules endpoint when cache rules change.
+type l7CacheRulesUpdatePayload struct {
+	ServerID   int64                `json:"serverId"`
+	CacheRules []cacheRulePayloadL7 `json:"cacherules"`
+}
+
+// cacheRulePayloadL7 is the per-rule shape expected by api_parser.
+type cacheRulePayloadL7 struct {
+	ID               int64  `json:"id"`
+	ServerID         int64  `json:"serverId"`
+	RuleName         string `json:"rule_name"`
+	RuleType         string `json:"rule_type"`
+	CachingTime      int    `json:"caching_time"`
+	URL              string `json:"url"`
+	FileTypes        string `json:"file_types"`
+	Priority         int    `json:"priority"`
+	CacheSlice       float64 `json:"cache_slice"`
+	WithoutParameter string `json:"without_parameter"`
+	CacheMode        string `json:"cache_mode"`
+	Status           string `json:"status"`
+}
+
+func cacheRulesToL7Payload(list []store.CacheRule) []cacheRulePayloadL7 {
+	rules := make([]cacheRulePayloadL7, 0, len(list))
+	for _, rule := range list {
+		rules = append(rules, cacheRulePayloadL7{
+			ID:               rule.ID,
+			ServerID:         rule.ServerID,
+			RuleName:         strings.TrimSpace(rule.RuleName),
+			RuleType:         strings.TrimSpace(rule.RuleType),
+			CachingTime:      rule.CachingTime,
+			URL:              strings.TrimSpace(rule.URL),
+			FileTypes:        strings.TrimSpace(rule.FileTypes),
+			Priority:         rule.Priority,
+			CacheSlice:       rule.CacheSlice,
+			WithoutParameter: strings.TrimSpace(rule.WithoutParameter),
+			CacheMode:        strings.TrimSpace(rule.CacheMode),
+			Status:           strings.TrimSpace(rule.Status),
+		})
+	}
+	return rules
+}
+
+func postL7CacheRules(ctx context.Context, servers store.ServerStore, serverID int64, rules []cacheRulePayloadL7) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	payload := l7CacheRulesUpdatePayload{
+		ServerID:   serverID,
+		CacheRules: rules,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 cacherules payload: %w", err)
+	}
+
+	l7CacheRulesUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_cacherules"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7CacheRulesUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_cacherules request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_cacherules request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_cacherules returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
+func callL7UpdateCacheRules(ctx context.Context, servers store.ServerStore, serverID int64, cacheRules store.CacheRuleStore) error {
+	list, err := cacheRules.ListByServer(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load cache rules: %w", err)
+	}
+	return postL7CacheRules(ctx, servers, serverID, cacheRulesToL7Payload(list))
+}
+
+func cacheRulePayloadToInput(payload cacheRulePayload) (store.CacheRuleInput, string) {
+	ruleName := store.NormalizeCacheRuleName(payload.RuleName)
+	if ruleName == "" {
+		return store.CacheRuleInput{}, "rule name is required"
+	}
+
+	ruleType := strings.ToLower(strings.TrimSpace(payload.RuleType))
+	if ruleType == "" {
+		ruleType = "file"
+	}
+	if ruleType != "file" && ruleType != "url" {
+		return store.CacheRuleInput{}, "rule type must be file or url"
+	}
+
+	cachingTime := payload.CachingTime
+	if cachingTime < 0 {
+		cachingTime = 0
+	}
+
+	url := strings.TrimSpace(payload.URL)
+	fileTypes := strings.TrimSpace(payload.FileTypes)
+	if ruleType == "file" && fileTypes == "" {
+		return store.CacheRuleInput{}, "file types are required for file rules"
+	}
+	if ruleType == "url" && url == "" {
+		return store.CacheRuleInput{}, "url is required for url rules"
+	}
+
+	priority := payload.Priority
+	if priority < 0 {
+		priority = 0
+	}
+
+	cacheSlice := payload.CacheSlice
+	if cacheSlice < 0 {
+		cacheSlice = 0
+	}
+
+	withoutParameter := strings.ToLower(strings.TrimSpace(payload.WithoutParameter))
+	if withoutParameter == "" {
+		withoutParameter = "yes"
+	}
+	if withoutParameter != "yes" && withoutParameter != "no" {
+		return store.CacheRuleInput{}, "without parameter must be yes or no"
+	}
+
+	cacheMode := strings.ToLower(strings.TrimSpace(payload.CacheMode))
+	if cacheMode == "" {
+		cacheMode = "origin"
+	}
+	if cacheMode != "origin" && cacheMode != "force" {
+		return store.CacheRuleInput{}, "cache mode must be origin or force"
+	}
+
+	status := strings.ToUpper(strings.TrimSpace(payload.Status))
+	if status == "" {
+		status = "ENABLE"
+	}
+	if status != "ENABLE" && status != "DISABLE" {
+		return store.CacheRuleInput{}, "status must be ENABLE or DISABLE"
+	}
+
+	return store.CacheRuleInput{
+		RuleName:         ruleName,
+		RuleType:         ruleType,
+		CachingTime:      cachingTime,
+		URL:              url,
+		FileTypes:        fileTypes,
+		Priority:         priority,
+		CacheSlice:       cacheSlice,
+		WithoutParameter: withoutParameter,
+		CacheMode:        cacheMode,
+		Status:           status,
+	}, ""
+}
+
 func serverDetailHandler(
 	cfg config.Config,
 	agentClient *AgentClient,
@@ -4303,6 +4490,7 @@ func serverDetailHandler(
 	wafUserAgent store.WafUserAgentStore,
 	upstreamServers store.UpstreamServerStore,
 	listeningPorts store.ListeningPortStore,
+	cacheRules store.CacheRuleStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/host-metrics") {
@@ -6143,6 +6331,194 @@ func serverDetailHandler(
 			return
 		}
 
+		if strings.Contains(r.URL.Path, "/cache-rules") {
+			serverID, ruleID, isBatch, ok := parseCacheRulesPath(r.URL.Path)
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+
+			switch r.Method {
+			case http.MethodGet:
+				if ruleID != 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := cacheRules.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load cache rules")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				if isBatch {
+					var payload cacheRuleBatchPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+					list, err := cacheRules.ListByServer(r.Context(), serverID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to load cache rules")
+						return
+					}
+					deleteIDs := make(map[int64]struct{}, len(payload.IDs))
+					for _, id := range payload.IDs {
+						deleteIDs[id] = struct{}{}
+					}
+					remaining := make([]store.CacheRule, 0, len(list))
+					for _, rule := range list {
+						if _, ok := deleteIDs[rule.ID]; ok {
+							continue
+						}
+						remaining = append(remaining, rule)
+					}
+					if err := postL7CacheRules(r.Context(), servers, serverID, cacheRulesToL7Payload(remaining)); err != nil {
+						writeError(w, http.StatusBadGateway, err.Error())
+						return
+					}
+					if err := cacheRules.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to delete cache rules")
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				var payload cacheRulePayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				input, validationErr := cacheRulePayloadToInput(payload)
+				if validationErr != "" {
+					writeError(w, http.StatusBadRequest, validationErr)
+					return
+				}
+				existingList, err := cacheRules.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load cache rules")
+					return
+				}
+				if store.CacheRuleNameExists(existingList, input.RuleName, 0) {
+					writeError(w, http.StatusBadRequest, "cache rule "+input.RuleName+" already exists")
+					return
+				}
+				created, err := cacheRules.Create(r.Context(), serverID, input)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create cache rule")
+					return
+				}
+				if err := callL7UpdateCacheRules(r.Context(), servers, serverID, cacheRules); err != nil {
+					_ = cacheRules.Delete(r.Context(), serverID, created.ID)
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodPut:
+				if ruleID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				var payload cacheRulePayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				input, validationErr := cacheRulePayloadToInput(payload)
+				if validationErr != "" {
+					writeError(w, http.StatusBadRequest, validationErr)
+					return
+				}
+				existingList, err := cacheRules.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load cache rules")
+					return
+				}
+				var previous store.CacheRule
+				found := false
+				for _, rule := range existingList {
+					if rule.ID == ruleID {
+						previous = rule
+						found = true
+						break
+					}
+				}
+				if !found {
+					writeError(w, http.StatusNotFound, "cache rule not found")
+					return
+				}
+				if store.CacheRuleNameExists(existingList, input.RuleName, ruleID) {
+					writeError(w, http.StatusBadRequest, "cache rule "+input.RuleName+" already exists")
+					return
+				}
+				updated, err := cacheRules.Update(r.Context(), serverID, ruleID, input)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "cache rule not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to update cache rule")
+					return
+				}
+				if err := callL7UpdateCacheRules(r.Context(), servers, serverID, cacheRules); err != nil {
+					_, _ = cacheRules.Update(r.Context(), serverID, ruleID, store.CacheRuleInput{
+						RuleName:         previous.RuleName,
+						RuleType:         previous.RuleType,
+						CachingTime:      previous.CachingTime,
+						URL:              previous.URL,
+						FileTypes:        previous.FileTypes,
+						Priority:         previous.Priority,
+						CacheSlice:       previous.CacheSlice,
+						WithoutParameter: previous.WithoutParameter,
+						CacheMode:        previous.CacheMode,
+						Status:           previous.Status,
+					})
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				writeJSON(w, http.StatusOK, updated)
+			case http.MethodDelete:
+				if ruleID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := cacheRules.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load cache rules")
+					return
+				}
+				remaining := make([]store.CacheRule, 0, len(list))
+				found := false
+				for _, rule := range list {
+					if rule.ID == ruleID {
+						found = true
+						continue
+					}
+					remaining = append(remaining, rule)
+				}
+				if !found {
+					writeError(w, http.StatusNotFound, "cache rule not found")
+					return
+				}
+				if err := postL7CacheRules(r.Context(), servers, serverID, cacheRulesToL7Payload(remaining)); err != nil {
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				if err := cacheRules.Delete(r.Context(), serverID, ruleID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete cache rule")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
 		if strings.Contains(r.URL.Path, "/upstream-servers") {
 			serverID, upstreamID, isBatch, ok := parseUpstreamPath(r.URL.Path)
 			if !ok {
@@ -6714,6 +7090,35 @@ func parseListeningPortsPath(path string) (serverID int64, portID int64, isBatch
 			return 0, 0, false, false
 		}
 		return serverID, portID, false, true
+	}
+	return 0, 0, false, false
+}
+
+func parseCacheRulesPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/servers/")
+	parts := strings.Split(trimmed, "/")
+	if len(parts) < 2 {
+		return 0, 0, false, false
+	}
+	if parts[1] != "cache-rules" {
+		return 0, 0, false, false
+	}
+	serverID, ok = parsePositiveInt(parts[0])
+	if !ok {
+		return 0, 0, false, false
+	}
+	if len(parts) == 2 {
+		return serverID, 0, false, true
+	}
+	if len(parts) == 3 && parts[2] == "batch-delete" {
+		return serverID, 0, true, true
+	}
+	if len(parts) == 3 {
+		ruleID, ok = parsePositiveInt(parts[2])
+		if !ok {
+			return 0, 0, false, false
+		}
+		return serverID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
