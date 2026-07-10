@@ -1,0 +1,715 @@
+openapi: 3.0.3
+info:
+  title: Dorian Back-End API
+  description: |
+    REST API for the Dorian dashboard. Manages protected servers, WAF/L4 rules,
+    traffic settings, analytics, and agent communication.
+
+    Most endpoints require a bearer token obtained from `POST /auth/login`.
+    Traffic mutations (cache rules, upstream servers, listening ports) sync to
+    the edge L7 agent (angelos) on port 5000; failures return HTTP 502.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Health
+  - name: Auth
+  - name: Cache Rules
+  - name: Upstream Servers
+  - name: Listening Ports
+
+security:
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate and obtain API token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /servers/{serverId}/cache-rules:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    get:
+      tags: [Cache Rules]
+      summary: List cache rules for a server
+      responses:
+        "200":
+          description: Cache rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CacheRule"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [Cache Rules]
+      summary: Create a cache rule
+      description: |
+        Creates a rule in the database and syncs all rules to the L7 agent via
+        `POST /API/L7/l7_update_cacherules`. Rolls back the insert if L7 sync fails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CacheRuleInput"
+      responses:
+        "201":
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CacheRule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/cache-rules/{ruleId}:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+      - $ref: "#/components/parameters/RuleId"
+    put:
+      tags: [Cache Rules]
+      summary: Update a cache rule
+      description: Updates the rule and syncs to L7. Restores previous values if L7 sync fails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CacheRuleInput"
+      responses:
+        "200":
+          description: Rule updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CacheRule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+    delete:
+      tags: [Cache Rules]
+      summary: Delete a cache rule
+      description: Syncs remaining rules to L7 before deleting from the database.
+      responses:
+        "204":
+          description: Rule deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/cache-rules/batch-delete:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    post:
+      tags: [Cache Rules]
+      summary: Delete multiple cache rules
+      description: Syncs remaining rules to L7 before batch delete.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchDeleteRequest"
+      responses:
+        "204":
+          description: Rules deleted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/cache-rules/clear-cache:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    post:
+      tags: [Cache Rules]
+      summary: Clear all file cache on the edge
+      description: 'Proxies to POST /API/L7/l7_clear_cache with body { "serverId": <id> }.'
+      responses:
+        "204":
+          description: File cache cleared
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/cache-rules/clear-url-cache:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    post:
+      tags: [Cache Rules]
+      summary: Clear URL cache on the edge
+      description: |
+        Proxies to `POST /API/L7/l7_clear_url_cache`.
+
+        Dorian accepts `matchType` as `prefix`, `exact`, or `advanced` (also accepts
+        `prefix_match`, `exact_match`, `advanced_match`). The L7 agent receives
+        numeric `match_type`: `1` = prefix, `2` = exact, `3` = advanced.
+
+        **Prefix** (`1`): `matchContent` must start with `http://` or `https://` and end with `/`.
+
+        **Exact** (`2`): `matchContent` must start with `http://` or `https://`.
+
+        **Advanced** (`3`): any non-empty string (e.g. `*`, `www.example.com/*/api/*`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClearUrlCacheRequest"
+            examples:
+              prefix:
+                summary: Prefix match
+                value:
+                  matchType: prefix
+                  matchContent: https://www.cdnray.com/
+              exact:
+                summary: Exact match
+                value:
+                  matchType: exact
+                  matchContent: https://www.cdnray.com/index.html
+              advanced:
+                summary: Advanced wildcard match
+                value:
+                  matchType: advanced
+                  matchContent: www.cdnray.com/*/api/*
+      responses:
+        "204":
+          description: URL cache cleared
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/upstream-servers:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    get:
+      tags: [Upstream Servers]
+      summary: List upstream servers
+      responses:
+        "200":
+          description: Upstream servers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UpstreamServer"
+    post:
+      tags: [Upstream Servers]
+      summary: Create an upstream server
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpstreamServerInput"
+      responses:
+        "201":
+          description: Upstream server created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamServer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/upstream-servers/{upstreamId}:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+      - name: upstreamId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    put:
+      tags: [Upstream Servers]
+      summary: Update an upstream server
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpstreamServerInput"
+      responses:
+        "200":
+          description: Upstream server updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamServer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+    delete:
+      tags: [Upstream Servers]
+      summary: Delete an upstream server
+      responses:
+        "204":
+          description: Upstream server deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/upstream-servers/batch-delete:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    post:
+      tags: [Upstream Servers]
+      summary: Delete multiple upstream servers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchDeleteRequest"
+      responses:
+        "204":
+          description: Upstream servers deleted
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/listening-ports:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    get:
+      tags: [Listening Ports]
+      summary: List listening ports
+      responses:
+        "200":
+          description: Listening ports
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ListeningPort"
+    post:
+      tags: [Listening Ports]
+      summary: Create a listening port
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListeningPortInput"
+      responses:
+        "201":
+          description: Listening port created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListeningPort"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/listening-ports/{portId}:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+      - name: portId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    put:
+      tags: [Listening Ports]
+      summary: Update a listening port
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ListeningPortInput"
+      responses:
+        "200":
+          description: Listening port updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListeningPort"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+    delete:
+      tags: [Listening Ports]
+      summary: Delete a listening port
+      responses:
+        "204":
+          description: Listening port deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/listening-ports/batch-delete:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    post:
+      tags: [Listening Ports]
+      summary: Delete multiple listening ports
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchDeleteRequest"
+      responses:
+        "204":
+          description: Listening ports deleted
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/listening-ports/bound:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    get:
+      tags: [Listening Ports]
+      summary: List bound ports from the edge agent
+      responses:
+        "200":
+          description: Bound ports reported by the L7 agent
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ServerId:
+      name: serverId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+      example: 1033
+    RuleId:
+      name: ruleId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Authentication required or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Account blocked or pending approval
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    BadGateway:
+      description: L7 agent sync failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: Bad Gateway
+            message: l7_clear_url_cache returned status 400
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        user:
+          type: object
+          properties:
+            id:
+              type: integer
+              format: int64
+            email:
+              type: string
+            role:
+              type: string
+            name:
+              type: string
+
+    BatchDeleteRequest:
+      type: object
+      required: [ids]
+      properties:
+        ids:
+          type: array
+          items:
+            type: integer
+            format: int64
+
+    CacheRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        ruleName:
+          type: string
+        ruleType:
+          type: string
+          enum: [file, url]
+        cachingTime:
+          type: integer
+          description: Cache TTL in seconds
+        url:
+          type: string
+          description: Required when ruleType is url
+        fileTypes:
+          type: string
+          description: Comma-separated extensions; required when ruleType is file
+          example: jpg, png, mp4
+        priority:
+          type: integer
+        cacheSlice:
+          type: number
+          format: double
+          description: Cache slice size in MB
+        withoutParameter:
+          type: string
+          enum: [yes, no]
+        cacheMode:
+          type: string
+          enum: [origin, force]
+        status:
+          type: string
+          enum: [ENABLE, DISABLE]
+
+    CacheRuleInput:
+      type: object
+      required: [ruleName]
+      properties:
+        ruleName:
+          type: string
+        ruleType:
+          type: string
+          enum: [file, url]
+          default: file
+        cachingTime:
+          type: integer
+          minimum: 0
+          default: 0
+        url:
+          type: string
+        fileTypes:
+          type: string
+        priority:
+          type: integer
+          minimum: 0
+          default: 0
+        cacheSlice:
+          type: number
+          format: double
+          minimum: 0
+          default: 0
+        withoutParameter:
+          type: string
+          enum: [yes, no]
+          default: yes
+        cacheMode:
+          type: string
+          enum: [origin, force]
+          default: origin
+        status:
+          type: string
+          enum: [ENABLE, DISABLE]
+          default: ENABLE
+
+    ClearUrlCacheRequest:
+      type: object
+      required: [matchType, matchContent]
+      properties:
+        matchType:
+          type: string
+          enum: [prefix, exact, advanced]
+          description: |
+            Match mode. Also accepts `prefix_match`, `exact_match`, `advanced_match`.
+        matchContent:
+          type: string
+          description: |
+            URL or pattern to clear. Validation depends on matchType.
+            Advanced mode accepts any non-empty string.
+
+    UpstreamServer:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        address:
+          type: string
+          description: IP:port upstream address
+        description:
+          type: string
+        status:
+          type: string
+
+    UpstreamServerInput:
+      type: object
+      required: [address]
+      properties:
+        address:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+
+    ListeningPort:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        port:
+          type: integer
+        protocol:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+
+    ListeningPortInput:
+      type: object
+      required: [port, protocol]
+      properties:
+        port:
+          type: integer
+        protocol:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
