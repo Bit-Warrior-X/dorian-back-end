@@ -3260,7 +3260,7 @@ type clearUrlCachePayload struct {
 
 type l7ClearUrlCachePayload struct {
 	ServerID     int64  `json:"serverId"`
-	MatchType    string `json:"match_type"`
+	MatchType    int    `json:"match_type"`
 	MatchContent string `json:"match_content"`
 }
 
@@ -4483,9 +4483,26 @@ func validateClearUrlCacheContent(matchType, content string) string {
 		if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 			return "match content must start with http:// or https://"
 		}
+	case "advanced_match":
+		// Any non-empty string is accepted for advanced match.
 	}
 
 	return ""
+}
+
+// clearUrlCacheMatchTypeToL7 maps normalized match types to the integer values
+// expected by api_parser's l7_clear_url_cache endpoint (CDNRAY: 1=prefix, 2=exact, 3=advanced).
+func clearUrlCacheMatchTypeToL7(matchType string) (int, string) {
+	switch matchType {
+	case "prefix_match":
+		return 1, ""
+	case "exact_match":
+		return 2, ""
+	case "advanced_match":
+		return 3, ""
+	default:
+		return 0, "match type must be prefix, exact, or advanced"
+	}
 }
 
 func postL7ClearUrlCache(ctx context.Context, servers store.ServerStore, serverID int64, matchType, matchContent string) error {
@@ -4498,9 +4515,14 @@ func postL7ClearUrlCache(ctx context.Context, servers store.ServerStore, serverI
 		return fmt.Errorf("load server view: %w", err)
 	}
 
+	l7MatchType, validationErr := clearUrlCacheMatchTypeToL7(matchType)
+	if validationErr != "" {
+		return fmt.Errorf(validationErr)
+	}
+
 	payload := l7ClearUrlCachePayload{
 		ServerID:     serverID,
-		MatchType:    matchType,
+		MatchType:    l7MatchType,
 		MatchContent: matchContent,
 	}
 	body, err := json.Marshal(payload)
