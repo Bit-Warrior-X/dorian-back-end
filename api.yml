@@ -6,8 +6,8 @@ info:
     traffic settings, analytics, and agent communication.
 
     Most endpoints require a bearer token obtained from `POST /auth/login`.
-    Traffic mutations (cache rules, upstream servers, listening ports) sync to
-    the edge L7 agent (angelos) on port 5000; failures return HTTP 502.
+    Traffic mutations (cache rules, upstream servers, listening ports, compress)
+    sync to the edge L7 agent (angelos) on port 5000; failures return HTTP 502.
   version: 1.0.0
 
 servers:
@@ -20,6 +20,7 @@ tags:
   - name: Cache Rules
   - name: Upstream Servers
   - name: Listening Ports
+  - name: Compress
 
 security:
   - bearerAuth: []
@@ -447,6 +448,50 @@ paths:
                 items:
                   type: object
 
+  /servers/{serverId}/compress:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    get:
+      tags: [Compress]
+      summary: Get Gzip compress MIME settings
+      description: |
+        Returns per-server Gzip compress settings by MIME category.
+        Creates default settings (CSS/HTML/JS enabled) when none exist yet.
+      responses:
+        "200":
+          description: Compress settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompressSettings"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Compress]
+      summary: Update Gzip compress MIME settings
+      description: |
+        Updates compress settings and syncs to the edge via
+        `POST /API/L7/l7_update_compress`. Rolls back the DB update if L7 sync fails.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompressSettingsInput"
+      responses:
+        "200":
+          description: Compress settings updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompressSettings"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -713,3 +758,41 @@ components:
           type: string
         status:
           type: string
+
+    CompressSettings:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        css:
+          type: boolean
+        html:
+          type: boolean
+        js:
+          type: boolean
+        audio:
+          type: boolean
+        font:
+          type: boolean
+        applications:
+          type: boolean
+
+    CompressSettingsInput:
+      type: object
+      properties:
+        css:
+          type: boolean
+        html:
+          type: boolean
+        js:
+          type: boolean
+        audio:
+          type: boolean
+        font:
+          type: boolean
+        applications:
+          type: boolean

@@ -289,6 +289,7 @@ func registerRoutes(
 	upstreamServers store.UpstreamServerStore,
 	listeningPorts store.ListeningPortStore,
 	cacheRules store.CacheRuleStore,
+	compressSettings store.CompressStore,
 	blacklist store.BlacklistStore,
 ) {
 	mux.HandleFunc("/health", healthHandler)
@@ -395,7 +396,7 @@ func registerRoutes(
 	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
 	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
-	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules))
+	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 }
@@ -4314,6 +4315,83 @@ func callL7UpdateListeningPorts(ctx context.Context, servers store.ServerStore, 
 	return postL7ListeningPorts(ctx, servers, serverID, listeningPortsToL7Payload(list))
 }
 
+// l7CompressUpdatePayload is sent to api_parser's
+// /API/L7/l7_update_compress endpoint when gzip MIME settings change.
+type l7CompressUpdatePayload struct {
+	ServerID int64                 `json:"serverId"`
+	Compress compressPayloadL7     `json:"compress"`
+}
+
+// compressPayloadL7 is the gzip MIME category shape expected by api_parser.
+type compressPayloadL7 struct {
+	CSS          bool `json:"css"`
+	HTML         bool `json:"html"`
+	JS           bool `json:"js"`
+	Audio        bool `json:"audio"`
+	Font         bool `json:"font"`
+	Applications bool `json:"applications"`
+}
+
+func compressSettingsToL7Payload(settings store.CompressSettings) compressPayloadL7 {
+	return compressPayloadL7{
+		CSS:          settings.CSS,
+		HTML:         settings.HTML,
+		JS:           settings.JS,
+		Audio:        settings.Audio,
+		Font:         settings.Font,
+		Applications: settings.Applications,
+	}
+}
+
+func postL7Compress(ctx context.Context, servers store.ServerStore, serverID int64, settings compressPayloadL7) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+
+	payload := l7CompressUpdatePayload{
+		ServerID: serverID,
+		Compress: settings,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode l7 compress payload: %w", err)
+	}
+
+	l7CompressUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_compress"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7CompressUpdateURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7_update_compress request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7_update_compress request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7_update_compress returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+
+	return nil
+}
+
+func callL7UpdateCompress(ctx context.Context, servers store.ServerStore, serverID int64, compressSettings store.CompressStore) error {
+	settings, err := compressSettings.GetOrCreateByServerID(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load compress settings: %w", err)
+	}
+	return postL7Compress(ctx, servers, serverID, compressSettingsToL7Payload(settings))
+}
+
 // l7CacheRulesUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_cacherules endpoint when cache rules change.
 type l7CacheRulesUpdatePayload struct {
@@ -4646,6 +4724,7 @@ func serverDetailHandler(
 	upstreamServers store.UpstreamServerStore,
 	listeningPorts store.ListeningPortStore,
 	cacheRules store.CacheRuleStore,
+	compressSettings store.CompressStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/host-metrics") {
@@ -6289,6 +6368,82 @@ func serverDetailHandler(
 					return
 				}
 				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/compress") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/compress")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			switch r.Method {
+			case http.MethodGet:
+				settings, err := compressSettings.GetOrCreateByServerID(r.Context(), serverID)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load compress settings")
+					return
+				}
+				writeJSON(w, http.StatusOK, settings)
+			case http.MethodPut:
+				var payload store.CompressSettings
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				input := store.CompressSettingsInput{
+					CSS:          payload.CSS,
+					HTML:         payload.HTML,
+					JS:           payload.JS,
+					Audio:        payload.Audio,
+					Font:         payload.Font,
+					Applications: payload.Applications,
+				}
+				previous, err := compressSettings.GetOrCreateByServerID(r.Context(), serverID)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load compress settings")
+					return
+				}
+				if err := postL7Compress(r.Context(), servers, serverID, compressSettingsToL7Payload(store.CompressSettings{
+					CSS:          input.CSS,
+					HTML:         input.HTML,
+					JS:           input.JS,
+					Audio:        input.Audio,
+					Font:         input.Font,
+					Applications: input.Applications,
+				})); err != nil {
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				updated, err := compressSettings.UpsertByServerID(r.Context(), serverID, input)
+				if err != nil {
+					_, _ = compressSettings.UpsertByServerID(r.Context(), serverID, store.CompressSettingsInput{
+						CSS:          previous.CSS,
+						HTML:         previous.HTML,
+						JS:           previous.JS,
+						Audio:        previous.Audio,
+						Font:         previous.Font,
+						Applications: previous.Applications,
+					})
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to update compress settings")
+					return
+				}
+				writeJSON(w, http.StatusOK, updated)
 			default:
 				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			}
