@@ -8,7 +8,7 @@ import (
 
 type WafResponseRule struct {
 	ID            int64  `json:"id"`
-	ServerID      int64  `json:"serverId"`
+	WafRuleID      int64  `json:"wafRuleId"`
 	URL           string `json:"url"`
 	ResponseCode  string `json:"responseCode"`
 	TimeSeconds   int    `json:"time"`
@@ -27,11 +27,11 @@ type WafResponseInput struct {
 }
 
 type WafResponseStore interface {
-	ListByServer(ctx context.Context, serverID int64) ([]WafResponseRule, error)
-	Create(ctx context.Context, serverID int64, input WafResponseInput) (WafResponseRule, error)
-	Update(ctx context.Context, serverID, ruleID int64, input WafResponseInput) (WafResponseRule, error)
-	Delete(ctx context.Context, serverID, ruleID int64) error
-	DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error
+	ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafResponseRule, error)
+	Create(ctx context.Context, wafRuleID int64, input WafResponseInput) (WafResponseRule, error)
+	Update(ctx context.Context, wafRuleID, ruleID int64, input WafResponseInput) (WafResponseRule, error)
+	Delete(ctx context.Context, wafRuleID, ruleID int64) error
+	DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error
 }
 
 type wafResponseStore struct {
@@ -42,12 +42,12 @@ func NewWafResponseStore(db *sql.DB) WafResponseStore {
 	return &wafResponseStore{db: db}
 }
 
-func (store *wafResponseStore) ListByServer(ctx context.Context, serverID int64) ([]WafResponseRule, error) {
+func (store *wafResponseStore) ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafResponseRule, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, server_id, url, response_code, time, response_count, behavior, status
+		SELECT id, waf_rule_id, url, response_code, time, response_count, behavior, status
 		FROM waf_responsefreq
-		WHERE server_id = ?
-		ORDER BY id DESC`, serverID)
+		WHERE waf_rule_id = ?
+		ORDER BY id DESC`, wafRuleID)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +60,7 @@ func (store *wafResponseStore) ListByServer(ctx context.Context, serverID int64)
 		var status sql.NullString
 		if err := rows.Scan(
 			&rule.ID,
-			&rule.ServerID,
+			&rule.WafRuleID,
 			&rule.URL,
 			&rule.ResponseCode,
 			&rule.TimeSeconds,
@@ -80,11 +80,11 @@ func (store *wafResponseStore) ListByServer(ctx context.Context, serverID int64)
 	return rules, nil
 }
 
-func (store *wafResponseStore) Create(ctx context.Context, serverID int64, input WafResponseInput) (WafResponseRule, error) {
+func (store *wafResponseStore) Create(ctx context.Context, wafRuleID int64, input WafResponseInput) (WafResponseRule, error) {
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO waf_responsefreq (server_id, url, response_code, time, response_count, behavior, status)
+		INSERT INTO waf_responsefreq (waf_rule_id, url, response_code, time, response_count, behavior, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		serverID,
+		wafRuleID,
 		input.URL,
 		input.ResponseCode,
 		input.TimeSeconds,
@@ -106,7 +106,7 @@ func (store *wafResponseStore) Create(ctx context.Context, serverID int64, input
 
 	return WafResponseRule{
 		ID:            id,
-		ServerID:      serverID,
+		WafRuleID:      wafRuleID,
 		URL:           input.URL,
 		ResponseCode:  input.ResponseCode,
 		TimeSeconds:   input.TimeSeconds,
@@ -116,11 +116,11 @@ func (store *wafResponseStore) Create(ctx context.Context, serverID int64, input
 	}, nil
 }
 
-func (store *wafResponseStore) Update(ctx context.Context, serverID, ruleID int64, input WafResponseInput) (WafResponseRule, error) {
+func (store *wafResponseStore) Update(ctx context.Context, wafRuleID, ruleID int64, input WafResponseInput) (WafResponseRule, error) {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE waf_responsefreq
 		SET url = ?, response_code = ?, time = ?, response_count = ?, behavior = ?, status = ?
-		WHERE id = ? AND server_id = ?`,
+		WHERE id = ? AND waf_rule_id = ?`,
 		input.URL,
 		input.ResponseCode,
 		input.TimeSeconds,
@@ -128,7 +128,7 @@ func (store *wafResponseStore) Update(ctx context.Context, serverID, ruleID int6
 		input.Behavior,
 		nullableServerString(input.Status),
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -146,7 +146,7 @@ func (store *wafResponseStore) Update(ctx context.Context, serverID, ruleID int6
 
 	return WafResponseRule{
 		ID:            ruleID,
-		ServerID:      serverID,
+		WafRuleID:      wafRuleID,
 		URL:           input.URL,
 		ResponseCode:  input.ResponseCode,
 		TimeSeconds:   input.TimeSeconds,
@@ -156,16 +156,16 @@ func (store *wafResponseStore) Update(ctx context.Context, serverID, ruleID int6
 	}, nil
 }
 
-func (store *wafResponseStore) Delete(ctx context.Context, serverID, ruleID int64) error {
+func (store *wafResponseStore) Delete(ctx context.Context, wafRuleID, ruleID int64) error {
 	_, err := store.db.ExecContext(ctx, `
-		DELETE FROM waf_responsefreq WHERE id = ? AND server_id = ?`,
+		DELETE FROM waf_responsefreq WHERE id = ? AND waf_rule_id = ?`,
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	return err
 }
 
-func (store *wafResponseStore) DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error {
+func (store *wafResponseStore) DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error {
 	ids := uniqueInt64(ruleIDs)
 	if len(ids) == 0 {
 		return nil
@@ -177,9 +177,9 @@ func (store *wafResponseStore) DeleteBatch(ctx context.Context, serverID int64, 
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	args = append(args, serverID)
+	args = append(args, wafRuleID)
 
-	query := "DELETE FROM waf_responsefreq WHERE id IN (" + strings.Join(placeholders, ",") + ") AND server_id = ?"
+	query := "DELETE FROM waf_responsefreq WHERE id IN (" + strings.Join(placeholders, ",") + ") AND waf_rule_id = ?"
 	_, err := store.db.ExecContext(ctx, query, args...)
 	return err
 }

@@ -8,7 +8,7 @@ import (
 
 type WafSecondRule struct {
 	ID           int64  `json:"id"`
-	ServerID     int64  `json:"serverId"`
+	WafRuleID     int64  `json:"wafRuleId"`
 	URL          string `json:"url"`
 	RequestCount int    `json:"requestCount"`
 	Burst        int    `json:"burst"`
@@ -25,11 +25,11 @@ type WafSecondInput struct {
 }
 
 type WafSecondStore interface {
-	ListByServer(ctx context.Context, serverID int64) ([]WafSecondRule, error)
-	Create(ctx context.Context, serverID int64, input WafSecondInput) (WafSecondRule, error)
-	Update(ctx context.Context, serverID, ruleID int64, input WafSecondInput) (WafSecondRule, error)
-	Delete(ctx context.Context, serverID, ruleID int64) error
-	DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error
+	ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafSecondRule, error)
+	Create(ctx context.Context, wafRuleID int64, input WafSecondInput) (WafSecondRule, error)
+	Update(ctx context.Context, wafRuleID, ruleID int64, input WafSecondInput) (WafSecondRule, error)
+	Delete(ctx context.Context, wafRuleID, ruleID int64) error
+	DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error
 }
 
 type wafSecondStore struct {
@@ -40,12 +40,12 @@ func NewWafSecondStore(db *sql.DB) WafSecondStore {
 	return &wafSecondStore{db: db}
 }
 
-func (store *wafSecondStore) ListByServer(ctx context.Context, serverID int64) ([]WafSecondRule, error) {
+func (store *wafSecondStore) ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafSecondRule, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, server_id, url, request_count, burst, behavior, status
+		SELECT id, waf_rule_id, url, request_count, burst, behavior, status
 		FROM waf_secondfreqlimit
-		WHERE server_id = ?
-		ORDER BY id DESC`, serverID)
+		WHERE waf_rule_id = ?
+		ORDER BY id DESC`, wafRuleID)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +57,7 @@ func (store *wafSecondStore) ListByServer(ctx context.Context, serverID int64) (
 		var status sql.NullString
 		if err := rows.Scan(
 			&rule.ID,
-			&rule.ServerID,
+			&rule.WafRuleID,
 			&rule.URL,
 			&rule.RequestCount,
 			&rule.Burst,
@@ -75,11 +75,11 @@ func (store *wafSecondStore) ListByServer(ctx context.Context, serverID int64) (
 	return rules, nil
 }
 
-func (store *wafSecondStore) Create(ctx context.Context, serverID int64, input WafSecondInput) (WafSecondRule, error) {
+func (store *wafSecondStore) Create(ctx context.Context, wafRuleID int64, input WafSecondInput) (WafSecondRule, error) {
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO waf_secondfreqlimit (server_id, url, request_count, burst, behavior, status)
+		INSERT INTO waf_secondfreqlimit (waf_rule_id, url, request_count, burst, behavior, status)
 		VALUES (?, ?, ?, ?, ?, ?)`,
-		serverID,
+		wafRuleID,
 		input.URL,
 		input.RequestCount,
 		input.Burst,
@@ -100,7 +100,7 @@ func (store *wafSecondStore) Create(ctx context.Context, serverID int64, input W
 
 	return WafSecondRule{
 		ID:           id,
-		ServerID:     serverID,
+		WafRuleID:     wafRuleID,
 		URL:          input.URL,
 		RequestCount: input.RequestCount,
 		Burst:        input.Burst,
@@ -109,18 +109,18 @@ func (store *wafSecondStore) Create(ctx context.Context, serverID int64, input W
 	}, nil
 }
 
-func (store *wafSecondStore) Update(ctx context.Context, serverID, ruleID int64, input WafSecondInput) (WafSecondRule, error) {
+func (store *wafSecondStore) Update(ctx context.Context, wafRuleID, ruleID int64, input WafSecondInput) (WafSecondRule, error) {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE waf_secondfreqlimit
 		SET url = ?, request_count = ?, burst = ?, behavior = ?, status = ?
-		WHERE id = ? AND server_id = ?`,
+		WHERE id = ? AND waf_rule_id = ?`,
 		input.URL,
 		input.RequestCount,
 		input.Burst,
 		input.Behavior,
 		nullableServerString(input.Status),
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -138,7 +138,7 @@ func (store *wafSecondStore) Update(ctx context.Context, serverID, ruleID int64,
 
 	return WafSecondRule{
 		ID:           ruleID,
-		ServerID:     serverID,
+		WafRuleID:     wafRuleID,
 		URL:          input.URL,
 		RequestCount: input.RequestCount,
 		Burst:        input.Burst,
@@ -147,16 +147,16 @@ func (store *wafSecondStore) Update(ctx context.Context, serverID, ruleID int64,
 	}, nil
 }
 
-func (store *wafSecondStore) Delete(ctx context.Context, serverID, ruleID int64) error {
+func (store *wafSecondStore) Delete(ctx context.Context, wafRuleID, ruleID int64) error {
 	_, err := store.db.ExecContext(ctx, `
-		DELETE FROM waf_secondfreqlimit WHERE id = ? AND server_id = ?`,
+		DELETE FROM waf_secondfreqlimit WHERE id = ? AND waf_rule_id = ?`,
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	return err
 }
 
-func (store *wafSecondStore) DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error {
+func (store *wafSecondStore) DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error {
 	ids := uniqueInt64(ruleIDs)
 	if len(ids) == 0 {
 		return nil
@@ -168,9 +168,9 @@ func (store *wafSecondStore) DeleteBatch(ctx context.Context, serverID int64, ru
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	args = append(args, serverID)
+	args = append(args, wafRuleID)
 
-	query := "DELETE FROM waf_secondfreqlimit WHERE id IN (" + strings.Join(placeholders, ",") + ") AND server_id = ?"
+	query := "DELETE FROM waf_secondfreqlimit WHERE id IN (" + strings.Join(placeholders, ",") + ") AND waf_rule_id = ?"
 	_, err := store.db.ExecContext(ctx, query, args...)
 	return err
 }

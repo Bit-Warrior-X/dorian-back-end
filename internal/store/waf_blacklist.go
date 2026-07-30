@@ -8,7 +8,7 @@ import (
 
 type WafBlacklistRule struct {
 	ID          int64  `json:"id"`
-	ServerID    int64  `json:"serverId"`
+	WafRuleID    int64  `json:"wafRuleId"`
 	IPs         string `json:"ips"`
 	URL         string `json:"url"`
 	Method      string `json:"method"`
@@ -25,11 +25,11 @@ type WafBlacklistInput struct {
 }
 
 type WafBlacklistStore interface {
-	ListByServer(ctx context.Context, serverID int64) ([]WafBlacklistRule, error)
-	Create(ctx context.Context, serverID int64, input WafBlacklistInput) (WafBlacklistRule, error)
-	Update(ctx context.Context, serverID, ruleID int64, input WafBlacklistInput) (WafBlacklistRule, error)
-	Delete(ctx context.Context, serverID, ruleID int64) error
-	DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error
+	ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafBlacklistRule, error)
+	Create(ctx context.Context, wafRuleID int64, input WafBlacklistInput) (WafBlacklistRule, error)
+	Update(ctx context.Context, wafRuleID, ruleID int64, input WafBlacklistInput) (WafBlacklistRule, error)
+	Delete(ctx context.Context, wafRuleID, ruleID int64) error
+	DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error
 }
 
 type wafBlacklistStore struct {
@@ -40,12 +40,12 @@ func NewWafBlacklistStore(db *sql.DB) WafBlacklistStore {
 	return &wafBlacklistStore{db: db}
 }
 
-func (store *wafBlacklistStore) ListByServer(ctx context.Context, serverID int64) ([]WafBlacklistRule, error) {
+func (store *wafBlacklistStore) ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafBlacklistRule, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, server_id, black_ip_list, url, method, behavior, description
+		SELECT id, waf_rule_id, black_ip_list, url, method, behavior, description
 		FROM waf_blacklist
-		WHERE server_id = ?
-		ORDER BY id DESC`, serverID)
+		WHERE waf_rule_id = ?
+		ORDER BY id DESC`, wafRuleID)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +57,7 @@ func (store *wafBlacklistStore) ListByServer(ctx context.Context, serverID int64
 		var description sql.NullString
 		if err := rows.Scan(
 			&rule.ID,
-			&rule.ServerID,
+			&rule.WafRuleID,
 			&rule.IPs,
 			&rule.URL,
 			&rule.Method,
@@ -75,11 +75,11 @@ func (store *wafBlacklistStore) ListByServer(ctx context.Context, serverID int64
 	return rules, nil
 }
 
-func (store *wafBlacklistStore) Create(ctx context.Context, serverID int64, input WafBlacklistInput) (WafBlacklistRule, error) {
+func (store *wafBlacklistStore) Create(ctx context.Context, wafRuleID int64, input WafBlacklistInput) (WafBlacklistRule, error) {
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO waf_blacklist (server_id, black_ip_list, url, method, behavior, description)
+		INSERT INTO waf_blacklist (waf_rule_id, black_ip_list, url, method, behavior, description)
 		VALUES (?, ?, ?, ?, ?, ?)`,
-		serverID,
+		wafRuleID,
 		input.IPs,
 		input.URL,
 		input.Method,
@@ -100,7 +100,7 @@ func (store *wafBlacklistStore) Create(ctx context.Context, serverID int64, inpu
 
 	return WafBlacklistRule{
 		ID:          id,
-		ServerID:    serverID,
+		WafRuleID:    wafRuleID,
 		IPs:         input.IPs,
 		URL:         input.URL,
 		Method:      input.Method,
@@ -109,18 +109,18 @@ func (store *wafBlacklistStore) Create(ctx context.Context, serverID int64, inpu
 	}, nil
 }
 
-func (store *wafBlacklistStore) Update(ctx context.Context, serverID, ruleID int64, input WafBlacklistInput) (WafBlacklistRule, error) {
+func (store *wafBlacklistStore) Update(ctx context.Context, wafRuleID, ruleID int64, input WafBlacklistInput) (WafBlacklistRule, error) {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE waf_blacklist
 		SET black_ip_list = ?, url = ?, method = ?, behavior = ?, description = ?
-		WHERE id = ? AND server_id = ?`,
+		WHERE id = ? AND waf_rule_id = ?`,
 		input.IPs,
 		input.URL,
 		input.Method,
 		input.Behavior,
 		nullableServerString(input.Description),
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -138,7 +138,7 @@ func (store *wafBlacklistStore) Update(ctx context.Context, serverID, ruleID int
 
 	return WafBlacklistRule{
 		ID:          ruleID,
-		ServerID:    serverID,
+		WafRuleID:    wafRuleID,
 		IPs:         input.IPs,
 		URL:         input.URL,
 		Method:      input.Method,
@@ -147,16 +147,16 @@ func (store *wafBlacklistStore) Update(ctx context.Context, serverID, ruleID int
 	}, nil
 }
 
-func (store *wafBlacklistStore) Delete(ctx context.Context, serverID, ruleID int64) error {
+func (store *wafBlacklistStore) Delete(ctx context.Context, wafRuleID, ruleID int64) error {
 	_, err := store.db.ExecContext(ctx, `
-		DELETE FROM waf_blacklist WHERE id = ? AND server_id = ?`,
+		DELETE FROM waf_blacklist WHERE id = ? AND waf_rule_id = ?`,
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	return err
 }
 
-func (store *wafBlacklistStore) DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error {
+func (store *wafBlacklistStore) DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error {
 	ids := uniqueInt64(ruleIDs)
 	if len(ids) == 0 {
 		return nil
@@ -168,9 +168,9 @@ func (store *wafBlacklistStore) DeleteBatch(ctx context.Context, serverID int64,
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	args = append(args, serverID)
+	args = append(args, wafRuleID)
 
-	query := "DELETE FROM waf_blacklist WHERE id IN (" + strings.Join(placeholders, ",") + ") AND server_id = ?"
+	query := "DELETE FROM waf_blacklist WHERE id IN (" + strings.Join(placeholders, ",") + ") AND waf_rule_id = ?"
 	_, err := store.db.ExecContext(ctx, query, args...)
 	return err
 }

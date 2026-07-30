@@ -8,7 +8,7 @@ import (
 
 type CompressSettings struct {
 	ID           int64 `json:"id"`
-	ServerID     int64 `json:"serverId"`
+	SiteID     int64 `json:"siteId"`
 	CSS          bool  `json:"css"`
 	HTML         bool  `json:"html"`
 	JS           bool  `json:"js"`
@@ -27,8 +27,8 @@ type CompressSettingsInput struct {
 }
 
 type CompressStore interface {
-	GetOrCreateByServerID(ctx context.Context, serverID int64) (CompressSettings, error)
-	UpsertByServerID(ctx context.Context, serverID int64, input CompressSettingsInput) (CompressSettings, error)
+	GetOrCreateBySiteID(ctx context.Context, siteID int64) (CompressSettings, error)
+	UpsertBySiteID(ctx context.Context, siteID int64, input CompressSettingsInput) (CompressSettings, error)
 }
 
 type compressStore struct {
@@ -39,9 +39,9 @@ func NewCompressStore(db *sql.DB) CompressStore {
 	return &compressStore{db: db}
 }
 
-func defaultCompressSettings(serverID int64) CompressSettings {
+func defaultCompressSettings(siteID int64) CompressSettings {
 	return CompressSettings{
-		ServerID:     serverID,
+		SiteID:     siteID,
 		CSS:          true,
 		HTML:         true,
 		JS:           true,
@@ -51,8 +51,8 @@ func defaultCompressSettings(serverID int64) CompressSettings {
 	}
 }
 
-func (store *compressStore) GetOrCreateByServerID(ctx context.Context, serverID int64) (CompressSettings, error) {
-	settings, err := store.getByServerID(ctx, serverID)
+func (store *compressStore) GetOrCreateBySiteID(ctx context.Context, siteID int64) (CompressSettings, error) {
+	settings, err := store.getBySiteID(ctx, siteID)
 	if err == nil {
 		return settings, nil
 	}
@@ -60,8 +60,8 @@ func (store *compressStore) GetOrCreateByServerID(ctx context.Context, serverID 
 		return CompressSettings{}, err
 	}
 
-	defaults := defaultCompressSettings(serverID)
-	created, err := store.insert(ctx, serverID, CompressSettingsInput{
+	defaults := defaultCompressSettings(siteID)
+	created, err := store.insert(ctx, siteID, CompressSettingsInput{
 		CSS:          defaults.CSS,
 		HTML:         defaults.HTML,
 		JS:           defaults.JS,
@@ -71,7 +71,7 @@ func (store *compressStore) GetOrCreateByServerID(ctx context.Context, serverID 
 	})
 	if err != nil {
 		// Concurrent create: return the existing row.
-		existing, getErr := store.getByServerID(ctx, serverID)
+		existing, getErr := store.getBySiteID(ctx, siteID)
 		if getErr == nil {
 			return existing, nil
 		}
@@ -80,28 +80,28 @@ func (store *compressStore) GetOrCreateByServerID(ctx context.Context, serverID 
 	return created, nil
 }
 
-func (store *compressStore) UpsertByServerID(ctx context.Context, serverID int64, input CompressSettingsInput) (CompressSettings, error) {
-	existing, err := store.getByServerID(ctx, serverID)
+func (store *compressStore) UpsertBySiteID(ctx context.Context, siteID int64, input CompressSettingsInput) (CompressSettings, error) {
+	existing, err := store.getBySiteID(ctx, siteID)
 	if err == nil {
-		return store.update(ctx, serverID, existing.ID, input)
+		return store.update(ctx, siteID, existing.ID, input)
 	}
 	if !errors.Is(err, errNotFound) {
 		return CompressSettings{}, err
 	}
-	return store.insert(ctx, serverID, input)
+	return store.insert(ctx, siteID, input)
 }
 
-func (store *compressStore) getByServerID(ctx context.Context, serverID int64) (CompressSettings, error) {
+func (store *compressStore) getBySiteID(ctx context.Context, siteID int64) (CompressSettings, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, server_id, css, html, js, audio, font, applications
+		SELECT id, site_id, css, html, js, audio, font, applications
 		FROM compress_settings
-		WHERE server_id = ?`, serverID)
+		WHERE site_id = ?`, siteID)
 
 	var settings CompressSettings
 	var css, html, js, audio, font, applications int
 	if err := row.Scan(
 		&settings.ID,
-		&settings.ServerID,
+		&settings.SiteID,
 		&css,
 		&html,
 		&js,
@@ -124,11 +124,11 @@ func (store *compressStore) getByServerID(ctx context.Context, serverID int64) (
 	return settings, nil
 }
 
-func (store *compressStore) insert(ctx context.Context, serverID int64, input CompressSettingsInput) (CompressSettings, error) {
+func (store *compressStore) insert(ctx context.Context, siteID int64, input CompressSettingsInput) (CompressSettings, error) {
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO compress_settings (server_id, css, html, js, audio, font, applications)
+		INSERT INTO compress_settings (site_id, css, html, js, audio, font, applications)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		serverID,
+		siteID,
 		boolToTinyInt(input.CSS),
 		boolToTinyInt(input.HTML),
 		boolToTinyInt(input.JS),
@@ -150,7 +150,7 @@ func (store *compressStore) insert(ctx context.Context, serverID int64, input Co
 
 	return CompressSettings{
 		ID:           id,
-		ServerID:     serverID,
+		SiteID:     siteID,
 		CSS:          input.CSS,
 		HTML:         input.HTML,
 		JS:           input.JS,
@@ -160,13 +160,13 @@ func (store *compressStore) insert(ctx context.Context, serverID int64, input Co
 	}, nil
 }
 
-func (store *compressStore) update(ctx context.Context, serverID, id int64, input CompressSettingsInput) (CompressSettings, error) {
+func (store *compressStore) update(ctx context.Context, siteID, id int64, input CompressSettingsInput) (CompressSettings, error) {
 	// Do not treat RowsAffected == 0 as missing: MySQL returns 0 when SET
 	// values are identical to the current row.
 	_, err := store.db.ExecContext(ctx, `
 		UPDATE compress_settings
 		SET css = ?, html = ?, js = ?, audio = ?, font = ?, applications = ?
-		WHERE id = ? AND server_id = ?`,
+		WHERE id = ? AND site_id = ?`,
 		boolToTinyInt(input.CSS),
 		boolToTinyInt(input.HTML),
 		boolToTinyInt(input.JS),
@@ -174,7 +174,7 @@ func (store *compressStore) update(ctx context.Context, serverID, id int64, inpu
 		boolToTinyInt(input.Font),
 		boolToTinyInt(input.Applications),
 		id,
-		serverID,
+		siteID,
 	)
 	if err != nil {
 		return CompressSettings{}, err
@@ -182,7 +182,7 @@ func (store *compressStore) update(ctx context.Context, serverID, id int64, inpu
 
 	return CompressSettings{
 		ID:           id,
-		ServerID:     serverID,
+		SiteID:     siteID,
 		CSS:          input.CSS,
 		HTML:         input.HTML,
 		JS:           input.JS,

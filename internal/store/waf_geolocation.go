@@ -8,7 +8,7 @@ import (
 
 type WafGeoRule struct {
 	ID        int64  `json:"id"`
-	ServerID  int64  `json:"serverId"`
+	WafRuleID  int64  `json:"wafRuleId"`
 	Country   string `json:"country"`
 	URL       string `json:"url"`
 	Behavior  string `json:"behavior"`
@@ -25,11 +25,11 @@ type WafGeoInput struct {
 }
 
 type WafGeoStore interface {
-	ListByServer(ctx context.Context, serverID int64) ([]WafGeoRule, error)
-	Create(ctx context.Context, serverID int64, input WafGeoInput) (WafGeoRule, error)
-	Update(ctx context.Context, serverID, ruleID int64, input WafGeoInput) (WafGeoRule, error)
-	Delete(ctx context.Context, serverID, ruleID int64) error
-	DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error
+	ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafGeoRule, error)
+	Create(ctx context.Context, wafRuleID int64, input WafGeoInput) (WafGeoRule, error)
+	Update(ctx context.Context, wafRuleID, ruleID int64, input WafGeoInput) (WafGeoRule, error)
+	Delete(ctx context.Context, wafRuleID, ruleID int64) error
+	DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error
 }
 
 type wafGeoStore struct {
@@ -40,12 +40,12 @@ func NewWafGeoStore(db *sql.DB) WafGeoStore {
 	return &wafGeoStore{db: db}
 }
 
-func (store *wafGeoStore) ListByServer(ctx context.Context, serverID int64) ([]WafGeoRule, error) {
+func (store *wafGeoStore) ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafGeoRule, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, server_id, country, url, behavior, operation, status
+		SELECT id, waf_rule_id, country, url, behavior, operation, status
 		FROM waf_geolocation
-		WHERE server_id = ?
-		ORDER BY id DESC`, serverID)
+		WHERE waf_rule_id = ?
+		ORDER BY id DESC`, wafRuleID)
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +56,7 @@ func (store *wafGeoStore) ListByServer(ctx context.Context, serverID int64) ([]W
 		var rule WafGeoRule
 		if err := rows.Scan(
 			&rule.ID,
-			&rule.ServerID,
+			&rule.WafRuleID,
 			&rule.Country,
 			&rule.URL,
 			&rule.Behavior,
@@ -73,11 +73,11 @@ func (store *wafGeoStore) ListByServer(ctx context.Context, serverID int64) ([]W
 	return rules, nil
 }
 
-func (store *wafGeoStore) Create(ctx context.Context, serverID int64, input WafGeoInput) (WafGeoRule, error) {
+func (store *wafGeoStore) Create(ctx context.Context, wafRuleID int64, input WafGeoInput) (WafGeoRule, error) {
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO waf_geolocation (server_id, country, url, behavior, operation, status)
+		INSERT INTO waf_geolocation (waf_rule_id, country, url, behavior, operation, status)
 		VALUES (?, ?, ?, ?, ?, ?)`,
-		serverID,
+		wafRuleID,
 		input.Country,
 		input.URL,
 		input.Behavior,
@@ -98,7 +98,7 @@ func (store *wafGeoStore) Create(ctx context.Context, serverID int64, input WafG
 
 	return WafGeoRule{
 		ID:        id,
-		ServerID:  serverID,
+		WafRuleID:  wafRuleID,
 		Country:   input.Country,
 		URL:       input.URL,
 		Behavior:  input.Behavior,
@@ -107,18 +107,18 @@ func (store *wafGeoStore) Create(ctx context.Context, serverID int64, input WafG
 	}, nil
 }
 
-func (store *wafGeoStore) Update(ctx context.Context, serverID, ruleID int64, input WafGeoInput) (WafGeoRule, error) {
+func (store *wafGeoStore) Update(ctx context.Context, wafRuleID, ruleID int64, input WafGeoInput) (WafGeoRule, error) {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE waf_geolocation
 		SET country = ?, url = ?, behavior = ?, operation = ?, status = ?
-		WHERE id = ? AND server_id = ?`,
+		WHERE id = ? AND waf_rule_id = ?`,
 		input.Country,
 		input.URL,
 		input.Behavior,
 		input.Operation,
 		input.Status,
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -136,7 +136,7 @@ func (store *wafGeoStore) Update(ctx context.Context, serverID, ruleID int64, in
 
 	return WafGeoRule{
 		ID:        ruleID,
-		ServerID:  serverID,
+		WafRuleID:  wafRuleID,
 		Country:   input.Country,
 		URL:       input.URL,
 		Behavior:  input.Behavior,
@@ -145,16 +145,16 @@ func (store *wafGeoStore) Update(ctx context.Context, serverID, ruleID int64, in
 	}, nil
 }
 
-func (store *wafGeoStore) Delete(ctx context.Context, serverID, ruleID int64) error {
+func (store *wafGeoStore) Delete(ctx context.Context, wafRuleID, ruleID int64) error {
 	_, err := store.db.ExecContext(ctx, `
-		DELETE FROM waf_geolocation WHERE id = ? AND server_id = ?`,
+		DELETE FROM waf_geolocation WHERE id = ? AND waf_rule_id = ?`,
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	return err
 }
 
-func (store *wafGeoStore) DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error {
+func (store *wafGeoStore) DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error {
 	ids := uniqueInt64(ruleIDs)
 	if len(ids) == 0 {
 		return nil
@@ -166,9 +166,9 @@ func (store *wafGeoStore) DeleteBatch(ctx context.Context, serverID int64, ruleI
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	args = append(args, serverID)
+	args = append(args, wafRuleID)
 
-	query := "DELETE FROM waf_geolocation WHERE id IN (" + strings.Join(placeholders, ",") + ") AND server_id = ?"
+	query := "DELETE FROM waf_geolocation WHERE id IN (" + strings.Join(placeholders, ",") + ") AND waf_rule_id = ?"
 	_, err := store.db.ExecContext(ctx, query, args...)
 	return err
 }

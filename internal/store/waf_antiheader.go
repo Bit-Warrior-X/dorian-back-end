@@ -8,7 +8,7 @@ import (
 
 type WafAntiHeaderRule struct {
 	ID        int64  `json:"id"`
-	ServerID  int64  `json:"serverId"`
+	WafRuleID  int64  `json:"wafRuleId"`
 	URL       string `json:"url"`
 	Header    string `json:"header"`
 	Value     string `json:"value"`
@@ -27,11 +27,11 @@ type WafAntiHeaderInput struct {
 }
 
 type WafAntiHeaderStore interface {
-	ListByServer(ctx context.Context, serverID int64) ([]WafAntiHeaderRule, error)
-	Create(ctx context.Context, serverID int64, input WafAntiHeaderInput) (WafAntiHeaderRule, error)
-	Update(ctx context.Context, serverID, ruleID int64, input WafAntiHeaderInput) (WafAntiHeaderRule, error)
-	Delete(ctx context.Context, serverID, ruleID int64) error
-	DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error
+	ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafAntiHeaderRule, error)
+	Create(ctx context.Context, wafRuleID int64, input WafAntiHeaderInput) (WafAntiHeaderRule, error)
+	Update(ctx context.Context, wafRuleID, ruleID int64, input WafAntiHeaderInput) (WafAntiHeaderRule, error)
+	Delete(ctx context.Context, wafRuleID, ruleID int64) error
+	DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error
 }
 
 type wafAntiHeaderStore struct {
@@ -42,12 +42,12 @@ func NewWafAntiHeaderStore(db *sql.DB) WafAntiHeaderStore {
 	return &wafAntiHeaderStore{db: db}
 }
 
-func (store *wafAntiHeaderStore) ListByServer(ctx context.Context, serverID int64) ([]WafAntiHeaderRule, error) {
+func (store *wafAntiHeaderStore) ListByWafRule(ctx context.Context, wafRuleID int64) ([]WafAntiHeaderRule, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, server_id, url, header, value, block_mode, behavior, status
+		SELECT id, waf_rule_id, url, header, value, block_mode, behavior, status
 		FROM waf_antiheader
-		WHERE server_id = ?
-		ORDER BY id DESC`, serverID)
+		WHERE waf_rule_id = ?
+		ORDER BY id DESC`, wafRuleID)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +60,7 @@ func (store *wafAntiHeaderStore) ListByServer(ctx context.Context, serverID int6
 		var status sql.NullString
 		if err := rows.Scan(
 			&rule.ID,
-			&rule.ServerID,
+			&rule.WafRuleID,
 			&rule.URL,
 			&rule.Header,
 			&rule.Value,
@@ -80,11 +80,11 @@ func (store *wafAntiHeaderStore) ListByServer(ctx context.Context, serverID int6
 	return rules, nil
 }
 
-func (store *wafAntiHeaderStore) Create(ctx context.Context, serverID int64, input WafAntiHeaderInput) (WafAntiHeaderRule, error) {
+func (store *wafAntiHeaderStore) Create(ctx context.Context, wafRuleID int64, input WafAntiHeaderInput) (WafAntiHeaderRule, error) {
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO waf_antiheader (server_id, url, header, value, block_mode, behavior, status)
+		INSERT INTO waf_antiheader (waf_rule_id, url, header, value, block_mode, behavior, status)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		serverID,
+		wafRuleID,
 		input.URL,
 		input.Header,
 		input.Value,
@@ -106,7 +106,7 @@ func (store *wafAntiHeaderStore) Create(ctx context.Context, serverID int64, inp
 
 	return WafAntiHeaderRule{
 		ID:        id,
-		ServerID:  serverID,
+		WafRuleID:  wafRuleID,
 		URL:       input.URL,
 		Header:    input.Header,
 		Value:     input.Value,
@@ -116,11 +116,11 @@ func (store *wafAntiHeaderStore) Create(ctx context.Context, serverID int64, inp
 	}, nil
 }
 
-func (store *wafAntiHeaderStore) Update(ctx context.Context, serverID, ruleID int64, input WafAntiHeaderInput) (WafAntiHeaderRule, error) {
+func (store *wafAntiHeaderStore) Update(ctx context.Context, wafRuleID, ruleID int64, input WafAntiHeaderInput) (WafAntiHeaderRule, error) {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE waf_antiheader
 		SET url = ?, header = ?, value = ?, block_mode = ?, behavior = ?, status = ?
-		WHERE id = ? AND server_id = ?`,
+		WHERE id = ? AND waf_rule_id = ?`,
 		input.URL,
 		input.Header,
 		input.Value,
@@ -128,7 +128,7 @@ func (store *wafAntiHeaderStore) Update(ctx context.Context, serverID, ruleID in
 		input.Behavior,
 		nullableServerString(input.Status),
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -146,7 +146,7 @@ func (store *wafAntiHeaderStore) Update(ctx context.Context, serverID, ruleID in
 
 	return WafAntiHeaderRule{
 		ID:        ruleID,
-		ServerID:  serverID,
+		WafRuleID:  wafRuleID,
 		URL:       input.URL,
 		Header:    input.Header,
 		Value:     input.Value,
@@ -156,16 +156,16 @@ func (store *wafAntiHeaderStore) Update(ctx context.Context, serverID, ruleID in
 	}, nil
 }
 
-func (store *wafAntiHeaderStore) Delete(ctx context.Context, serverID, ruleID int64) error {
+func (store *wafAntiHeaderStore) Delete(ctx context.Context, wafRuleID, ruleID int64) error {
 	_, err := store.db.ExecContext(ctx, `
-		DELETE FROM waf_antiheader WHERE id = ? AND server_id = ?`,
+		DELETE FROM waf_antiheader WHERE id = ? AND waf_rule_id = ?`,
 		ruleID,
-		serverID,
+		wafRuleID,
 	)
 	return err
 }
 
-func (store *wafAntiHeaderStore) DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error {
+func (store *wafAntiHeaderStore) DeleteBatch(ctx context.Context, wafRuleID int64, ruleIDs []int64) error {
 	ids := uniqueInt64(ruleIDs)
 	if len(ids) == 0 {
 		return nil
@@ -177,9 +177,9 @@ func (store *wafAntiHeaderStore) DeleteBatch(ctx context.Context, serverID int64
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	args = append(args, serverID)
+	args = append(args, wafRuleID)
 
-	query := "DELETE FROM waf_antiheader WHERE id IN (" + strings.Join(placeholders, ",") + ") AND server_id = ?"
+	query := "DELETE FROM waf_antiheader WHERE id IN (" + strings.Join(placeholders, ",") + ") AND waf_rule_id = ?"
 	_, err := store.db.ExecContext(ctx, query, args...)
 	return err
 }

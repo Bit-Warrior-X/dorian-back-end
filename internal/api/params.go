@@ -10,6 +10,7 @@ func parseID(path, prefix string) (int64, bool) {
 		return 0, false
 	}
 	raw := strings.TrimPrefix(path, prefix)
+	raw = strings.TrimSuffix(raw, "/")
 	if raw == "" || strings.Contains(raw, "/") {
 		return 0, false
 	}

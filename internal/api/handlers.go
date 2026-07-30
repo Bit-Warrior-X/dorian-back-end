@@ -291,6 +291,8 @@ func registerRoutes(
 	cacheRules store.CacheRuleStore,
 	compressSettings store.CompressStore,
 	blacklist store.BlacklistStore,
+	sites store.SiteStore,
+	wafRules store.WafRuleStore,
 ) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
@@ -399,6 +401,10 @@ func registerRoutes(
 	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
+	mux.HandleFunc("/sites", sitesHandler(sites))
+	mux.HandleFunc("/sites/", siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings))
+	mux.HandleFunc("/waf-rules", wafRulesHandler(wafRules))
+	mux.HandleFunc("/waf-rules/", wafRuleDetailHandler(wafRules, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent))
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -3485,52 +3491,6 @@ type l7WhitelistUpdatePayload struct {
 
 // callL7UpdateWhitelist loads all WAF whitelist rules for the given server and
 // sends them to api_parser via the l7_update_whitelist API using POST.
-func callL7UpdateWhitelist(ctx context.Context, servers store.ServerStore, serverID int64, wafWhitelist store.WafWhitelistStore) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	rules, err := wafWhitelist.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load waf whitelist rules: %w", err)
-	}
-
-	payload := l7WhitelistUpdatePayload{
-		ServerID: server.ID,
-		ServerIP: strings.TrimSpace(server.IP),
-		Rules:    rules,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 whitelist payload: %w", err)
-	}
-
-	l7WhitelistUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_whitelist"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7WhitelistUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_whitelist request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_whitelist request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_whitelist returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // l7BlacklistUpdatePayload is sent to api_parser's /api/l7_update_blacklist
 // endpoint to keep the L7 (WAF) blacklist rules for a server in sync.
@@ -3542,52 +3502,6 @@ type l7BlacklistUpdatePayload struct {
 
 // callL7UpdateBlacklist loads all WAF blacklist rules for the given server and
 // sends them to api_parser via the l7_update_blacklist API using POST.
-func callL7UpdateBlacklist(ctx context.Context, servers store.ServerStore, serverID int64, wafBlacklist store.WafBlacklistStore) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	rules, err := wafBlacklist.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load waf blacklist rules: %w", err)
-	}
-
-	payload := l7BlacklistUpdatePayload{
-		ServerID: server.ID,
-		ServerIP: strings.TrimSpace(server.IP),
-		Rules:    rules,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 blacklist payload: %w", err)
-	}
-
-	l7BlacklistUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_blacklist"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7BlacklistUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_blacklist request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_blacklist request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_blacklist returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // l7GeoUpdatePayload is sent to api_parser's /api/l7_update_geo endpoint to
 // keep the L7 (WAF) geolocation rules for a server in sync.
@@ -3600,65 +3514,6 @@ type l7GeoUpdatePayload struct {
 // callL7UpdateGeo loads all WAF GEO rules for the given server, filters to
 // enabled ones only, normalizes behavior for WHITE operation, and sends them
 // to api_parser via the l7_update_geo API using POST.
-func callL7UpdateGeo(ctx context.Context, servers store.ServerStore, serverID int64, wafGeo store.WafGeoStore) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	allRules, err := wafGeo.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load waf geo rules: %w", err)
-	}
-
-	// Filter to enabled rules and enforce behavior=Allow for WHITE operation.
-	normalized := make([]store.WafGeoRule, 0, len(allRules))
-	for _, r := range allRules {
-		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
-			continue
-		}
-		rule := r
-		if strings.EqualFold(strings.TrimSpace(rule.Operation), "WHITE") {
-			rule.Behavior = "Allow"
-		}
-		normalized = append(normalized, rule)
-	}
-
-	payload := l7GeoUpdatePayload{
-		ServerID: server.ID,
-		ServerIP: strings.TrimSpace(server.IP),
-		Rules:    normalized,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 geo payload: %w", err)
-	}
-
-	l7GeoUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_geo"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7GeoUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_geo request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_geo request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_geo returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // l7AntiHeaderUpdatePayload is sent to api_parser's /API/L7/l7_update_antiheader
 // endpoint to keep the L7 (WAF) anti-header rules for a server in sync.
@@ -3671,61 +3526,6 @@ type l7AntiHeaderUpdatePayload struct {
 // callL7UpdateAntiHeader loads all WAF anti-header rules for the given server,
 // filters to enabled ones only, and sends them to api_parser via the
 // l7_update_antiheader API using POST.
-func callL7UpdateAntiHeader(ctx context.Context, servers store.ServerStore, serverID int64, wafAntiHeader store.WafAntiHeaderStore) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	allRules, err := wafAntiHeader.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load waf anti-header rules: %w", err)
-	}
-
-	// Only include rules whose status is ENABLE (case-insensitive).
-	enabled := make([]store.WafAntiHeaderRule, 0, len(allRules))
-	for _, r := range allRules {
-		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
-			continue
-		}
-		enabled = append(enabled, r)
-	}
-
-	payload := l7AntiHeaderUpdatePayload{
-		ServerID: server.ID,
-		ServerIP: strings.TrimSpace(server.IP),
-		Rules:    enabled,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 anti-header payload: %w", err)
-	}
-
-	l7AntiHeaderUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_antiheader"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7AntiHeaderUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_antiheader request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_antiheader request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_antiheader returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // l7IntervalFreqLimitUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_intervalfreqlimit endpoint to keep the L7 (WAF)
@@ -3750,68 +3550,6 @@ type intervalFreqLimitRulePayload struct {
 // callL7UpdateIntervalFreqLimit loads all WAF interval frequency limit rules
 // for the given server, filters to enabled ones only, and sends them to
 // api_parser via the l7_update_intervalfreqlimit API using POST.
-func callL7UpdateIntervalFreqLimit(ctx context.Context, servers store.ServerStore, serverID int64, wafInterval store.WafIntervalStore) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	allRules, err := wafInterval.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load waf interval rules: %w", err)
-	}
-
-	enabled := make([]intervalFreqLimitRulePayload, 0, len(allRules))
-	for _, r := range allRules {
-		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
-			continue
-		}
-		enabled = append(enabled, intervalFreqLimitRulePayload{
-			ID:           r.ID,
-			ServerID:     r.ServerID,
-			URL:          r.URL,
-			TimeSeconds:  r.TimeSeconds,
-			RequestCount: r.RequestCount,
-			Behavior:     r.Behavior,
-			Status:       r.Status,
-		})
-	}
-
-	payload := l7IntervalFreqLimitUpdatePayload{
-		ServerID: server.ID,
-		ServerIP: strings.TrimSpace(server.IP),
-		Rules:    enabled,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 intervalfreqlimit payload: %w", err)
-	}
-
-	l7IntervalFreqLimitUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_intervalfreqlimit"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7IntervalFreqLimitUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_intervalfreqlimit request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_intervalfreqlimit request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_intervalfreqlimit returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // l7SecondFreqLimitUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_secondfreqlimit endpoint to keep the L7 (WAF)
@@ -3836,68 +3574,6 @@ type secondFreqLimitRulePayload struct {
 // callL7UpdateSecondFreqLimit loads all WAF second frequency limit rules
 // for the given server, filters to enabled ones only, and sends them to
 // api_parser via the l7_update_secondfreqlimit API using POST.
-func callL7UpdateSecondFreqLimit(ctx context.Context, servers store.ServerStore, serverID int64, wafSecond store.WafSecondStore) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	allRules, err := wafSecond.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load waf second rules: %w", err)
-	}
-
-	enabled := make([]secondFreqLimitRulePayload, 0, len(allRules))
-	for _, r := range allRules {
-		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
-			continue
-		}
-		enabled = append(enabled, secondFreqLimitRulePayload{
-			ID:           r.ID,
-			ServerID:     r.ServerID,
-			URL:          r.URL,
-			RequestCount: r.RequestCount,
-			Burst:        r.Burst,
-			Behavior:     r.Behavior,
-			Status:       r.Status,
-		})
-	}
-
-	payload := l7SecondFreqLimitUpdatePayload{
-		ServerID: server.ID,
-		ServerIP: strings.TrimSpace(server.IP),
-		Rules:    enabled,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 secondfreqlimit payload: %w", err)
-	}
-
-	l7SecondFreqLimitUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_secondfreqlimit"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7SecondFreqLimitUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_secondfreqlimit request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_secondfreqlimit request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_secondfreqlimit returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // l7TemporaryBlacklistUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_temporaryblacklist endpoint to keep the temporary blacklist
@@ -4003,69 +3679,6 @@ type responseFreqRulePayload struct {
 // callL7UpdateResponseFreq loads all WAF response frequency rules for the
 // given server, filters to enabled ones only, and sends them to api_parser
 // via the l7_update_responsefreq API using POST.
-func callL7UpdateResponseFreq(ctx context.Context, servers store.ServerStore, serverID int64, wafResponse store.WafResponseStore) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	allRules, err := wafResponse.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load waf response freq rules: %w", err)
-	}
-
-	enabled := make([]responseFreqRulePayload, 0, len(allRules))
-	for _, r := range allRules {
-		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
-			continue
-		}
-		enabled = append(enabled, responseFreqRulePayload{
-			ID:            r.ID,
-			ServerID:      r.ServerID,
-			URL:           r.URL,
-			ResponseCode:  r.ResponseCode,
-			TimeSeconds:   r.TimeSeconds,
-			ResponseCount: r.ResponseCount,
-			Behavior:      r.Behavior,
-			Status:        r.Status,
-		})
-	}
-
-	payload := l7ResponseFreqUpdatePayload{
-		ServerID: server.ID,
-		ServerIP: strings.TrimSpace(server.IP),
-		Rules:    enabled,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 responsefreq payload: %w", err)
-	}
-
-	l7ResponseFreqUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_responsefreq"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7ResponseFreqUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_responsefreq request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_responsefreq request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_responsefreq returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // l7UserAgentUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_useragent endpoint to keep the L7 (WAF) user agent rules
@@ -4090,68 +3703,6 @@ type userAgentRulePayload struct {
 // callL7UpdateUserAgent loads all WAF user agent rules for the given server,
 // filters to enabled ones only, and sends them to api_parser via the
 // l7_update_useragent API using POST.
-func callL7UpdateUserAgent(ctx context.Context, servers store.ServerStore, serverID int64, wafUserAgent store.WafUserAgentStore) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	allRules, err := wafUserAgent.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load waf user agent rules: %w", err)
-	}
-
-	enabled := make([]userAgentRulePayload, 0, len(allRules))
-	for _, r := range allRules {
-		if !strings.EqualFold(strings.TrimSpace(r.Status), "ENABLE") {
-			continue
-		}
-		enabled = append(enabled, userAgentRulePayload{
-			ID:        r.ID,
-			ServerID:  r.ServerID,
-			URL:       r.URL,
-			UserAgent: r.UserAgent,
-			Match:     r.Match,
-			Behavior:  r.Behavior,
-			Status:    r.Status,
-		})
-	}
-
-	payload := l7UserAgentUpdatePayload{
-		ServerID: server.ID,
-		ServerIP: strings.TrimSpace(server.IP),
-		Rules:    enabled,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 useragent payload: %w", err)
-	}
-
-	l7UserAgentUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_useragent"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7UserAgentUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_useragent request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_useragent request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_useragent returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // l7UpstreamServersUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_upstreamservers endpoint when upstream servers change.
@@ -4168,69 +3719,10 @@ type upstreamServerPayloadL7 struct {
 	Description string `json:"description"`
 }
 
-func upstreamServersToL7Payload(list []store.UpstreamServer) []upstreamServerPayloadL7 {
-	upstreams := make([]upstreamServerPayloadL7, 0, len(list))
-	for _, u := range list {
-		upstreams = append(upstreams, upstreamServerPayloadL7{
-			ID:          u.ID,
-			ServerID:    u.ServerID,
-			IpPort:      strings.TrimSpace(u.Address),
-			Description: strings.TrimSpace(u.Description),
-		})
-	}
-	return upstreams
-}
 
-func postL7UpstreamServers(ctx context.Context, servers store.ServerStore, serverID int64, upstreams []upstreamServerPayloadL7) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	payload := l7UpstreamServersUpdatePayload{
-		ServerID:  serverID,
-		Upstreams: upstreams,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 upstreamservers payload: %w", err)
-	}
-
-	l7UpstreamServersUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_upstreamservers"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7UpstreamServersUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_upstreamservers request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_upstreamservers request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_upstreamservers returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // callL7UpdateUpstreamServers loads all upstream servers for the given server
 // and sends them to api_parser via the l7_update_upstreamservers API using POST.
-func callL7UpdateUpstreamServers(ctx context.Context, servers store.ServerStore, serverID int64, upstreamServers store.UpstreamServerStore) error {
-	list, err := upstreamServers.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load upstream servers: %w", err)
-	}
-	return postL7UpstreamServers(ctx, servers, serverID, upstreamServersToL7Payload(list))
-}
 
 // l7ListeningPortsUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_listeningports endpoint when listening ports change.
@@ -4249,71 +3741,10 @@ type listeningPortPayloadL7 struct {
 	Status      string `json:"status"`
 }
 
-func listeningPortsToL7Payload(list []store.ListeningPort) []listeningPortPayloadL7 {
-	ports := make([]listeningPortPayloadL7, 0, len(list))
-	for _, p := range list {
-		ports = append(ports, listeningPortPayloadL7{
-			ID:          p.ID,
-			ServerID:    p.ServerID,
-			Port:        p.Port,
-			Protocol:    strings.TrimSpace(p.Protocol),
-			Description: strings.TrimSpace(p.Description),
-			Status:      strings.TrimSpace(p.Status),
-		})
-	}
-	return ports
-}
 
-func postL7ListeningPorts(ctx context.Context, servers store.ServerStore, serverID int64, ports []listeningPortPayloadL7) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	payload := l7ListeningPortsUpdatePayload{
-		ServerID:       serverID,
-		ListeningPorts: ports,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 listeningports payload: %w", err)
-	}
-
-	l7ListeningPortsUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_listeningports"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7ListeningPortsUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_listeningports request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_listeningports request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_listeningports returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 // callL7UpdateListeningPorts loads all listening ports for the given server
 // and sends them to api_parser via the l7_update_listeningports API using POST.
-func callL7UpdateListeningPorts(ctx context.Context, servers store.ServerStore, serverID int64, listeningPorts store.ListeningPortStore) error {
-	list, err := listeningPorts.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load listening ports: %w", err)
-	}
-	return postL7ListeningPorts(ctx, servers, serverID, listeningPortsToL7Payload(list))
-}
 
 // l7CompressUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_compress endpoint when gzip MIME settings change.
@@ -4343,54 +3774,7 @@ func compressSettingsToL7Payload(settings store.CompressSettings) compressPayloa
 	}
 }
 
-func postL7Compress(ctx context.Context, servers store.ServerStore, serverID int64, settings compressPayloadL7) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
 
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	payload := l7CompressUpdatePayload{
-		ServerID: serverID,
-		Compress: settings,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 compress payload: %w", err)
-	}
-
-	l7CompressUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_compress"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7CompressUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_compress request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_compress request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_compress returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
-
-func callL7UpdateCompress(ctx context.Context, servers store.ServerStore, serverID int64, compressSettings store.CompressStore) error {
-	settings, err := compressSettings.GetOrCreateByServerID(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load compress settings: %w", err)
-	}
-	return postL7Compress(ctx, servers, serverID, compressSettingsToL7Payload(settings))
-}
 
 // l7CacheRulesUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_cacherules endpoint when cache rules change.
@@ -4415,119 +3799,13 @@ type cacheRulePayloadL7 struct {
 	Status           string `json:"status"`
 }
 
-func cacheRulesToL7Payload(list []store.CacheRule) []cacheRulePayloadL7 {
-	rules := make([]cacheRulePayloadL7, 0, len(list))
-	for _, rule := range list {
-		rules = append(rules, cacheRulePayloadL7{
-			ID:               rule.ID,
-			ServerID:         rule.ServerID,
-			RuleName:         strings.TrimSpace(rule.RuleName),
-			RuleType:         strings.TrimSpace(rule.RuleType),
-			CachingTime:      rule.CachingTime,
-			URL:              strings.TrimSpace(rule.URL),
-			FileTypes:        strings.TrimSpace(rule.FileTypes),
-			Priority:         rule.Priority,
-			CacheSlice:       rule.CacheSlice,
-			WithoutParameter: strings.TrimSpace(rule.WithoutParameter),
-			CacheMode:        strings.TrimSpace(rule.CacheMode),
-			Status:           strings.TrimSpace(rule.Status),
-		})
-	}
-	return rules
-}
 
-func postL7CacheRules(ctx context.Context, servers store.ServerStore, serverID int64, rules []cacheRulePayloadL7) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
 
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	payload := l7CacheRulesUpdatePayload{
-		ServerID:   serverID,
-		CacheRules: rules,
-	}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 cacherules payload: %w", err)
-	}
-
-	l7CacheRulesUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_cacherules"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7CacheRulesUpdateURL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_update_cacherules request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_update_cacherules request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_update_cacherules returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
-
-func callL7UpdateCacheRules(ctx context.Context, servers store.ServerStore, serverID int64, cacheRules store.CacheRuleStore) error {
-	list, err := cacheRules.ListByServer(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load cache rules: %w", err)
-	}
-	return postL7CacheRules(ctx, servers, serverID, cacheRulesToL7Payload(list))
-}
 
 type l7CacheActionPayload struct {
 	ServerID int64 `json:"serverId"`
 }
 
-func postL7CacheClear(ctx context.Context, servers store.ServerStore, serverID int64, endpoint string) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-	if strings.TrimSpace(endpoint) == "" {
-		return fmt.Errorf("invalid l7 cache endpoint")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	payload := l7CacheActionPayload{ServerID: serverID}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7 %s payload: %w", endpoint, err)
-	}
-
-	l7URL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/" + endpoint
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7URL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build %s request: %w", endpoint, err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("%s request failed: %w", endpoint, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%s returned status %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 func normalizeClearUrlCacheMatchType(matchType string) (string, string) {
 	switch strings.ToLower(strings.TrimSpace(matchType)) {
@@ -4583,51 +3861,6 @@ func clearUrlCacheMatchTypeToL7(matchType string) (int, string) {
 	}
 }
 
-func postL7ClearUrlCache(ctx context.Context, servers store.ServerStore, serverID int64, matchType, matchContent string) error {
-	if serverID == 0 {
-		return fmt.Errorf("invalid server id")
-	}
-
-	server, err := servers.GetView(ctx, serverID)
-	if err != nil {
-		return fmt.Errorf("load server view: %w", err)
-	}
-
-	l7MatchType, validationErr := clearUrlCacheMatchTypeToL7(matchType)
-	if validationErr != "" {
-		return fmt.Errorf(validationErr)
-	}
-
-	payload := l7ClearUrlCachePayload{
-		ServerID:     serverID,
-		MatchType:    l7MatchType,
-		MatchContent: matchContent,
-	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode l7_clear_url_cache payload: %w", err)
-	}
-
-	l7URL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_clear_url_cache"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7URL, bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build l7_clear_url_cache request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("l7_clear_url_cache request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("l7_clear_url_cache returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-	}
-
-	return nil
-}
 
 func cacheRulePayloadToInput(payload cacheRulePayload) (store.CacheRuleInput, string) {
 	ruleName := store.NormalizeCacheRuleName(payload.RuleName)
@@ -5377,1690 +4610,6 @@ func serverDetailHandler(
 			return
 		}
 
-		if strings.Contains(r.URL.Path, "/waf/whitelist") {
-			serverID, ruleID, isBatch, ok := parseWafWhitelistPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := wafWhitelist.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load whitelist rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload wafWhitelistBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := wafWhitelist.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete rules")
-						return
-					}
-					if err := callL7UpdateWhitelist(r.Context(), servers, serverID, wafWhitelist); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync waf whitelist rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload wafWhitelistPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				created, err := wafWhitelist.Create(r.Context(), serverID, store.WafWhitelistInput{
-					IPs:         strings.TrimSpace(payload.IPs),
-					URL:         strings.TrimSpace(payload.URL),
-					Method:      strings.TrimSpace(payload.Method),
-					Description: strings.TrimSpace(payload.Description),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create whitelist rule")
-					return
-				}
-				if err := callL7UpdateWhitelist(r.Context(), servers, serverID, wafWhitelist); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf whitelist rules")
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload wafWhitelistPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				updated, err := wafWhitelist.Update(r.Context(), serverID, ruleID, store.WafWhitelistInput{
-					IPs:         strings.TrimSpace(payload.IPs),
-					URL:         strings.TrimSpace(payload.URL),
-					Method:      strings.TrimSpace(payload.Method),
-					Description: strings.TrimSpace(payload.Description),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "whitelist rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update whitelist rule")
-					return
-				}
-				if err := callL7UpdateWhitelist(r.Context(), servers, serverID, wafWhitelist); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf whitelist rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if err := wafWhitelist.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete whitelist rule")
-					return
-				}
-				if err := callL7UpdateWhitelist(r.Context(), servers, serverID, wafWhitelist); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf whitelist rules")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/waf/blacklist") {
-			serverID, ruleID, isBatch, ok := parseWafBlacklistPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := wafBlacklist.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load blacklist rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload wafBlacklistBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := wafBlacklist.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete rules")
-						return
-					}
-					if err := callL7UpdateBlacklist(r.Context(), servers, serverID, wafBlacklist); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync waf blacklist rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload wafBlacklistPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				created, err := wafBlacklist.Create(r.Context(), serverID, store.WafBlacklistInput{
-					IPs:         strings.TrimSpace(payload.IPs),
-					URL:         strings.TrimSpace(payload.URL),
-					Method:      strings.TrimSpace(payload.Method),
-					Behavior:    strings.TrimSpace(payload.Behavior),
-					Description: strings.TrimSpace(payload.Description),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create blacklist rule")
-					return
-				}
-				if err := callL7UpdateBlacklist(r.Context(), servers, serverID, wafBlacklist); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf blacklist rules")
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload wafBlacklistPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				updated, err := wafBlacklist.Update(r.Context(), serverID, ruleID, store.WafBlacklistInput{
-					IPs:         strings.TrimSpace(payload.IPs),
-					URL:         strings.TrimSpace(payload.URL),
-					Method:      strings.TrimSpace(payload.Method),
-					Behavior:    strings.TrimSpace(payload.Behavior),
-					Description: strings.TrimSpace(payload.Description),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "blacklist rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update blacklist rule")
-					return
-				}
-				if err := callL7UpdateBlacklist(r.Context(), servers, serverID, wafBlacklist); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf blacklist rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if err := wafBlacklist.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete blacklist rule")
-					return
-				}
-				if err := callL7UpdateBlacklist(r.Context(), servers, serverID, wafBlacklist); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf blacklist rules")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/waf/geolocation") {
-			serverID, ruleID, isBatch, ok := parseWafGeoPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := wafGeo.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load geo rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload wafGeoBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := wafGeo.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete rules")
-						return
-					}
-					if err := callL7UpdateGeo(r.Context(), servers, serverID, wafGeo); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync waf geo rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload wafGeoPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				created, err := wafGeo.Create(r.Context(), serverID, store.WafGeoInput{
-					Country:   strings.TrimSpace(payload.Country),
-					URL:       strings.TrimSpace(payload.URL),
-					Behavior:  strings.TrimSpace(payload.Behavior),
-					Operation: strings.TrimSpace(payload.Operation),
-					Status:    strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create geo rule")
-					return
-				}
-				if err := callL7UpdateGeo(r.Context(), servers, serverID, wafGeo); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf geo rules")
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload wafGeoPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				updated, err := wafGeo.Update(r.Context(), serverID, ruleID, store.WafGeoInput{
-					Country:   strings.TrimSpace(payload.Country),
-					URL:       strings.TrimSpace(payload.URL),
-					Behavior:  strings.TrimSpace(payload.Behavior),
-					Operation: strings.TrimSpace(payload.Operation),
-					Status:    strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "geo rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update geo rule")
-					return
-				}
-				if err := callL7UpdateGeo(r.Context(), servers, serverID, wafGeo); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf geo rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if err := wafGeo.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete geo rule")
-					return
-				}
-				if err := callL7UpdateGeo(r.Context(), servers, serverID, wafGeo); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf geo rules")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/waf/anti-cc") {
-			serverID, ruleID, isBatch, ok := parseWafAntiCcPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := wafAntiCc.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load anti-cc rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload wafAntiCcBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := wafAntiCc.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload wafAntiCcPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				created, err := wafAntiCc.Create(r.Context(), serverID, store.WafAntiCcInput{
-					URL:       strings.TrimSpace(payload.URL),
-					Method:    strings.TrimSpace(payload.Method),
-					Threshold: payload.Threshold,
-					Window:    payload.Window,
-					Action:    strings.TrimSpace(payload.Action),
-					Behavior:  strings.TrimSpace(payload.Behavior),
-					Status:    strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create anti-cc rule")
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload wafAntiCcPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				updated, err := wafAntiCc.Update(r.Context(), serverID, ruleID, store.WafAntiCcInput{
-					URL:       strings.TrimSpace(payload.URL),
-					Method:    strings.TrimSpace(payload.Method),
-					Threshold: payload.Threshold,
-					Window:    payload.Window,
-					Action:    strings.TrimSpace(payload.Action),
-					Behavior:  strings.TrimSpace(payload.Behavior),
-					Status:    strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "anti-cc rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update anti-cc rule")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if err := wafAntiCc.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete anti-cc rule")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-		if strings.Contains(r.URL.Path, "/waf/anti-header") {
-			serverID, ruleID, isBatch, ok := parseWafAntiHeaderPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := wafAntiHeader.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load anti-header rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload wafAntiHeaderBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := wafAntiHeader.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete rules")
-						return
-					}
-					if err := callL7UpdateAntiHeader(r.Context(), servers, serverID, wafAntiHeader); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync waf anti-header rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload wafAntiHeaderPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				created, err := wafAntiHeader.Create(r.Context(), serverID, store.WafAntiHeaderInput{
-					URL:       strings.TrimSpace(payload.URL),
-					Header:    strings.TrimSpace(payload.Header),
-					Value:     strings.TrimSpace(payload.Value),
-					BlockMode: strings.TrimSpace(payload.BlockMode),
-					Behavior:  strings.TrimSpace(payload.Behavior),
-					Status:    strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create anti-header rule")
-					return
-				}
-				if err := callL7UpdateAntiHeader(r.Context(), servers, serverID, wafAntiHeader); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf anti-header rules")
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload wafAntiHeaderPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				updated, err := wafAntiHeader.Update(r.Context(), serverID, ruleID, store.WafAntiHeaderInput{
-					URL:       strings.TrimSpace(payload.URL),
-					Header:    strings.TrimSpace(payload.Header),
-					Value:     strings.TrimSpace(payload.Value),
-					BlockMode: strings.TrimSpace(payload.BlockMode),
-					Behavior:  strings.TrimSpace(payload.Behavior),
-					Status:    strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "anti-header rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update anti-header rule")
-					return
-				}
-				if err := callL7UpdateAntiHeader(r.Context(), servers, serverID, wafAntiHeader); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf anti-header rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if err := wafAntiHeader.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete anti-header rule")
-					return
-				}
-				if err := callL7UpdateAntiHeader(r.Context(), servers, serverID, wafAntiHeader); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf anti-header rules")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/waf/interval-freq-limit") {
-			serverID, ruleID, isBatch, ok := parseWafIntervalPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := wafInterval.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load interval rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload wafIntervalBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := wafInterval.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete rules")
-						return
-					}
-					if err := callL7UpdateIntervalFreqLimit(r.Context(), servers, serverID, wafInterval); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync waf interval-freq-limit rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload wafIntervalPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				created, err := wafInterval.Create(r.Context(), serverID, store.WafIntervalInput{
-					URL:          strings.TrimSpace(payload.URL),
-					TimeSeconds:  payload.Time,
-					RequestCount: payload.RequestCount,
-					Behavior:     strings.TrimSpace(payload.Behavior),
-					Status:       strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create interval rule")
-					return
-				}
-				if err := callL7UpdateIntervalFreqLimit(r.Context(), servers, serverID, wafInterval); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf interval-freq-limit rules")
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload wafIntervalPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				updated, err := wafInterval.Update(r.Context(), serverID, ruleID, store.WafIntervalInput{
-					URL:          strings.TrimSpace(payload.URL),
-					TimeSeconds:  payload.Time,
-					RequestCount: payload.RequestCount,
-					Behavior:     strings.TrimSpace(payload.Behavior),
-					Status:       strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "interval rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update interval rule")
-					return
-				}
-				if err := callL7UpdateIntervalFreqLimit(r.Context(), servers, serverID, wafInterval); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf interval-freq-limit rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if err := wafInterval.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete interval rule")
-					return
-				}
-				if err := callL7UpdateIntervalFreqLimit(r.Context(), servers, serverID, wafInterval); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf interval-freq-limit rules")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/waf/second-freq-limit") {
-			serverID, ruleID, isBatch, ok := parseWafSecondPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := wafSecond.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load second freq rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload wafSecondBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := wafSecond.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete rules")
-						return
-					}
-					if err := callL7UpdateSecondFreqLimit(r.Context(), servers, serverID, wafSecond); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync waf second-freq-limit rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload wafSecondPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				created, err := wafSecond.Create(r.Context(), serverID, store.WafSecondInput{
-					URL:          strings.TrimSpace(payload.URL),
-					RequestCount: payload.RequestCount,
-					Burst:        payload.Burst,
-					Behavior:     strings.TrimSpace(payload.Behavior),
-					Status:       strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create second freq rule")
-					return
-				}
-				if err := callL7UpdateSecondFreqLimit(r.Context(), servers, serverID, wafSecond); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf second-freq-limit rules")
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload wafSecondPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				updated, err := wafSecond.Update(r.Context(), serverID, ruleID, store.WafSecondInput{
-					URL:          strings.TrimSpace(payload.URL),
-					RequestCount: payload.RequestCount,
-					Burst:        payload.Burst,
-					Behavior:     strings.TrimSpace(payload.Behavior),
-					Status:       strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "second freq rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update second freq rule")
-					return
-				}
-				if err := callL7UpdateSecondFreqLimit(r.Context(), servers, serverID, wafSecond); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf second-freq-limit rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if err := wafSecond.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete second freq rule")
-					return
-				}
-				if err := callL7UpdateSecondFreqLimit(r.Context(), servers, serverID, wafSecond); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf second-freq-limit rules")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/waf/response-freq") {
-			serverID, ruleID, isBatch, ok := parseWafResponsePath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := wafResponse.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load response freq rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload wafResponseBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := wafResponse.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete rules")
-						return
-					}
-					if err := callL7UpdateResponseFreq(r.Context(), servers, serverID, wafResponse); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync waf response-freq rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload wafResponsePayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				created, err := wafResponse.Create(r.Context(), serverID, store.WafResponseInput{
-					URL:           strings.TrimSpace(payload.URL),
-					ResponseCode:  strings.TrimSpace(payload.ResponseCode),
-					TimeSeconds:   payload.Time,
-					ResponseCount: payload.ResponseCount,
-					Behavior:      strings.TrimSpace(payload.Behavior),
-					Status:        strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create response freq rule")
-					return
-				}
-				if err := callL7UpdateResponseFreq(r.Context(), servers, serverID, wafResponse); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf response-freq rules")
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload wafResponsePayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				updated, err := wafResponse.Update(r.Context(), serverID, ruleID, store.WafResponseInput{
-					URL:           strings.TrimSpace(payload.URL),
-					ResponseCode:  strings.TrimSpace(payload.ResponseCode),
-					TimeSeconds:   payload.Time,
-					ResponseCount: payload.ResponseCount,
-					Behavior:      strings.TrimSpace(payload.Behavior),
-					Status:        strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "response freq rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update response freq rule")
-					return
-				}
-				if err := callL7UpdateResponseFreq(r.Context(), servers, serverID, wafResponse); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf response-freq rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if err := wafResponse.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete response freq rule")
-					return
-				}
-				if err := callL7UpdateResponseFreq(r.Context(), servers, serverID, wafResponse); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf response-freq rules")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/waf/user-agent") {
-			serverID, ruleID, isBatch, ok := parseWafUserAgentPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := wafUserAgent.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load user agent rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload wafUserAgentBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := wafUserAgent.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete rules")
-						return
-					}
-					if err := callL7UpdateUserAgent(r.Context(), servers, serverID, wafUserAgent); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync waf user-agent rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload wafUserAgentPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				created, err := wafUserAgent.Create(r.Context(), serverID, store.WafUserAgentInput{
-					URL:       strings.TrimSpace(payload.URL),
-					UserAgent: strings.TrimSpace(payload.UserAgent),
-					Match:     strings.TrimSpace(payload.Match),
-					Behavior:  strings.TrimSpace(payload.Behavior),
-					Status:    strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create user agent rule")
-					return
-				}
-				if err := callL7UpdateUserAgent(r.Context(), servers, serverID, wafUserAgent); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf user-agent rules")
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload wafUserAgentPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				updated, err := wafUserAgent.Update(r.Context(), serverID, ruleID, store.WafUserAgentInput{
-					URL:       strings.TrimSpace(payload.URL),
-					UserAgent: strings.TrimSpace(payload.UserAgent),
-					Match:     strings.TrimSpace(payload.Match),
-					Behavior:  strings.TrimSpace(payload.Behavior),
-					Status:    strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "user agent rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update user agent rule")
-					return
-				}
-				if err := callL7UpdateUserAgent(r.Context(), servers, serverID, wafUserAgent); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf user-agent rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if err := wafUserAgent.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete user agent rule")
-					return
-				}
-				if err := callL7UpdateUserAgent(r.Context(), servers, serverID, wafUserAgent); err != nil {
-					writeError(w, http.StatusBadGateway, "failed to sync waf user-agent rules")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.HasSuffix(r.URL.Path, "/compress") {
-			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/compress")
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			switch r.Method {
-			case http.MethodGet:
-				settings, err := compressSettings.GetOrCreateByServerID(r.Context(), serverID)
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to load compress settings")
-					return
-				}
-				writeJSON(w, http.StatusOK, settings)
-			case http.MethodPut:
-				var payload store.CompressSettings
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				input := store.CompressSettingsInput{
-					CSS:          payload.CSS,
-					HTML:         payload.HTML,
-					JS:           payload.JS,
-					Audio:        payload.Audio,
-					Font:         payload.Font,
-					Applications: payload.Applications,
-				}
-				previous, err := compressSettings.GetOrCreateByServerID(r.Context(), serverID)
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to load compress settings")
-					return
-				}
-				if err := postL7Compress(r.Context(), servers, serverID, compressSettingsToL7Payload(store.CompressSettings{
-					CSS:          input.CSS,
-					HTML:         input.HTML,
-					JS:           input.JS,
-					Audio:        input.Audio,
-					Font:         input.Font,
-					Applications: input.Applications,
-				})); err != nil {
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				updated, err := compressSettings.UpsertByServerID(r.Context(), serverID, input)
-				if err != nil {
-					_, _ = compressSettings.UpsertByServerID(r.Context(), serverID, store.CompressSettingsInput{
-						CSS:          previous.CSS,
-						HTML:         previous.HTML,
-						JS:           previous.JS,
-						Audio:        previous.Audio,
-						Font:         previous.Font,
-						Applications: previous.Applications,
-					})
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update compress settings")
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.HasSuffix(r.URL.Path, "/listening-ports/bound") {
-			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/listening-ports/bound")
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			if r.Method != http.MethodGet {
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-				return
-			}
-			handleServerBoundPorts(w, r, servers, serverID)
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/listening-ports") {
-			serverID, portID, isBatch, ok := parseListeningPortsPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if portID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := listeningPorts.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load listening ports")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload listeningPortBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					list, err := listeningPorts.ListByServer(r.Context(), serverID)
-					if err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to load listening ports")
-						return
-					}
-					deleteIDs := make(map[int64]struct{}, len(payload.IDs))
-					for _, id := range payload.IDs {
-						deleteIDs[id] = struct{}{}
-					}
-					remaining := make([]store.ListeningPort, 0, len(list))
-					for _, port := range list {
-						if _, ok := deleteIDs[port.ID]; ok {
-							continue
-						}
-						remaining = append(remaining, port)
-					}
-					if err := postL7ListeningPorts(r.Context(), servers, serverID, listeningPortsToL7Payload(remaining)); err != nil {
-						writeError(w, http.StatusBadGateway, err.Error())
-						return
-					}
-					if err := listeningPorts.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete listening ports")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload listeningPortPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				if err := validateListeningPortAvailable(r.Context(), servers, listeningPorts, serverID, payload.Port, 0); err != nil {
-					writeError(w, http.StatusBadRequest, err.Error())
-					return
-				}
-				created, err := listeningPorts.Create(r.Context(), serverID, store.ListeningPortInput{
-					Port:        payload.Port,
-					Protocol:    strings.TrimSpace(payload.Protocol),
-					Description: strings.TrimSpace(payload.Description),
-					Status:      strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create listening port")
-					return
-				}
-				if err := callL7UpdateListeningPorts(r.Context(), servers, serverID, listeningPorts); err != nil {
-					_ = listeningPorts.Delete(r.Context(), serverID, created.ID)
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if portID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload listeningPortPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				existingList, err := listeningPorts.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load listening ports")
-					return
-				}
-				var previous store.ListeningPort
-				found := false
-				for _, port := range existingList {
-					if port.ID == portID {
-						previous = port
-						found = true
-						break
-					}
-				}
-				if !found {
-					writeError(w, http.StatusNotFound, "listening port not found")
-					return
-				}
-				if err := validateListeningPortAvailable(r.Context(), servers, listeningPorts, serverID, payload.Port, portID); err != nil {
-					writeError(w, http.StatusBadRequest, err.Error())
-					return
-				}
-				updated, err := listeningPorts.Update(r.Context(), serverID, portID, store.ListeningPortInput{
-					Port:        payload.Port,
-					Protocol:    strings.TrimSpace(payload.Protocol),
-					Description: strings.TrimSpace(payload.Description),
-					Status:      strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "listening port not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update listening port")
-					return
-				}
-				if err := callL7UpdateListeningPorts(r.Context(), servers, serverID, listeningPorts); err != nil {
-					_, _ = listeningPorts.Update(r.Context(), serverID, portID, store.ListeningPortInput{
-						Port:        previous.Port,
-						Protocol:    previous.Protocol,
-						Description: previous.Description,
-						Status:      previous.Status,
-					})
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if portID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := listeningPorts.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load listening ports")
-					return
-				}
-				remaining := make([]store.ListeningPort, 0, len(list))
-				found := false
-				for _, port := range list {
-					if port.ID == portID {
-						found = true
-						continue
-					}
-					remaining = append(remaining, port)
-				}
-				if !found {
-					writeError(w, http.StatusNotFound, "listening port not found")
-					return
-				}
-				if err := postL7ListeningPorts(r.Context(), servers, serverID, listeningPortsToL7Payload(remaining)); err != nil {
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				if err := listeningPorts.Delete(r.Context(), serverID, portID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete listening port")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.HasSuffix(r.URL.Path, "/cache-rules/clear-url-cache") && r.Method == http.MethodPost {
-			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/cache-rules/clear-url-cache")
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			var payload clearUrlCachePayload
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-				writeError(w, http.StatusBadRequest, "invalid JSON body")
-				return
-			}
-			matchType, validationErr := normalizeClearUrlCacheMatchType(payload.MatchType)
-			if validationErr != "" {
-				writeError(w, http.StatusBadRequest, validationErr)
-				return
-			}
-			matchContent := strings.TrimSpace(payload.MatchContent)
-			if validationErr := validateClearUrlCacheContent(matchType, matchContent); validationErr != "" {
-				writeError(w, http.StatusBadRequest, validationErr)
-				return
-			}
-			if err := postL7ClearUrlCache(r.Context(), servers, serverID, matchType, matchContent); err != nil {
-				writeError(w, http.StatusBadGateway, err.Error())
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		if strings.HasSuffix(r.URL.Path, "/cache-rules/clear-cache") && r.Method == http.MethodPost {
-			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/cache-rules/clear-cache")
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-			if err := postL7CacheClear(r.Context(), servers, serverID, "l7_clear_cache"); err != nil {
-				writeError(w, http.StatusBadGateway, err.Error())
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/cache-rules") {
-			serverID, ruleID, isBatch, ok := parseCacheRulesPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if ruleID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := cacheRules.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load cache rules")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload cacheRuleBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					list, err := cacheRules.ListByServer(r.Context(), serverID)
-					if err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to load cache rules")
-						return
-					}
-					deleteIDs := make(map[int64]struct{}, len(payload.IDs))
-					for _, id := range payload.IDs {
-						deleteIDs[id] = struct{}{}
-					}
-					remaining := make([]store.CacheRule, 0, len(list))
-					for _, rule := range list {
-						if _, ok := deleteIDs[rule.ID]; ok {
-							continue
-						}
-						remaining = append(remaining, rule)
-					}
-					if err := postL7CacheRules(r.Context(), servers, serverID, cacheRulesToL7Payload(remaining)); err != nil {
-						writeError(w, http.StatusBadGateway, err.Error())
-						return
-					}
-					if err := cacheRules.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete cache rules")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload cacheRulePayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				input, validationErr := cacheRulePayloadToInput(payload)
-				if validationErr != "" {
-					writeError(w, http.StatusBadRequest, validationErr)
-					return
-				}
-				existingList, err := cacheRules.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load cache rules")
-					return
-				}
-				if store.CacheRuleNameExists(existingList, input.RuleName, 0) {
-					writeError(w, http.StatusBadRequest, "cache rule "+input.RuleName+" already exists")
-					return
-				}
-				created, err := cacheRules.Create(r.Context(), serverID, input)
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create cache rule")
-					return
-				}
-				if err := callL7UpdateCacheRules(r.Context(), servers, serverID, cacheRules); err != nil {
-					_ = cacheRules.Delete(r.Context(), serverID, created.ID)
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload cacheRulePayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				input, validationErr := cacheRulePayloadToInput(payload)
-				if validationErr != "" {
-					writeError(w, http.StatusBadRequest, validationErr)
-					return
-				}
-				existingList, err := cacheRules.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load cache rules")
-					return
-				}
-				var previous store.CacheRule
-				found := false
-				for _, rule := range existingList {
-					if rule.ID == ruleID {
-						previous = rule
-						found = true
-						break
-					}
-				}
-				if !found {
-					writeError(w, http.StatusNotFound, "cache rule not found")
-					return
-				}
-				if store.CacheRuleNameExists(existingList, input.RuleName, ruleID) {
-					writeError(w, http.StatusBadRequest, "cache rule "+input.RuleName+" already exists")
-					return
-				}
-				updated, err := cacheRules.Update(r.Context(), serverID, ruleID, input)
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "cache rule not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update cache rule")
-					return
-				}
-				if err := callL7UpdateCacheRules(r.Context(), servers, serverID, cacheRules); err != nil {
-					_, _ = cacheRules.Update(r.Context(), serverID, ruleID, store.CacheRuleInput{
-						RuleName:         previous.RuleName,
-						RuleType:         previous.RuleType,
-						CachingTime:      previous.CachingTime,
-						URL:              previous.URL,
-						FileTypes:        previous.FileTypes,
-						Priority:         previous.Priority,
-						CacheSlice:       previous.CacheSlice,
-						WithoutParameter: previous.WithoutParameter,
-						CacheMode:        previous.CacheMode,
-						Status:           previous.Status,
-					})
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if ruleID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := cacheRules.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load cache rules")
-					return
-				}
-				remaining := make([]store.CacheRule, 0, len(list))
-				found := false
-				for _, rule := range list {
-					if rule.ID == ruleID {
-						found = true
-						continue
-					}
-					remaining = append(remaining, rule)
-				}
-				if !found {
-					writeError(w, http.StatusNotFound, "cache rule not found")
-					return
-				}
-				if err := postL7CacheRules(r.Context(), servers, serverID, cacheRulesToL7Payload(remaining)); err != nil {
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				if err := cacheRules.Delete(r.Context(), serverID, ruleID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete cache rule")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
-		if strings.Contains(r.URL.Path, "/upstream-servers") {
-			serverID, upstreamID, isBatch, ok := parseUpstreamPath(r.URL.Path)
-			if !ok {
-				writeError(w, http.StatusNotFound, "not found")
-				return
-			}
-
-			switch r.Method {
-			case http.MethodGet:
-				if upstreamID != 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := upstreamServers.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
-					return
-				}
-				writeJSON(w, http.StatusOK, list)
-			case http.MethodPost:
-				if isBatch {
-					var payload upstreamServerBatchPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					list, err := upstreamServers.ListByServer(r.Context(), serverID)
-					if err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
-						return
-					}
-					deleteIDs := make(map[int64]struct{}, len(payload.IDs))
-					for _, id := range payload.IDs {
-						deleteIDs[id] = struct{}{}
-					}
-					remaining := make([]store.UpstreamServer, 0, len(list))
-					for _, upstream := range list {
-						if _, ok := deleteIDs[upstream.ID]; ok {
-							continue
-						}
-						remaining = append(remaining, upstream)
-					}
-					if err := postL7UpstreamServers(r.Context(), servers, serverID, upstreamServersToL7Payload(remaining)); err != nil {
-						writeError(w, http.StatusBadGateway, err.Error())
-						return
-					}
-					if err := upstreamServers.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete upstream servers")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
-					return
-				}
-				var payload upstreamServerPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				address := strings.TrimSpace(payload.Address)
-				if address == "" {
-					writeError(w, http.StatusBadRequest, "address is required")
-					return
-				}
-				existingList, err := upstreamServers.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
-					return
-				}
-				if store.UpstreamAddressExists(existingList, address, 0) {
-					writeError(w, http.StatusBadRequest, "upstream server "+address+" is already registered")
-					return
-				}
-				created, err := upstreamServers.Create(r.Context(), serverID, store.UpstreamServerInput{
-					Address:     address,
-					Description: strings.TrimSpace(payload.Description),
-					Status:      strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to create upstream server")
-					return
-				}
-				if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
-					_ = upstreamServers.Delete(r.Context(), serverID, created.ID)
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				writeJSON(w, http.StatusCreated, created)
-			case http.MethodPut:
-				if upstreamID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				var payload upstreamServerPayload
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					writeError(w, http.StatusBadRequest, "invalid JSON body")
-					return
-				}
-				existingList, err := upstreamServers.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
-					return
-				}
-				var previous store.UpstreamServer
-				found := false
-				for _, upstream := range existingList {
-					if upstream.ID == upstreamID {
-						previous = upstream
-						found = true
-						break
-					}
-				}
-				if !found {
-					writeError(w, http.StatusNotFound, "upstream server not found")
-					return
-				}
-				address := strings.TrimSpace(payload.Address)
-				if address == "" {
-					writeError(w, http.StatusBadRequest, "address is required")
-					return
-				}
-				if store.UpstreamAddressExists(existingList, address, upstreamID) {
-					writeError(w, http.StatusBadRequest, "upstream server "+address+" is already registered")
-					return
-				}
-				updated, err := upstreamServers.Update(r.Context(), serverID, upstreamID, store.UpstreamServerInput{
-					Address:     address,
-					Description: strings.TrimSpace(payload.Description),
-					Status:      strings.TrimSpace(payload.Status),
-				})
-				if err != nil {
-					if store.IsNotFound(err) {
-						writeError(w, http.StatusNotFound, "upstream server not found")
-						return
-					}
-					writeError(w, http.StatusInternalServerError, "failed to update upstream server")
-					return
-				}
-				if err := callL7UpdateUpstreamServers(r.Context(), servers, serverID, upstreamServers); err != nil {
-					_, _ = upstreamServers.Update(r.Context(), serverID, upstreamID, store.UpstreamServerInput{
-						Address:     previous.Address,
-						Description: previous.Description,
-						Status:      previous.Status,
-					})
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				writeJSON(w, http.StatusOK, updated)
-			case http.MethodDelete:
-				if upstreamID == 0 || isBatch {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				list, err := upstreamServers.ListByServer(r.Context(), serverID)
-				if err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
-					return
-				}
-				remaining := make([]store.UpstreamServer, 0, len(list))
-				found := false
-				for _, upstream := range list {
-					if upstream.ID == upstreamID {
-						found = true
-						continue
-					}
-					remaining = append(remaining, upstream)
-				}
-				if !found {
-					writeError(w, http.StatusNotFound, "upstream server not found")
-					return
-				}
-				if err := postL7UpstreamServers(r.Context(), servers, serverID, upstreamServersToL7Payload(remaining)); err != nil {
-					writeError(w, http.StatusBadGateway, err.Error())
-					return
-				}
-				if err := upstreamServers.Delete(r.Context(), serverID, upstreamID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to delete upstream server")
-					return
-				}
-				w.WriteHeader(http.StatusNoContent)
-			default:
-				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			}
-			return
-		}
-
 		serverID, ok := parseID(r.URL.Path, "/servers/")
 		if !ok {
 			writeError(w, http.StatusNotFound, "not found")
@@ -7105,8 +4654,8 @@ func serverDetailHandler(
 	}
 }
 
-func parseWafWhitelistPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseWafWhitelistPath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 {
 		return 0, 0, false, false
@@ -7114,22 +4663,22 @@ func parseWafWhitelistPath(path string) (serverID int64, ruleID int64, isBatch b
 	if parts[1] != "waf" || parts[2] != "whitelist" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 3 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 4 && parts[3] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 4 {
 		ruleID, ok = parsePositiveInt(parts[3])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
@@ -7186,8 +4735,8 @@ func parseL4WhitelistPath(path string) (serverID int64, entryID int64, ok bool) 
 	return 0, 0, false
 }
 
-func parseWafBlacklistPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseWafBlacklistPath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 {
 		return 0, 0, false, false
@@ -7195,28 +4744,28 @@ func parseWafBlacklistPath(path string) (serverID int64, ruleID int64, isBatch b
 	if parts[1] != "waf" || parts[2] != "blacklist" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 3 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 4 && parts[3] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 4 {
 		ruleID, ok = parsePositiveInt(parts[3])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseWafGeoPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseWafGeoPath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 {
 		return 0, 0, false, false
@@ -7224,28 +4773,28 @@ func parseWafGeoPath(path string) (serverID int64, ruleID int64, isBatch bool, o
 	if parts[1] != "waf" || parts[2] != "geolocation" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 3 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 4 && parts[3] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 4 {
 		ruleID, ok = parsePositiveInt(parts[3])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseWafAntiCcPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseWafAntiCcPath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 {
 		return 0, 0, false, false
@@ -7253,28 +4802,28 @@ func parseWafAntiCcPath(path string) (serverID int64, ruleID int64, isBatch bool
 	if parts[1] != "waf" || parts[2] != "anti-cc" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 3 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 4 && parts[3] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 4 {
 		ruleID, ok = parsePositiveInt(parts[3])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseWafAntiHeaderPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseWafAntiHeaderPath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 {
 		return 0, 0, false, false
@@ -7282,28 +4831,28 @@ func parseWafAntiHeaderPath(path string) (serverID int64, ruleID int64, isBatch 
 	if parts[1] != "waf" || parts[2] != "anti-header" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 3 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 4 && parts[3] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 4 {
 		ruleID, ok = parsePositiveInt(parts[3])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseWafIntervalPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseWafIntervalPath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 {
 		return 0, 0, false, false
@@ -7311,28 +4860,28 @@ func parseWafIntervalPath(path string) (serverID int64, ruleID int64, isBatch bo
 	if parts[1] != "waf" || parts[2] != "interval-freq-limit" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 3 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 4 && parts[3] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 4 {
 		ruleID, ok = parsePositiveInt(parts[3])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseWafSecondPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseWafSecondPath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 {
 		return 0, 0, false, false
@@ -7340,28 +4889,28 @@ func parseWafSecondPath(path string) (serverID int64, ruleID int64, isBatch bool
 	if parts[1] != "waf" || parts[2] != "second-freq-limit" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 3 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 4 && parts[3] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 4 {
 		ruleID, ok = parsePositiveInt(parts[3])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseWafResponsePath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseWafResponsePath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 {
 		return 0, 0, false, false
@@ -7369,28 +4918,28 @@ func parseWafResponsePath(path string) (serverID int64, ruleID int64, isBatch bo
 	if parts[1] != "waf" || parts[2] != "response-freq" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 3 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 4 && parts[3] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 4 {
 		ruleID, ok = parsePositiveInt(parts[3])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseWafUserAgentPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseWafUserAgentPath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 3 {
 		return 0, 0, false, false
@@ -7398,28 +4947,28 @@ func parseWafUserAgentPath(path string) (serverID int64, ruleID int64, isBatch b
 	if parts[1] != "waf" || parts[2] != "user-agent" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 3 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 4 && parts[3] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 4 {
 		ruleID, ok = parsePositiveInt(parts[3])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseListeningPortsPath(path string) (serverID int64, portID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseListeningPortsPath(path string) (siteID int64, portID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 2 {
 		return 0, 0, false, false
@@ -7427,28 +4976,28 @@ func parseListeningPortsPath(path string) (serverID int64, portID int64, isBatch
 	if parts[1] != "listening-ports" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 2 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 3 && parts[2] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 3 {
 		portID, ok = parsePositiveInt(parts[2])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, portID, false, true
+		return siteID, portID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseCacheRulesPath(path string) (serverID int64, ruleID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseCacheRulesPath(path string) (siteID int64, ruleID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 2 {
 		return 0, 0, false, false
@@ -7456,28 +5005,28 @@ func parseCacheRulesPath(path string) (serverID int64, ruleID int64, isBatch boo
 	if parts[1] != "cache-rules" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 2 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 3 && parts[2] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 3 {
 		ruleID, ok = parsePositiveInt(parts[2])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, ruleID, false, true
+		return siteID, ruleID, false, true
 	}
 	return 0, 0, false, false
 }
 
-func parseUpstreamPath(path string) (serverID int64, upstreamID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/servers/")
+func parseUpstreamPath(path string) (siteID int64, upstreamID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/sites/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 2 {
 		return 0, 0, false, false
@@ -7485,22 +5034,22 @@ func parseUpstreamPath(path string) (serverID int64, upstreamID int64, isBatch b
 	if parts[1] != "upstream-servers" {
 		return 0, 0, false, false
 	}
-	serverID, ok = parsePositiveInt(parts[0])
+	siteID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 2 {
-		return serverID, 0, false, true
+		return siteID, 0, false, true
 	}
 	if len(parts) == 3 && parts[2] == "batch-delete" {
-		return serverID, 0, true, true
+		return siteID, 0, true, true
 	}
 	if len(parts) == 3 {
 		upstreamID, ok = parsePositiveInt(parts[2])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return serverID, upstreamID, false, true
+		return siteID, upstreamID, false, true
 	}
 	return 0, 0, false, false
 }
@@ -7599,6 +5148,129 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 					return
 				}
 				writeError(w, http.StatusInternalServerError, "failed to delete user")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	}
+}
+
+func sitesHandler(sites store.SiteStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			list, err := sites.List(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load sites")
+				return
+			}
+			writeJSON(w, http.StatusOK, list)
+		case http.MethodPost:
+			var payload store.SiteInput
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			payload = payload.Normalize()
+			if payload.Domain == "" {
+				writeError(w, http.StatusBadRequest, "domain is required")
+				return
+			}
+			created, err := sites.Create(r.Context(), payload)
+			if err != nil {
+				if store.IsDuplicateDomain(err) {
+					writeError(w, http.StatusConflict, "domain already exists")
+					return
+				}
+				if strings.Contains(err.Error(), "invalid certificate expiry") {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to create site")
+				return
+			}
+			if err := sites.UpdateSiteServers(r.Context(), created.ID, payload.ServerIDs); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to assign servers")
+				return
+			}
+			updated, err := sites.Get(r.Context(), created.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load created site")
+				return
+			}
+			writeJSON(w, http.StatusCreated, updated)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	}
+}
+
+func siteHandler(sites store.SiteStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := parseID(r.URL.Path, "/sites/")
+		if !ok {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+
+		switch r.Method {
+		case http.MethodGet:
+			item, err := sites.Get(r.Context(), id)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "site not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load site")
+				return
+			}
+			writeJSON(w, http.StatusOK, item)
+		case http.MethodPut, http.MethodPatch:
+			var payload store.SiteInput
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body")
+				return
+			}
+			payload = payload.Normalize()
+			if payload.Domain == "" {
+				writeError(w, http.StatusBadRequest, "domain is required")
+				return
+			}
+			if _, err := sites.Update(r.Context(), id, payload); err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "site not found")
+					return
+				}
+				if store.IsDuplicateDomain(err) {
+					writeError(w, http.StatusConflict, "domain already exists")
+					return
+				}
+				if strings.Contains(err.Error(), "invalid certificate expiry") {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to update site")
+				return
+			}
+			if err := sites.UpdateSiteServers(r.Context(), id, payload.ServerIDs); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to assign servers")
+				return
+			}
+			updated, err := sites.Get(r.Context(), id)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load updated site")
+				return
+			}
+			writeJSON(w, http.StatusOK, updated)
+		case http.MethodDelete:
+			if err := sites.Delete(r.Context(), id); err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "site not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to delete site")
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)

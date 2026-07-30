@@ -65,7 +65,9 @@ func main() {
 	cacheRuleStore := store.NewCacheRuleStore(connection)
 	compressStore := store.NewCompressStore(connection)
 	blacklistStore := store.NewBlacklistStore(redisClient)
-	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore)
+	siteStore := store.NewSiteStore(connection)
+	wafRuleStore := store.NewWafRuleStore(connection)
+	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore)
 
 	// Start background worker to periodically collect IP request statistics
 	// from each server and store them into the database.

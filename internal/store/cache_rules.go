@@ -8,7 +8,7 @@ import (
 
 type CacheRule struct {
 	ID               int64  `json:"id"`
-	ServerID         int64  `json:"serverId"`
+	SiteID         int64  `json:"siteId"`
 	RuleName         string `json:"ruleName"`
 	RuleType         string `json:"ruleType"`
 	CachingTime      int    `json:"cachingTime"`
@@ -35,11 +35,11 @@ type CacheRuleInput struct {
 }
 
 type CacheRuleStore interface {
-	ListByServer(ctx context.Context, serverID int64) ([]CacheRule, error)
-	Create(ctx context.Context, serverID int64, rule CacheRuleInput) (CacheRule, error)
-	Update(ctx context.Context, serverID, ruleID int64, rule CacheRuleInput) (CacheRule, error)
-	Delete(ctx context.Context, serverID, ruleID int64) error
-	DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error
+	ListBySite(ctx context.Context, siteID int64) ([]CacheRule, error)
+	Create(ctx context.Context, siteID int64, rule CacheRuleInput) (CacheRule, error)
+	Update(ctx context.Context, siteID, ruleID int64, rule CacheRuleInput) (CacheRule, error)
+	Delete(ctx context.Context, siteID, ruleID int64) error
+	DeleteBatch(ctx context.Context, siteID int64, ruleIDs []int64) error
 }
 
 type cacheRuleStore struct {
@@ -70,13 +70,13 @@ func CacheRuleNameExists(list []CacheRule, ruleName string, excludeID int64) boo
 	return false
 }
 
-func (store *cacheRuleStore) ListByServer(ctx context.Context, serverID int64) ([]CacheRule, error) {
+func (store *cacheRuleStore) ListBySite(ctx context.Context, siteID int64) ([]CacheRule, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, server_id, rule_name, rule_type, caching_time, url, file_types,
+		SELECT id, site_id, rule_name, rule_type, caching_time, url, file_types,
 		       priority, cache_slice, without_parameter, cache_mode, status
 		FROM cache_rules
-		WHERE server_id = ?
-		ORDER BY priority DESC, id ASC`, serverID)
+		WHERE site_id = ?
+		ORDER BY priority DESC, id ASC`, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +91,7 @@ func (store *cacheRuleStore) ListByServer(ctx context.Context, serverID int64) (
 		var cacheMode sql.NullString
 		if err := rows.Scan(
 			&rule.ID,
-			&rule.ServerID,
+			&rule.SiteID,
 			&rule.RuleName,
 			&ruleType,
 			&rule.CachingTime,
@@ -117,13 +117,13 @@ func (store *cacheRuleStore) ListByServer(ctx context.Context, serverID int64) (
 	return rules, nil
 }
 
-func (store *cacheRuleStore) Create(ctx context.Context, serverID int64, rule CacheRuleInput) (CacheRule, error) {
+func (store *cacheRuleStore) Create(ctx context.Context, siteID int64, rule CacheRuleInput) (CacheRule, error) {
 	result, err := store.db.ExecContext(ctx, `
 		INSERT INTO cache_rules (
-			server_id, rule_name, rule_type, caching_time, url, file_types,
+			site_id, rule_name, rule_type, caching_time, url, file_types,
 			priority, cache_slice, without_parameter, cache_mode, status
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		serverID,
+		siteID,
 		rule.RuleName,
 		nullableServerString(rule.RuleType),
 		rule.CachingTime,
@@ -149,7 +149,7 @@ func (store *cacheRuleStore) Create(ctx context.Context, serverID int64, rule Ca
 
 	return CacheRule{
 		ID:               id,
-		ServerID:         serverID,
+		SiteID:         siteID,
 		RuleName:         rule.RuleName,
 		RuleType:         rule.RuleType,
 		CachingTime:      rule.CachingTime,
@@ -163,12 +163,12 @@ func (store *cacheRuleStore) Create(ctx context.Context, serverID int64, rule Ca
 	}, nil
 }
 
-func (store *cacheRuleStore) Update(ctx context.Context, serverID, ruleID int64, rule CacheRuleInput) (CacheRule, error) {
+func (store *cacheRuleStore) Update(ctx context.Context, siteID, ruleID int64, rule CacheRuleInput) (CacheRule, error) {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE cache_rules
 		SET rule_name = ?, rule_type = ?, caching_time = ?, url = ?, file_types = ?,
 		    priority = ?, cache_slice = ?, without_parameter = ?, cache_mode = ?, status = ?
-		WHERE id = ? AND server_id = ?`,
+		WHERE id = ? AND site_id = ?`,
 		rule.RuleName,
 		nullableServerString(rule.RuleType),
 		rule.CachingTime,
@@ -180,7 +180,7 @@ func (store *cacheRuleStore) Update(ctx context.Context, serverID, ruleID int64,
 		nullableServerString(rule.CacheMode),
 		nullableServerString(rule.Status),
 		ruleID,
-		serverID,
+		siteID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -198,7 +198,7 @@ func (store *cacheRuleStore) Update(ctx context.Context, serverID, ruleID int64,
 
 	return CacheRule{
 		ID:               ruleID,
-		ServerID:         serverID,
+		SiteID:         siteID,
 		RuleName:         rule.RuleName,
 		RuleType:         rule.RuleType,
 		CachingTime:      rule.CachingTime,
@@ -212,16 +212,16 @@ func (store *cacheRuleStore) Update(ctx context.Context, serverID, ruleID int64,
 	}, nil
 }
 
-func (store *cacheRuleStore) Delete(ctx context.Context, serverID, ruleID int64) error {
+func (store *cacheRuleStore) Delete(ctx context.Context, siteID, ruleID int64) error {
 	_, err := store.db.ExecContext(ctx, `
-		DELETE FROM cache_rules WHERE id = ? AND server_id = ?`,
+		DELETE FROM cache_rules WHERE id = ? AND site_id = ?`,
 		ruleID,
-		serverID,
+		siteID,
 	)
 	return err
 }
 
-func (store *cacheRuleStore) DeleteBatch(ctx context.Context, serverID int64, ruleIDs []int64) error {
+func (store *cacheRuleStore) DeleteBatch(ctx context.Context, siteID int64, ruleIDs []int64) error {
 	ids := uniqueInt64(ruleIDs)
 	if len(ids) == 0 {
 		return nil
@@ -233,9 +233,9 @@ func (store *cacheRuleStore) DeleteBatch(ctx context.Context, serverID int64, ru
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	args = append(args, serverID)
+	args = append(args, siteID)
 
-	query := "DELETE FROM cache_rules WHERE id IN (" + strings.Join(placeholders, ",") + ") AND server_id = ?"
+	query := "DELETE FROM cache_rules WHERE id IN (" + strings.Join(placeholders, ",") + ") AND site_id = ?"
 	_, err := store.db.ExecContext(ctx, query, args...)
 	return err
 }

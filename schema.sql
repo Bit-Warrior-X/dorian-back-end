@@ -1858,15 +1858,15 @@ DELIMITER ;
 DROP TABLE IF EXISTS `upstream_servers`;
 CREATE TABLE IF NOT EXISTS `upstream_servers` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL,
   `ip_port` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `description` varchar(500) NOT NULL DEFAULT '0',
   `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `upstream_servers_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `site_id` (`site_id`) USING BTREE,
+  CONSTRAINT `upstream_servers_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1018 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -1875,7 +1875,7 @@ CREATE TABLE IF NOT EXISTS `upstream_servers` (
 DROP TABLE IF EXISTS `listening_ports`;
 CREATE TABLE IF NOT EXISTS `listening_ports` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL,
   `port` int NOT NULL,
   `protocol` enum('HTTP','HTTPS') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'HTTP',
   `description` varchar(500) NOT NULL DEFAULT '',
@@ -1883,8 +1883,8 @@ CREATE TABLE IF NOT EXISTS `listening_ports` (
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `listening_ports_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `site_id` (`site_id`) USING BTREE,
+  CONSTRAINT `listening_ports_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -1893,7 +1893,7 @@ CREATE TABLE IF NOT EXISTS `listening_ports` (
 DROP TABLE IF EXISTS `cache_rules`;
 CREATE TABLE IF NOT EXISTS `cache_rules` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL,
   `rule_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `rule_type` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'file',
   `caching_time` int NOT NULL DEFAULT 3600,
@@ -1907,8 +1907,8 @@ CREATE TABLE IF NOT EXISTS `cache_rules` (
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `cache_rules_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `site_id` (`site_id`) USING BTREE,
+  CONSTRAINT `cache_rules_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -1917,7 +1917,7 @@ CREATE TABLE IF NOT EXISTS `cache_rules` (
 DROP TABLE IF EXISTS `compress_settings`;
 CREATE TABLE IF NOT EXISTS `compress_settings` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL,
   `css` tinyint(1) NOT NULL DEFAULT 1,
   `html` tinyint(1) NOT NULL DEFAULT 1,
   `js` tinyint(1) NOT NULL DEFAULT 1,
@@ -1927,8 +1927,48 @@ CREATE TABLE IF NOT EXISTS `compress_settings` (
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `compress_settings_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  UNIQUE KEY `site_id` (`site_id`) USING BTREE,
+  CONSTRAINT `compress_settings_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Data exporting was unselected.
+
+-- Dumping structure for table cdnproxy.sites
+DROP TABLE IF EXISTS `sites`;
+CREATE TABLE IF NOT EXISTS `sites` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `domain` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
+  `waf_id` bigint DEFAULT NULL,
+  `certificate_status` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',
+  `certificate_expiry` datetime DEFAULT NULL,
+  `cache_ratio` double NOT NULL DEFAULT 0,
+  `bandwidth` bigint unsigned NOT NULL DEFAULT 0,
+  `ssl_type` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',
+  `ssl_cert` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+  `ssl_cert_key` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+  `protocol_badges` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `unique_site_domain` (`domain`) USING BTREE,
+  KEY `waf_id` (`waf_id`) USING BTREE,
+  CONSTRAINT `sites_waf_rule_fk` FOREIGN KEY (`waf_id`) REFERENCES `waf_rule` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Data exporting was unselected.
+
+-- Dumping structure for table cdnproxy.site_servers
+DROP TABLE IF EXISTS `site_servers`;
+CREATE TABLE IF NOT EXISTS `site_servers` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `site_id` bigint NOT NULL,
+  `server_id` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `unique_site_server` (`site_id`, `server_id`),
+  KEY `server_id` (`server_id`),
+  CONSTRAINT `site_servers_ibfk_1` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `site_servers_ibfk_2` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -1981,11 +2021,24 @@ CREATE TABLE IF NOT EXISTS `users` (
 
 -- Data exporting was unselected.
 
+
+-- Dumping structure for table cdnproxy.waf_rule
+DROP TABLE IF EXISTS `waf_rule`;
+CREATE TABLE IF NOT EXISTS `waf_rule` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `role` enum('predefined','custom') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `created_at` timestamp NULL DEFAULT (now()),
+  PRIMARY KEY (`id`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Data exporting was unselected.
+
 -- Dumping structure for table cdnproxy.waf_anticc
 DROP TABLE IF EXISTS `waf_anticc`;
 CREATE TABLE IF NOT EXISTS `waf_anticc` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `waf_rule_id` bigint NOT NULL,
   `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `method` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `created_at` timestamp NULL DEFAULT (now()),
@@ -1996,8 +2049,8 @@ CREATE TABLE IF NOT EXISTS `waf_anticc` (
   `behavior` enum('Deny','Drop','Drop+Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Drop',
   `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `waf_anticc_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_anticc_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1006 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -2006,7 +2059,7 @@ CREATE TABLE IF NOT EXISTS `waf_anticc` (
 DROP TABLE IF EXISTS `waf_antiheader`;
 CREATE TABLE IF NOT EXISTS `waf_antiheader` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `waf_rule_id` bigint NOT NULL,
   `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `header` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `value` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -2016,8 +2069,8 @@ CREATE TABLE IF NOT EXISTS `waf_antiheader` (
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `waf_antiheader_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_antiheader_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1008 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -2026,7 +2079,7 @@ CREATE TABLE IF NOT EXISTS `waf_antiheader` (
 DROP TABLE IF EXISTS `waf_blacklist`;
 CREATE TABLE IF NOT EXISTS `waf_blacklist` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `waf_rule_id` bigint NOT NULL,
   `black_ip_list` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `method` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -2035,8 +2088,8 @@ CREATE TABLE IF NOT EXISTS `waf_blacklist` (
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `waf_blacklist_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_blacklist_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1029 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -2045,7 +2098,7 @@ CREATE TABLE IF NOT EXISTS `waf_blacklist` (
 DROP TABLE IF EXISTS `waf_geolocation`;
 CREATE TABLE IF NOT EXISTS `waf_geolocation` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `waf_rule_id` bigint NOT NULL,
   `country` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `behavior` enum('Deny','Drop','Drop+Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Drop',
@@ -2054,8 +2107,8 @@ CREATE TABLE IF NOT EXISTS `waf_geolocation` (
   `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `waf_geolocation_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_geolocation_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1008 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -2064,7 +2117,7 @@ CREATE TABLE IF NOT EXISTS `waf_geolocation` (
 DROP TABLE IF EXISTS `waf_intervalfreqlimit`;
 CREATE TABLE IF NOT EXISTS `waf_intervalfreqlimit` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `waf_rule_id` bigint NOT NULL,
   `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `time` int NOT NULL DEFAULT (0),
   `request_count` int NOT NULL DEFAULT (0),
@@ -2073,8 +2126,8 @@ CREATE TABLE IF NOT EXISTS `waf_intervalfreqlimit` (
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `waf_intervalfreqlimit_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_intervalfreqlimit_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1008 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -2083,7 +2136,7 @@ CREATE TABLE IF NOT EXISTS `waf_intervalfreqlimit` (
 DROP TABLE IF EXISTS `waf_responsefreq`;
 CREATE TABLE IF NOT EXISTS `waf_responsefreq` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `waf_rule_id` bigint NOT NULL,
   `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `response_code` varchar(100) NOT NULL DEFAULT '0',
   `time` int NOT NULL DEFAULT '0',
@@ -2093,8 +2146,8 @@ CREATE TABLE IF NOT EXISTS `waf_responsefreq` (
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `waf_responsefreq_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_responsefreq_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1010 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -2103,7 +2156,7 @@ CREATE TABLE IF NOT EXISTS `waf_responsefreq` (
 DROP TABLE IF EXISTS `waf_secondfreqlimit`;
 CREATE TABLE IF NOT EXISTS `waf_secondfreqlimit` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `waf_rule_id` bigint NOT NULL,
   `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `request_count` int NOT NULL DEFAULT '0',
   `burst` int NOT NULL DEFAULT '0',
@@ -2112,8 +2165,8 @@ CREATE TABLE IF NOT EXISTS `waf_secondfreqlimit` (
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `waf_secondfreqlimit_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_secondfreqlimit_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1009 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -2122,7 +2175,7 @@ CREATE TABLE IF NOT EXISTS `waf_secondfreqlimit` (
 DROP TABLE IF EXISTS `waf_useragent`;
 CREATE TABLE IF NOT EXISTS `waf_useragent` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `waf_rule_id` bigint NOT NULL,
   `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `user_agent` varchar(500) NOT NULL DEFAULT '0',
   `match` enum('Equals','Contains','Regex') NOT NULL DEFAULT 'Equals',
@@ -2131,8 +2184,8 @@ CREATE TABLE IF NOT EXISTS `waf_useragent` (
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `waf_useragent_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_useragent_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1010 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -2141,7 +2194,7 @@ CREATE TABLE IF NOT EXISTS `waf_useragent` (
 DROP TABLE IF EXISTS `waf_whitelist`;
 CREATE TABLE IF NOT EXISTS `waf_whitelist` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
+  `waf_rule_id` bigint NOT NULL,
   `white_ip_list` varchar(255) NOT NULL,
   `url` varchar(500) NOT NULL,
   `method` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -2149,8 +2202,8 @@ CREATE TABLE IF NOT EXISTS `waf_whitelist` (
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  KEY `server_id` (`server_id`),
-  CONSTRAINT `waf_whitelist_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `waf_rule_id` (`waf_rule_id`),
+  CONSTRAINT `waf_whitelist_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1015 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.

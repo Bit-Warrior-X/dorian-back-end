@@ -10,7 +10,7 @@ import (
 
 type UpstreamServer struct {
 	ID          int64  `json:"id"`
-	ServerID    int64  `json:"serverId"`
+	SiteID    int64  `json:"siteId"`
 	Address     string `json:"address"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
@@ -23,11 +23,11 @@ type UpstreamServerInput struct {
 }
 
 type UpstreamServerStore interface {
-	ListByServer(ctx context.Context, serverID int64) ([]UpstreamServer, error)
-	Create(ctx context.Context, serverID int64, server UpstreamServerInput) (UpstreamServer, error)
-	Update(ctx context.Context, serverID, upstreamID int64, server UpstreamServerInput) (UpstreamServer, error)
-	Delete(ctx context.Context, serverID, upstreamID int64) error
-	DeleteBatch(ctx context.Context, serverID int64, upstreamIDs []int64) error
+	ListBySite(ctx context.Context, siteID int64) ([]UpstreamServer, error)
+	Create(ctx context.Context, siteID int64, server UpstreamServerInput) (UpstreamServer, error)
+	Update(ctx context.Context, siteID, upstreamID int64, server UpstreamServerInput) (UpstreamServer, error)
+	Delete(ctx context.Context, siteID, upstreamID int64) error
+	DeleteBatch(ctx context.Context, siteID int64, upstreamIDs []int64) error
 }
 
 type upstreamServerStore struct {
@@ -72,12 +72,12 @@ func UpstreamAddressExists(list []UpstreamServer, address string, excludeID int6
 	return false
 }
 
-func (store *upstreamServerStore) ListByServer(ctx context.Context, serverID int64) ([]UpstreamServer, error) {
+func (store *upstreamServerStore) ListBySite(ctx context.Context, siteID int64) ([]UpstreamServer, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, server_id, ip_port, description, status
+		SELECT id, site_id, ip_port, description, status
 		FROM upstream_servers
-		WHERE server_id = ?
-		ORDER BY id DESC`, serverID)
+		WHERE site_id = ?
+		ORDER BY id DESC`, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -87,7 +87,7 @@ func (store *upstreamServerStore) ListByServer(ctx context.Context, serverID int
 	for rows.Next() {
 		var server UpstreamServer
 		var status sql.NullString
-		if err := rows.Scan(&server.ID, &server.ServerID, &server.Address, &server.Description, &status); err != nil {
+		if err := rows.Scan(&server.ID, &server.SiteID, &server.Address, &server.Description, &status); err != nil {
 			return nil, err
 		}
 		server.Status = nullStringValue(status)
@@ -99,11 +99,11 @@ func (store *upstreamServerStore) ListByServer(ctx context.Context, serverID int
 	return servers, nil
 }
 
-func (store *upstreamServerStore) Create(ctx context.Context, serverID int64, server UpstreamServerInput) (UpstreamServer, error) {
+func (store *upstreamServerStore) Create(ctx context.Context, siteID int64, server UpstreamServerInput) (UpstreamServer, error) {
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO upstream_servers (server_id, ip_port, description, status)
+		INSERT INTO upstream_servers (site_id, ip_port, description, status)
 		VALUES (?, ?, ?, ?)`,
-		serverID,
+		siteID,
 		server.Address,
 		server.Description,
 		nullableServerString(server.Status),
@@ -122,23 +122,23 @@ func (store *upstreamServerStore) Create(ctx context.Context, serverID int64, se
 
 	return UpstreamServer{
 		ID:          id,
-		ServerID:    serverID,
+		SiteID:    siteID,
 		Address:     server.Address,
 		Description: server.Description,
 		Status:      server.Status,
 	}, nil
 }
 
-func (store *upstreamServerStore) Update(ctx context.Context, serverID, upstreamID int64, server UpstreamServerInput) (UpstreamServer, error) {
+func (store *upstreamServerStore) Update(ctx context.Context, siteID, upstreamID int64, server UpstreamServerInput) (UpstreamServer, error) {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE upstream_servers
 		SET ip_port = ?, description = ?, status = ?
-		WHERE id = ? AND server_id = ?`,
+		WHERE id = ? AND site_id = ?`,
 		server.Address,
 		server.Description,
 		nullableServerString(server.Status),
 		upstreamID,
-		serverID,
+		siteID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -156,23 +156,23 @@ func (store *upstreamServerStore) Update(ctx context.Context, serverID, upstream
 
 	return UpstreamServer{
 		ID:          upstreamID,
-		ServerID:    serverID,
+		SiteID:    siteID,
 		Address:     server.Address,
 		Description: server.Description,
 		Status:      server.Status,
 	}, nil
 }
 
-func (store *upstreamServerStore) Delete(ctx context.Context, serverID, upstreamID int64) error {
+func (store *upstreamServerStore) Delete(ctx context.Context, siteID, upstreamID int64) error {
 	_, err := store.db.ExecContext(ctx, `
-		DELETE FROM upstream_servers WHERE id = ? AND server_id = ?`,
+		DELETE FROM upstream_servers WHERE id = ? AND site_id = ?`,
 		upstreamID,
-		serverID,
+		siteID,
 	)
 	return err
 }
 
-func (store *upstreamServerStore) DeleteBatch(ctx context.Context, serverID int64, upstreamIDs []int64) error {
+func (store *upstreamServerStore) DeleteBatch(ctx context.Context, siteID int64, upstreamIDs []int64) error {
 	ids := uniqueInt64(upstreamIDs)
 	if len(ids) == 0 {
 		return nil
@@ -184,9 +184,9 @@ func (store *upstreamServerStore) DeleteBatch(ctx context.Context, serverID int6
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	args = append(args, serverID)
+	args = append(args, siteID)
 
-	query := "DELETE FROM upstream_servers WHERE id IN (" + strings.Join(placeholders, ",") + ") AND server_id = ?"
+	query := "DELETE FROM upstream_servers WHERE id IN (" + strings.Join(placeholders, ",") + ") AND site_id = ?"
 	_, err := store.db.ExecContext(ctx, query, args...)
 	return err
 }
