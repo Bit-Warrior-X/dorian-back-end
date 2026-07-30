@@ -214,19 +214,6 @@ func wafRuleDetailHandler(
 			}
 			writeJSON(w, http.StatusOK, updated)
 		case http.MethodDelete:
-			existing, err := wafRules.Get(r.Context(), id)
-			if err != nil {
-				if store.IsNotFound(err) {
-					writeError(w, http.StatusNotFound, "waf rule not found")
-					return
-				}
-				writeError(w, http.StatusInternalServerError, "failed to load waf rule")
-				return
-			}
-			if strings.ToLower(existing.Role) != "predefined" {
-				writeError(w, http.StatusForbidden, "only predefined waf rules can be deleted here")
-				return
-			}
 			if err := wafRules.Delete(r.Context(), id); err != nil {
 				if store.IsNotFound(err) {
 					writeError(w, http.StatusNotFound, "waf rule not found")
