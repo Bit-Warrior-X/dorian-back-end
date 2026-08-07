@@ -8,7 +8,7 @@ import (
 
 type ListeningPort struct {
 	ID          int64  `json:"id"`
-	SiteID    int64  `json:"siteId"`
+	ServerID    int64  `json:"serverId"`
 	Port        int    `json:"port"`
 	Protocol    string `json:"protocol"`
 	Description string `json:"description"`
@@ -23,11 +23,11 @@ type ListeningPortInput struct {
 }
 
 type ListeningPortStore interface {
-	ListBySite(ctx context.Context, siteID int64) ([]ListeningPort, error)
-	Create(ctx context.Context, siteID int64, port ListeningPortInput) (ListeningPort, error)
-	Update(ctx context.Context, siteID, portID int64, port ListeningPortInput) (ListeningPort, error)
-	Delete(ctx context.Context, siteID, portID int64) error
-	DeleteBatch(ctx context.Context, siteID int64, portIDs []int64) error
+	ListByServer(ctx context.Context, serverID int64) ([]ListeningPort, error)
+	Create(ctx context.Context, serverID int64, port ListeningPortInput) (ListeningPort, error)
+	Update(ctx context.Context, serverID, portID int64, port ListeningPortInput) (ListeningPort, error)
+	Delete(ctx context.Context, serverID, portID int64) error
+	DeleteBatch(ctx context.Context, serverID int64, portIDs []int64) error
 }
 
 type listeningPortStore struct {
@@ -38,23 +38,23 @@ func NewListeningPortStore(db *sql.DB) ListeningPortStore {
 	return &listeningPortStore{db: db}
 }
 
-func (store *listeningPortStore) ListBySite(ctx context.Context, siteID int64) ([]ListeningPort, error) {
+func (store *listeningPortStore) ListByServer(ctx context.Context, serverID int64) ([]ListeningPort, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, site_id, port, protocol, description, status
+		SELECT id, server_id, port, protocol, description, status
 		FROM listening_ports
-		WHERE site_id = ?
-		ORDER BY port ASC, id DESC`, siteID)
+		WHERE server_id = ?
+		ORDER BY port ASC, id DESC`, serverID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var ports []ListeningPort
+	ports := make([]ListeningPort, 0)
 	for rows.Next() {
 		var port ListeningPort
 		var protocol sql.NullString
 		var status sql.NullString
-		if err := rows.Scan(&port.ID, &port.SiteID, &port.Port, &protocol, &port.Description, &status); err != nil {
+		if err := rows.Scan(&port.ID, &port.ServerID, &port.Port, &protocol, &port.Description, &status); err != nil {
 			return nil, err
 		}
 		port.Protocol = nullStringValue(protocol)
@@ -67,11 +67,11 @@ func (store *listeningPortStore) ListBySite(ctx context.Context, siteID int64) (
 	return ports, nil
 }
 
-func (store *listeningPortStore) Create(ctx context.Context, siteID int64, port ListeningPortInput) (ListeningPort, error) {
+func (store *listeningPortStore) Create(ctx context.Context, serverID int64, port ListeningPortInput) (ListeningPort, error) {
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO listening_ports (site_id, port, protocol, description, status)
+		INSERT INTO listening_ports (server_id, port, protocol, description, status)
 		VALUES (?, ?, ?, ?, ?)`,
-		siteID,
+		serverID,
 		port.Port,
 		nullableServerString(port.Protocol),
 		port.Description,
@@ -91,7 +91,7 @@ func (store *listeningPortStore) Create(ctx context.Context, siteID int64, port 
 
 	return ListeningPort{
 		ID:          id,
-		SiteID:    siteID,
+		ServerID:    serverID,
 		Port:        port.Port,
 		Protocol:    port.Protocol,
 		Description: port.Description,
@@ -99,17 +99,17 @@ func (store *listeningPortStore) Create(ctx context.Context, siteID int64, port 
 	}, nil
 }
 
-func (store *listeningPortStore) Update(ctx context.Context, siteID, portID int64, port ListeningPortInput) (ListeningPort, error) {
+func (store *listeningPortStore) Update(ctx context.Context, serverID, portID int64, port ListeningPortInput) (ListeningPort, error) {
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE listening_ports
 		SET port = ?, protocol = ?, description = ?, status = ?
-		WHERE id = ? AND site_id = ?`,
+		WHERE id = ? AND server_id = ?`,
 		port.Port,
 		nullableServerString(port.Protocol),
 		port.Description,
 		nullableServerString(port.Status),
 		portID,
-		siteID,
+		serverID,
 	)
 	if err != nil {
 		if isForeignKeyViolation(err) {
@@ -127,7 +127,7 @@ func (store *listeningPortStore) Update(ctx context.Context, siteID, portID int6
 
 	return ListeningPort{
 		ID:          portID,
-		SiteID:    siteID,
+		ServerID:    serverID,
 		Port:        port.Port,
 		Protocol:    port.Protocol,
 		Description: port.Description,
@@ -135,16 +135,16 @@ func (store *listeningPortStore) Update(ctx context.Context, siteID, portID int6
 	}, nil
 }
 
-func (store *listeningPortStore) Delete(ctx context.Context, siteID, portID int64) error {
+func (store *listeningPortStore) Delete(ctx context.Context, serverID, portID int64) error {
 	_, err := store.db.ExecContext(ctx, `
-		DELETE FROM listening_ports WHERE id = ? AND site_id = ?`,
+		DELETE FROM listening_ports WHERE id = ? AND server_id = ?`,
 		portID,
-		siteID,
+		serverID,
 	)
 	return err
 }
 
-func (store *listeningPortStore) DeleteBatch(ctx context.Context, siteID int64, portIDs []int64) error {
+func (store *listeningPortStore) DeleteBatch(ctx context.Context, serverID int64, portIDs []int64) error {
 	ids := uniqueInt64(portIDs)
 	if len(ids) == 0 {
 		return nil
@@ -156,9 +156,9 @@ func (store *listeningPortStore) DeleteBatch(ctx context.Context, siteID int64, 
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	args = append(args, siteID)
+	args = append(args, serverID)
 
-	query := "DELETE FROM listening_ports WHERE id IN (" + strings.Join(placeholders, ",") + ") AND site_id = ?"
+	query := "DELETE FROM listening_ports WHERE id IN (" + strings.Join(placeholders, ",") + ") AND server_id = ?"
 	_, err := store.db.ExecContext(ctx, query, args...)
 	return err
 }

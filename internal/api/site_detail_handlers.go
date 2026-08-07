@@ -1,12 +1,27 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"vue-project-backend/internal/store"
 )
+
+func resolveSiteWafRuleID(
+	ctx context.Context,
+	sites store.SiteStore,
+	wafRules store.WafRuleStore,
+	siteID int64,
+	method string,
+) (int64, error) {
+	if method == http.MethodGet {
+		return sites.EnsureWafRule(ctx, siteID, wafRules)
+	}
+	return sites.WafRuleIDForWrite(ctx, siteID, wafRules)
+}
 
 func siteDetailHandler(
 	sites store.SiteStore,
@@ -22,13 +37,44 @@ func siteDetailHandler(
 	wafResponse store.WafResponseStore,
 	wafUserAgent store.WafUserAgentStore,
 	upstreamServers store.UpstreamServerStore,
-	listeningPorts store.ListeningPortStore,
 	cacheRules store.CacheRuleStore,
 	compressSettings store.CompressStore,
+	siteListeningPorts store.SiteListeningPortStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if strings.HasPrefix(path, "/sites/") && strings.Count(strings.Trim(path, "/"), "/") >= 2 {
+			if strings.Contains(r.URL.Path, "/waf/fork") {
+				trimmed := strings.TrimPrefix(path, "/sites/")
+				parts := strings.Split(trimmed, "/")
+				if len(parts) >= 3 && parts[1] == "waf" && parts[2] == "fork" {
+					siteID, ok := parsePositiveInt(parts[0])
+					if !ok {
+						writeError(w, http.StatusNotFound, "not found")
+						return
+					}
+					if r.Method != http.MethodPost {
+						writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+						return
+					}
+					updated, err := sites.ForkPredefinedWafForSite(r.Context(), siteID, wafRules)
+					if err != nil {
+						if store.IsNotFound(err) {
+							writeError(w, http.StatusNotFound, "site not found")
+							return
+						}
+						if strings.Contains(err.Error(), "no waf rule to fork") {
+							writeError(w, http.StatusBadRequest, err.Error())
+							return
+						}
+						writeError(w, http.StatusInternalServerError, "failed to fork waf rule for site")
+						return
+					}
+					writeJSON(w, http.StatusOK, updated)
+					return
+				}
+			}
+
 			if strings.Contains(r.URL.Path, "/waf/whitelist") {
 				siteID, ruleID, isBatch, ok := parseWafWhitelistPath(r.URL.Path)
 				if !ok {
@@ -36,10 +82,14 @@ func siteDetailHandler(
 					return
 				}
 
-				wafRuleID, err := sites.EnsureWafRule(r.Context(), siteID, wafRules)
+				wafRuleID, err := resolveSiteWafRuleID(r.Context(), sites, wafRules, siteID, r.Method)
 				if err != nil {
 					if store.IsNotFound(err) {
 						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					if store.IsPredefinedWafRequiresFork(err) {
+						writeError(w, http.StatusConflict, "predefined waf rule must be forked before editing")
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to resolve waf rule")
@@ -156,10 +206,14 @@ func siteDetailHandler(
 					return
 				}
 
-				wafRuleID, err := sites.EnsureWafRule(r.Context(), siteID, wafRules)
+				wafRuleID, err := resolveSiteWafRuleID(r.Context(), sites, wafRules, siteID, r.Method)
 				if err != nil {
 					if store.IsNotFound(err) {
 						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					if store.IsPredefinedWafRequiresFork(err) {
+						writeError(w, http.StatusConflict, "predefined waf rule must be forked before editing")
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to resolve waf rule")
@@ -278,10 +332,14 @@ func siteDetailHandler(
 					return
 				}
 
-				wafRuleID, err := sites.EnsureWafRule(r.Context(), siteID, wafRules)
+				wafRuleID, err := resolveSiteWafRuleID(r.Context(), sites, wafRules, siteID, r.Method)
 				if err != nil {
 					if store.IsNotFound(err) {
 						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					if store.IsPredefinedWafRequiresFork(err) {
+						writeError(w, http.StatusConflict, "predefined waf rule must be forked before editing")
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to resolve waf rule")
@@ -400,10 +458,14 @@ func siteDetailHandler(
 					return
 				}
 
-				wafRuleID, err := sites.EnsureWafRule(r.Context(), siteID, wafRules)
+				wafRuleID, err := resolveSiteWafRuleID(r.Context(), sites, wafRules, siteID, r.Method)
 				if err != nil {
 					if store.IsNotFound(err) {
 						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					if store.IsPredefinedWafRequiresFork(err) {
+						writeError(w, http.StatusConflict, "predefined waf rule must be forked before editing")
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to resolve waf rule")
@@ -509,10 +571,14 @@ func siteDetailHandler(
 					return
 				}
 
-				wafRuleID, err := sites.EnsureWafRule(r.Context(), siteID, wafRules)
+				wafRuleID, err := resolveSiteWafRuleID(r.Context(), sites, wafRules, siteID, r.Method)
 				if err != nil {
 					if store.IsNotFound(err) {
 						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					if store.IsPredefinedWafRequiresFork(err) {
+						writeError(w, http.StatusConflict, "predefined waf rule must be forked before editing")
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to resolve waf rule")
@@ -633,10 +699,14 @@ func siteDetailHandler(
 					return
 				}
 
-				wafRuleID, err := sites.EnsureWafRule(r.Context(), siteID, wafRules)
+				wafRuleID, err := resolveSiteWafRuleID(r.Context(), sites, wafRules, siteID, r.Method)
 				if err != nil {
 					if store.IsNotFound(err) {
 						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					if store.IsPredefinedWafRequiresFork(err) {
+						writeError(w, http.StatusConflict, "predefined waf rule must be forked before editing")
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to resolve waf rule")
@@ -755,10 +825,14 @@ func siteDetailHandler(
 					return
 				}
 
-				wafRuleID, err := sites.EnsureWafRule(r.Context(), siteID, wafRules)
+				wafRuleID, err := resolveSiteWafRuleID(r.Context(), sites, wafRules, siteID, r.Method)
 				if err != nil {
 					if store.IsNotFound(err) {
 						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					if store.IsPredefinedWafRequiresFork(err) {
+						writeError(w, http.StatusConflict, "predefined waf rule must be forked before editing")
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to resolve waf rule")
@@ -877,10 +951,14 @@ func siteDetailHandler(
 					return
 				}
 
-				wafRuleID, err := sites.EnsureWafRule(r.Context(), siteID, wafRules)
+				wafRuleID, err := resolveSiteWafRuleID(r.Context(), sites, wafRules, siteID, r.Method)
 				if err != nil {
 					if store.IsNotFound(err) {
 						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					if store.IsPredefinedWafRequiresFork(err) {
+						writeError(w, http.StatusConflict, "predefined waf rule must be forked before editing")
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to resolve waf rule")
@@ -1001,10 +1079,14 @@ func siteDetailHandler(
 					return
 				}
 
-				wafRuleID, err := sites.EnsureWafRule(r.Context(), siteID, wafRules)
+				wafRuleID, err := resolveSiteWafRuleID(r.Context(), sites, wafRules, siteID, r.Method)
 				if err != nil {
 					if store.IsNotFound(err) {
 						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					if store.IsPredefinedWafRequiresFork(err) {
+						writeError(w, http.StatusConflict, "predefined waf rule must be forked before editing")
 						return
 					}
 					writeError(w, http.StatusInternalServerError, "failed to resolve waf rule")
@@ -1116,6 +1198,79 @@ func siteDetailHandler(
 				return
 			}
 
+			if strings.HasSuffix(r.URL.Path, "/ports") {
+				siteID, ok := parseIDWithSuffix(r.URL.Path, "/sites/", "/ports")
+				if !ok {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				switch r.Method {
+				case http.MethodGet:
+					config, err := loadSitePortsConfig(r.Context(), sites, servers, siteListeningPorts, siteID)
+					if err != nil {
+						if store.IsNotFound(err) {
+							writeError(w, http.StatusNotFound, "site not found")
+							return
+						}
+						writeError(w, http.StatusInternalServerError, "failed to load site ports")
+						return
+					}
+					writeJSON(w, http.StatusOK, config)
+				case http.MethodPut:
+					var payload struct {
+						ServerID     int64   `json:"serverId"`
+						HTTPPortIDs  []int64 `json:"httpPortIds"`
+						HTTPSPortIDs []int64 `json:"httpsPortIds"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+					if payload.ServerID <= 0 {
+						writeError(w, http.StatusBadRequest, "serverId is required")
+						return
+					}
+					site, err := sites.Get(r.Context(), siteID)
+					if err != nil {
+						if store.IsNotFound(err) {
+							writeError(w, http.StatusNotFound, "site not found")
+							return
+						}
+						writeError(w, http.StatusInternalServerError, "failed to load site")
+						return
+					}
+					assigned := false
+					for _, id := range site.ServerIDs {
+						if id == payload.ServerID {
+							assigned = true
+							break
+						}
+					}
+					if !assigned {
+						writeError(w, http.StatusBadRequest, "server is not assigned to this site")
+						return
+					}
+					mergedIDs, validationErr := validateSitePortSelections(r.Context(), siteListeningPorts, payload.ServerID, payload.HTTPPortIDs, payload.HTTPSPortIDs)
+					if validationErr != "" {
+						writeError(w, http.StatusBadRequest, validationErr)
+						return
+					}
+					if err := siteListeningPorts.ReplaceForServer(r.Context(), siteID, payload.ServerID, mergedIDs); err != nil {
+						writeError(w, http.StatusBadRequest, err.Error())
+						return
+					}
+					config, err := loadSitePortsConfig(r.Context(), sites, servers, siteListeningPorts, siteID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to load site ports")
+						return
+					}
+					writeJSON(w, http.StatusOK, config)
+				default:
+					writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				}
+				return
+			}
+
 			if strings.HasSuffix(r.URL.Path, "/compress") {
 				siteID, ok := parseIDWithSuffix(r.URL.Path, "/sites/", "/compress")
 				if !ok {
@@ -1186,197 +1341,6 @@ func siteDetailHandler(
 						return
 					}
 					writeJSON(w, http.StatusOK, updated)
-				default:
-					writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-				}
-				return
-			}
-
-			if strings.HasSuffix(r.URL.Path, "/listening-ports/bound") {
-				siteID, ok := parseIDWithSuffix(r.URL.Path, "/sites/", "/listening-ports/bound")
-				if !ok {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-				if r.Method != http.MethodGet {
-					writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-					return
-				}
-				handleSiteBoundPorts(w, r, servers, sites, siteID)
-				return
-			}
-
-			if strings.Contains(r.URL.Path, "/listening-ports") {
-				siteID, portID, isBatch, ok := parseListeningPortsPath(r.URL.Path)
-				if !ok {
-					writeError(w, http.StatusNotFound, "not found")
-					return
-				}
-
-				switch r.Method {
-				case http.MethodGet:
-					if portID != 0 || isBatch {
-						writeError(w, http.StatusNotFound, "not found")
-						return
-					}
-					list, err := listeningPorts.ListBySite(r.Context(), siteID)
-					if err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to load listening ports")
-						return
-					}
-					writeJSON(w, http.StatusOK, list)
-				case http.MethodPost:
-					if isBatch {
-						var payload listeningPortBatchPayload
-						if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-							writeError(w, http.StatusBadRequest, "invalid JSON body")
-							return
-						}
-						list, err := listeningPorts.ListBySite(r.Context(), siteID)
-						if err != nil {
-							writeError(w, http.StatusInternalServerError, "failed to load listening ports")
-							return
-						}
-						deleteIDs := make(map[int64]struct{}, len(payload.IDs))
-						for _, id := range payload.IDs {
-							deleteIDs[id] = struct{}{}
-						}
-						remaining := make([]store.ListeningPort, 0, len(list))
-						for _, port := range list {
-							if _, ok := deleteIDs[port.ID]; ok {
-								continue
-							}
-							remaining = append(remaining, port)
-						}
-						if err := postL7ListeningPorts(r.Context(), servers, sites, siteID, listeningPortsToL7Payload(0, remaining)); err != nil {
-							writeError(w, http.StatusBadGateway, err.Error())
-							return
-						}
-						if err := listeningPorts.DeleteBatch(r.Context(), siteID, payload.IDs); err != nil {
-							writeError(w, http.StatusInternalServerError, "failed to delete listening ports")
-							return
-						}
-						w.WriteHeader(http.StatusNoContent)
-						return
-					}
-					var payload listeningPortPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					if err := validateListeningPortAvailable(r.Context(), servers, sites, listeningPorts, siteID, payload.Port, 0); err != nil {
-						writeError(w, http.StatusBadRequest, err.Error())
-						return
-					}
-					created, err := listeningPorts.Create(r.Context(), siteID, store.ListeningPortInput{
-						Port:        payload.Port,
-						Protocol:    strings.TrimSpace(payload.Protocol),
-						Description: strings.TrimSpace(payload.Description),
-						Status:      strings.TrimSpace(payload.Status),
-					})
-					if err != nil {
-						if store.IsNotFound(err) {
-							writeError(w, http.StatusNotFound, "server not found")
-							return
-						}
-						writeError(w, http.StatusInternalServerError, "failed to create listening port")
-						return
-					}
-					if err := callL7UpdateListeningPorts(r.Context(), servers, sites, siteID, listeningPorts); err != nil {
-						_ = listeningPorts.Delete(r.Context(), siteID, created.ID)
-						writeError(w, http.StatusBadGateway, err.Error())
-						return
-					}
-					writeJSON(w, http.StatusCreated, created)
-				case http.MethodPut:
-					if portID == 0 || isBatch {
-						writeError(w, http.StatusNotFound, "not found")
-						return
-					}
-					var payload listeningPortPayload
-					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-						writeError(w, http.StatusBadRequest, "invalid JSON body")
-						return
-					}
-					existingList, err := listeningPorts.ListBySite(r.Context(), siteID)
-					if err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to load listening ports")
-						return
-					}
-					var previous store.ListeningPort
-					found := false
-					for _, port := range existingList {
-						if port.ID == portID {
-							previous = port
-							found = true
-							break
-						}
-					}
-					if !found {
-						writeError(w, http.StatusNotFound, "listening port not found")
-						return
-					}
-					if err := validateListeningPortAvailable(r.Context(), servers, sites, listeningPorts, siteID, payload.Port, portID); err != nil {
-						writeError(w, http.StatusBadRequest, err.Error())
-						return
-					}
-					updated, err := listeningPorts.Update(r.Context(), siteID, portID, store.ListeningPortInput{
-						Port:        payload.Port,
-						Protocol:    strings.TrimSpace(payload.Protocol),
-						Description: strings.TrimSpace(payload.Description),
-						Status:      strings.TrimSpace(payload.Status),
-					})
-					if err != nil {
-						if store.IsNotFound(err) {
-							writeError(w, http.StatusNotFound, "listening port not found")
-							return
-						}
-						writeError(w, http.StatusInternalServerError, "failed to update listening port")
-						return
-					}
-					if err := callL7UpdateListeningPorts(r.Context(), servers, sites, siteID, listeningPorts); err != nil {
-						_, _ = listeningPorts.Update(r.Context(), siteID, portID, store.ListeningPortInput{
-							Port:        previous.Port,
-							Protocol:    previous.Protocol,
-							Description: previous.Description,
-							Status:      previous.Status,
-						})
-						writeError(w, http.StatusBadGateway, err.Error())
-						return
-					}
-					writeJSON(w, http.StatusOK, updated)
-				case http.MethodDelete:
-					if portID == 0 || isBatch {
-						writeError(w, http.StatusNotFound, "not found")
-						return
-					}
-					list, err := listeningPorts.ListBySite(r.Context(), siteID)
-					if err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to load listening ports")
-						return
-					}
-					remaining := make([]store.ListeningPort, 0, len(list))
-					found := false
-					for _, port := range list {
-						if port.ID == portID {
-							found = true
-							continue
-						}
-						remaining = append(remaining, port)
-					}
-					if !found {
-						writeError(w, http.StatusNotFound, "listening port not found")
-						return
-					}
-					if err := postL7ListeningPorts(r.Context(), servers, sites, siteID, listeningPortsToL7Payload(0, remaining)); err != nil {
-						writeError(w, http.StatusBadGateway, err.Error())
-						return
-					}
-					if err := listeningPorts.Delete(r.Context(), siteID, portID); err != nil {
-						writeError(w, http.StatusInternalServerError, "failed to delete listening port")
-						return
-					}
-					w.WriteHeader(http.StatusNoContent)
 				default:
 					writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 				}
@@ -1688,6 +1652,7 @@ func siteDetailHandler(
 					}
 					created, err := upstreamServers.Create(r.Context(), siteID, store.UpstreamServerInput{
 						Address:     address,
+						Protocol:    strings.TrimSpace(payload.Protocol),
 						Description: strings.TrimSpace(payload.Description),
 						Status:      strings.TrimSpace(payload.Status),
 					})
@@ -1744,6 +1709,7 @@ func siteDetailHandler(
 					}
 					updated, err := upstreamServers.Update(r.Context(), siteID, upstreamID, store.UpstreamServerInput{
 						Address:     address,
+						Protocol:    strings.TrimSpace(payload.Protocol),
 						Description: strings.TrimSpace(payload.Description),
 						Status:      strings.TrimSpace(payload.Status),
 					})
@@ -1758,6 +1724,7 @@ func siteDetailHandler(
 					if err := callL7UpdateUpstreamServers(r.Context(), servers, sites, siteID, upstreamServers); err != nil {
 						_, _ = upstreamServers.Update(r.Context(), siteID, upstreamID, store.UpstreamServerInput{
 							Address:     previous.Address,
+							Protocol:    previous.Protocol,
 							Description: previous.Description,
 							Status:      previous.Status,
 						})
@@ -1875,11 +1842,83 @@ func siteDetailHandler(
 	}
 }
 
-func handleSiteBoundPorts(w http.ResponseWriter, r *http.Request, servers store.ServerStore, sites store.SiteStore, siteID int64) {
-	edgeIDs, err := siteEdgeServerIDs(r.Context(), sites, siteID)
-	if err != nil || len(edgeIDs) == 0 {
-		writeError(w, http.StatusBadRequest, "site has no assigned servers")
-		return
+func loadSitePortsConfig(
+	ctx context.Context,
+	sites store.SiteStore,
+	servers store.ServerStore,
+	siteListeningPorts store.SiteListeningPortStore,
+	siteID int64,
+) (store.SitePortsConfig, error) {
+	site, err := sites.Get(ctx, siteID)
+	if err != nil {
+		return store.SitePortsConfig{}, err
 	}
-	handleServerBoundPorts(w, r, servers, edgeIDs[0])
+	edges := make([]store.SiteEdgeServer, 0, len(site.ServerIDs))
+	for _, serverID := range site.ServerIDs {
+		view, err := servers.GetView(ctx, serverID)
+		if err != nil {
+			if store.IsNotFound(err) {
+				continue
+			}
+			return store.SitePortsConfig{}, err
+		}
+		edges = append(edges, store.SiteEdgeServer{
+			ID:   view.ID,
+			Name: view.Name,
+			IP:   view.IP,
+		})
+	}
+	return siteListeningPorts.BuildConfig(ctx, siteID, edges)
+}
+
+func validateSitePortSelections(
+	ctx context.Context,
+	siteListeningPorts store.SiteListeningPortStore,
+	serverID int64,
+	httpPortIDs, httpsPortIDs []int64,
+) ([]int64, string) {
+	ports, err := siteListeningPorts.ListPortsForServer(ctx, serverID)
+	if err != nil {
+		return nil, "failed to load listening ports for server"
+	}
+	byID := make(map[int64]store.ListeningPort, len(ports))
+	for _, port := range ports {
+		byID[port.ID] = port
+	}
+
+	merged := make([]int64, 0, len(httpPortIDs)+len(httpsPortIDs))
+	seen := make(map[int64]struct{}, len(httpPortIDs)+len(httpsPortIDs))
+
+	appendValidated := func(ids []int64, wantProtocol string) string {
+		for _, id := range ids {
+			if id <= 0 {
+				return "invalid listening port id"
+			}
+			port, ok := byID[id]
+			if !ok {
+				return "listening port does not belong to the selected server"
+			}
+			protocol := strings.ToUpper(strings.TrimSpace(port.Protocol))
+			if protocol == "" {
+				protocol = "HTTP"
+			}
+			if protocol != wantProtocol {
+				return fmt.Sprintf("port %d is not %s", port.Port, wantProtocol)
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			merged = append(merged, id)
+		}
+		return ""
+	}
+
+	if msg := appendValidated(httpPortIDs, "HTTP"); msg != "" {
+		return nil, msg
+	}
+	if msg := appendValidated(httpsPortIDs, "HTTPS"); msg != "" {
+		return nil, msg
+	}
+	return merged, ""
 }

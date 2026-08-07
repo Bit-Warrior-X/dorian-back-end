@@ -1860,6 +1860,7 @@ CREATE TABLE IF NOT EXISTS `upstream_servers` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `site_id` bigint NOT NULL,
   `ip_port` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `protocol` enum('HTTP','HTTPS') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'HTTP',
   `description` varchar(500) NOT NULL DEFAULT '0',
   `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
   `created_at` timestamp NULL DEFAULT (now()),
@@ -1875,7 +1876,7 @@ CREATE TABLE IF NOT EXISTS `upstream_servers` (
 DROP TABLE IF EXISTS `listening_ports`;
 CREATE TABLE IF NOT EXISTS `listening_ports` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `site_id` bigint NOT NULL,
+  `server_id` bigint NOT NULL,
   `port` int NOT NULL,
   `protocol` enum('HTTP','HTTPS') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'HTTP',
   `description` varchar(500) NOT NULL DEFAULT '',
@@ -1883,8 +1884,25 @@ CREATE TABLE IF NOT EXISTS `listening_ports` (
   `created_at` timestamp NULL DEFAULT (now()),
   `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,
+  KEY `server_id` (`server_id`) USING BTREE,
+  CONSTRAINT `listening_ports_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Data exporting was unselected.
+
+-- Dumping structure for table cdnproxy.site_listening_ports
+DROP TABLE IF EXISTS `site_listening_ports`;
+CREATE TABLE IF NOT EXISTS `site_listening_ports` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `site_id` bigint NOT NULL,
+  `listening_port_id` bigint NOT NULL,
+  `created_at` timestamp NULL DEFAULT (now()),
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `site_listening_port_unique` (`site_id`, `listening_port_id`) USING BTREE,
   KEY `site_id` (`site_id`) USING BTREE,
-  CONSTRAINT `listening_ports_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+  KEY `listening_port_id` (`listening_port_id`) USING BTREE,
+  CONSTRAINT `site_listening_ports_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `site_listening_ports_port_fk` FOREIGN KEY (`listening_port_id`) REFERENCES `listening_ports` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Data exporting was unselected.
@@ -1947,7 +1965,6 @@ CREATE TABLE IF NOT EXISTS `sites` (
   `ssl_type` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',
   `ssl_cert` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
   `ssl_cert_key` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `protocol_badges` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,

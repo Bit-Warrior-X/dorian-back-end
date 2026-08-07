@@ -24,29 +24,39 @@ func postL7ToSiteEdgeServers(ctx context.Context, servers store.ServerStore, sit
 		return fmt.Errorf("site has no assigned edge servers")
 	}
 	for _, edgeID := range edgeIDs {
-		server, err := servers.GetView(ctx, edgeID)
-		if err != nil {
-			return fmt.Errorf("load server view: %w", err)
-		}
-		body, err := buildBody(edgeID, server)
-		if err != nil {
+		if err := postL7ToServer(ctx, servers, edgeID, apiPath, buildBody); err != nil {
 			return err
 		}
-		url := "http://" + strings.TrimSpace(server.IP) + ":5000" + apiPath
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
-			return fmt.Errorf("build l7 request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("l7 request failed: %w", err)
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-			limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			return fmt.Errorf("l7 returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
-		}
+	}
+	return nil
+}
+
+func postL7ToServer(ctx context.Context, servers store.ServerStore, serverID int64, apiPath string, buildBody func(edgeServerID int64, server store.ServerView) ([]byte, error)) error {
+	if serverID == 0 {
+		return fmt.Errorf("invalid server id")
+	}
+	server, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("load server view: %w", err)
+	}
+	body, err := buildBody(serverID, server)
+	if err != nil {
+		return err
+	}
+	url := "http://" + strings.TrimSpace(server.IP) + ":5000" + apiPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build l7 request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("l7 request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("l7 returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
 	}
 	return nil
 }
@@ -281,6 +291,7 @@ func upstreamServersToL7Payload(edgeServerID int64, list []store.UpstreamServer)
 			ID:          u.ID,
 			ServerID:    edgeServerID,
 			IpPort:      strings.TrimSpace(u.Address),
+			Protocol:    store.NormalizeUpstreamProtocol(u.Protocol),
 			Description: strings.TrimSpace(u.Description),
 		})
 	}
@@ -319,8 +330,8 @@ func listeningPortsToL7Payload(edgeServerID int64, list []store.ListeningPort) [
 	return ports
 }
 
-func postL7ListeningPorts(ctx context.Context, servers store.ServerStore, sites store.SiteStore, siteID int64, ports []listeningPortPayloadL7) error {
-	return postL7ToSiteEdgeServers(ctx, servers, sites, siteID, "/API/L7/l7_update_listeningports", func(edgeID int64, server store.ServerView) ([]byte, error) {
+func postL7ListeningPorts(ctx context.Context, servers store.ServerStore, serverID int64, ports []listeningPortPayloadL7) error {
+	return postL7ToServer(ctx, servers, serverID, "/API/L7/l7_update_listeningports", func(edgeID int64, server store.ServerView) ([]byte, error) {
 		for i := range ports {
 			ports[i].ServerID = server.ID
 		}
@@ -328,12 +339,12 @@ func postL7ListeningPorts(ctx context.Context, servers store.ServerStore, sites 
 	})
 }
 
-func callL7UpdateListeningPorts(ctx context.Context, servers store.ServerStore, sites store.SiteStore, siteID int64, listeningPorts store.ListeningPortStore) error {
-	list, err := listeningPorts.ListBySite(ctx, siteID)
+func callL7UpdateListeningPorts(ctx context.Context, servers store.ServerStore, serverID int64, listeningPorts store.ListeningPortStore) error {
+	list, err := listeningPorts.ListByServer(ctx, serverID)
 	if err != nil {
 		return fmt.Errorf("load listening ports: %w", err)
 	}
-	return postL7ListeningPorts(ctx, servers, sites, siteID, listeningPortsToL7Payload(0, list))
+	return postL7ListeningPorts(ctx, servers, serverID, listeningPortsToL7Payload(serverID, list))
 }
 
 func callL7UpdateCompress(ctx context.Context, servers store.ServerStore, sites store.SiteStore, siteID int64, compressSettings store.CompressStore) error {

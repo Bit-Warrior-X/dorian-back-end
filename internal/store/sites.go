@@ -16,6 +16,8 @@ type Site struct {
 	Domain            string     `json:"domain"`
 	Status            string     `json:"status"`
 	WafID             *int64     `json:"wafId,omitempty"`
+	WafName           string     `json:"wafName,omitempty"`
+	WafRole           string     `json:"wafRole,omitempty"`
 	CertificateStatus string     `json:"certificateStatus"`
 	CertificateExpiry *time.Time `json:"certificateExpiry,omitempty"`
 	CacheRatio        float64    `json:"cacheRatio"`
@@ -23,7 +25,6 @@ type Site struct {
 	SslType           string     `json:"sslType"`
 	SslCert           string     `json:"sslCert,omitempty"`
 	SslCertKey        string     `json:"sslCertKey,omitempty"`
-	ProtocolBadges    string     `json:"protocolBadges"`
 	CreatedAt         time.Time  `json:"createdAt"`
 	UpdatedAt         time.Time  `json:"updatedAt"`
 	ServerIDs         []int64    `json:"serverIds"`
@@ -41,7 +42,6 @@ type SiteInput struct {
 	SslType           string  `json:"sslType"`
 	SslCert           string  `json:"sslCert"`
 	SslCertKey        string  `json:"sslCertKey"`
-	ProtocolBadges    string  `json:"protocolBadges"`
 	ServerIDs         []int64 `json:"serverIds"`
 }
 
@@ -57,7 +57,6 @@ func (input SiteInput) Normalize() SiteInput {
 		SslType:           strings.TrimSpace(input.SslType),
 		SslCert:           strings.TrimSpace(input.SslCert),
 		SslCertKey:        strings.TrimSpace(input.SslCertKey),
-		ProtocolBadges:    strings.TrimSpace(input.ProtocolBadges),
 		ServerIDs:         uniqueInt64(input.ServerIDs),
 	}
 }
@@ -70,6 +69,8 @@ type SiteStore interface {
 	Delete(ctx context.Context, id int64) error
 	UpdateSiteServers(ctx context.Context, siteID int64, serverIDs []int64) error
 	EnsureWafRule(ctx context.Context, siteID int64, wafRules WafRuleStore) (int64, error)
+	WafRuleIDForWrite(ctx context.Context, siteID int64, wafRules WafRuleStore) (int64, error)
+	ForkPredefinedWafForSite(ctx context.Context, siteID int64, wafRules WafRuleStore) (Site, error)
 }
 
 type siteStore struct {
@@ -81,15 +82,18 @@ func NewSiteStore(db *sql.DB) SiteStore {
 }
 
 const siteSelectColumns = `
-	id, domain, status, waf_id, certificate_status, certificate_expiry,
-	cache_ratio, bandwidth, ssl_type, ssl_cert, ssl_cert_key, protocol_badges,
-	created_at, updated_at`
+	s.id, s.domain, s.status, s.waf_id, wr.name AS waf_name, wr.role AS waf_role,
+	s.certificate_status, s.certificate_expiry,
+	s.cache_ratio, s.bandwidth, s.ssl_type, s.ssl_cert, s.ssl_cert_key,
+	s.created_at, s.updated_at`
 
 func (store *siteStore) scanSite(row interface {
 	Scan(dest ...any) error
 }) (Site, error) {
 	var item Site
 	var wafID sql.NullInt64
+	var wafName sql.NullString
+	var wafRole sql.NullString
 	var certExpiry sql.NullTime
 	var sslCert sql.NullString
 	var sslCertKey sql.NullString
@@ -99,6 +103,8 @@ func (store *siteStore) scanSite(row interface {
 		&item.Domain,
 		&item.Status,
 		&wafID,
+		&wafName,
+		&wafRole,
 		&item.CertificateStatus,
 		&certExpiry,
 		&item.CacheRatio,
@@ -106,7 +112,6 @@ func (store *siteStore) scanSite(row interface {
 		&item.SslType,
 		&sslCert,
 		&sslCertKey,
-		&item.ProtocolBadges,
 		&item.CreatedAt,
 		&item.UpdatedAt,
 	); err != nil {
@@ -115,6 +120,12 @@ func (store *siteStore) scanSite(row interface {
 
 	if wafID.Valid {
 		item.WafID = &wafID.Int64
+	}
+	if wafName.Valid {
+		item.WafName = wafName.String
+	}
+	if wafRole.Valid {
+		item.WafRole = wafRole.String
 	}
 	if certExpiry.Valid {
 		t := certExpiry.Time
@@ -133,8 +144,9 @@ func (store *siteStore) scanSite(row interface {
 func (store *siteStore) List(ctx context.Context) ([]Site, error) {
 	rows, err := store.db.QueryContext(ctx, `
 		SELECT `+siteSelectColumns+`
-		FROM sites
-		ORDER BY id DESC`)
+		FROM sites s
+		LEFT JOIN waf_rule wr ON wr.id = s.waf_id
+		ORDER BY s.id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -174,8 +186,9 @@ func (store *siteStore) List(ctx context.Context) ([]Site, error) {
 func (store *siteStore) Get(ctx context.Context, id int64) (Site, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT `+siteSelectColumns+`
-		FROM sites
-		WHERE id = ?
+		FROM sites s
+		LEFT JOIN waf_rule wr ON wr.id = s.waf_id
+		WHERE s.id = ?
 		LIMIT 1`, id)
 
 	item, err := store.scanSite(row)
@@ -206,8 +219,8 @@ func (store *siteStore) Create(ctx context.Context, input SiteInput) (Site, erro
 	result, err := store.db.ExecContext(ctx, `
 		INSERT INTO sites (
 			domain, status, waf_id, certificate_status, certificate_expiry,
-			cache_ratio, bandwidth, ssl_type, ssl_cert, ssl_cert_key, protocol_badges
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			cache_ratio, bandwidth, ssl_type, ssl_cert, ssl_cert_key
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		input.Domain,
 		coalesceSiteStatus(input.Status),
 		nullableInt64(input.WafID),
@@ -218,7 +231,6 @@ func (store *siteStore) Create(ctx context.Context, input SiteInput) (Site, erro
 		coalesceSiteSslType(input.SslType),
 		nullableString(input.SslCert),
 		nullableString(input.SslCertKey),
-		input.ProtocolBadges,
 	)
 	if err != nil {
 		return Site{}, err
@@ -241,7 +253,7 @@ func (store *siteStore) Update(ctx context.Context, id int64, input SiteInput) (
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE sites
 		SET domain = ?, status = ?, waf_id = ?, certificate_status = ?, certificate_expiry = ?,
-			cache_ratio = ?, bandwidth = ?, ssl_type = ?, ssl_cert = ?, ssl_cert_key = ?, protocol_badges = ?
+			cache_ratio = ?, bandwidth = ?, ssl_type = ?, ssl_cert = ?, ssl_cert_key = ?
 		WHERE id = ?`,
 		input.Domain,
 		coalesceSiteStatus(input.Status),
@@ -253,7 +265,6 @@ func (store *siteStore) Update(ctx context.Context, id int64, input SiteInput) (
 		coalesceSiteSslType(input.SslType),
 		nullableString(input.SslCert),
 		nullableString(input.SslCertKey),
-		input.ProtocolBadges,
 		id,
 	)
 	if err != nil {
@@ -380,6 +391,12 @@ func (store *siteStore) siteServers(ctx context.Context, siteIDs []int64) (map[i
 	return result, nil
 }
 
+var errPredefinedWafRequiresFork = errors.New("predefined waf rule must be forked before editing")
+
+func IsPredefinedWafRequiresFork(err error) bool {
+	return errors.Is(err, errPredefinedWafRequiresFork)
+}
+
 func (store *siteStore) EnsureWafRule(ctx context.Context, siteID int64, wafRules WafRuleStore) (int64, error) {
 	site, err := store.Get(ctx, siteID)
 	if err != nil {
@@ -402,6 +419,59 @@ func (store *siteStore) EnsureWafRule(ctx context.Context, siteID int64, wafRule
 	}
 
 	return created.ID, nil
+}
+
+func (store *siteStore) WafRuleIDForWrite(ctx context.Context, siteID int64, wafRules WafRuleStore) (int64, error) {
+	site, err := store.Get(ctx, siteID)
+	if err != nil {
+		return 0, err
+	}
+	if site.WafID != nil && *site.WafID > 0 {
+		rule, err := wafRules.Get(ctx, *site.WafID)
+		if err != nil {
+			return 0, err
+		}
+		if strings.EqualFold(rule.Role, "predefined") {
+			return 0, errPredefinedWafRequiresFork
+		}
+		return *site.WafID, nil
+	}
+
+	return store.EnsureWafRule(ctx, siteID, wafRules)
+}
+
+func (store *siteStore) ForkPredefinedWafForSite(ctx context.Context, siteID int64, wafRules WafRuleStore) (Site, error) {
+	site, err := store.Get(ctx, siteID)
+	if err != nil {
+		return Site{}, err
+	}
+	if site.WafID == nil || *site.WafID <= 0 {
+		return Site{}, errors.New("site has no waf rule to fork")
+	}
+
+	rule, err := wafRules.Get(ctx, *site.WafID)
+	if err != nil {
+		return Site{}, err
+	}
+	if !strings.EqualFold(rule.Role, "predefined") {
+		return site, nil
+	}
+
+	copyName := strings.TrimSpace(fmt.Sprintf("%s - %s", rule.Name, site.Domain))
+	if copyName == "" || copyName == "-" {
+		copyName = fmt.Sprintf("%s WAF", site.Domain)
+	}
+
+	dup, err := wafRules.Duplicate(ctx, *site.WafID, copyName)
+	if err != nil {
+		return Site{}, err
+	}
+
+	if _, err := store.db.ExecContext(ctx, `UPDATE sites SET waf_id = ? WHERE id = ?`, dup.ID, siteID); err != nil {
+		return Site{}, err
+	}
+
+	return store.Get(ctx, siteID)
 }
 
 func IsDuplicateDomain(err error) bool {
@@ -432,7 +502,7 @@ func coalesceSiteCertStatus(value string) string {
 func coalesceSiteSslType(value string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(value))
 	switch trimmed {
-	case "none", "managed", "custom":
+	case "none", "managed", "custom", "letsencrypt", "zerossl", "googletrust":
 		return trimmed
 	default:
 		return "none"

@@ -10,14 +10,16 @@ import (
 
 type UpstreamServer struct {
 	ID          int64  `json:"id"`
-	SiteID    int64  `json:"siteId"`
+	SiteID      int64  `json:"siteId"`
 	Address     string `json:"address"`
+	Protocol    string `json:"protocol"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
 }
 
 type UpstreamServerInput struct {
 	Address     string
+	Protocol    string
 	Description string
 	Status      string
 }
@@ -36,6 +38,13 @@ type upstreamServerStore struct {
 
 func NewUpstreamServerStore(db *sql.DB) UpstreamServerStore {
 	return &upstreamServerStore{db: db}
+}
+
+func NormalizeUpstreamProtocol(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "HTTPS") {
+		return "HTTPS"
+	}
+	return "HTTP"
 }
 
 // NormalizeUpstreamAddress canonicalizes an upstream ip:port for duplicate checks.
@@ -74,7 +83,7 @@ func UpstreamAddressExists(list []UpstreamServer, address string, excludeID int6
 
 func (store *upstreamServerStore) ListBySite(ctx context.Context, siteID int64) ([]UpstreamServer, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, site_id, ip_port, description, status
+		SELECT id, site_id, ip_port, protocol, description, status
 		FROM upstream_servers
 		WHERE site_id = ?
 		ORDER BY id DESC`, siteID)
@@ -86,10 +95,12 @@ func (store *upstreamServerStore) ListBySite(ctx context.Context, siteID int64) 
 	var servers []UpstreamServer
 	for rows.Next() {
 		var server UpstreamServer
+		var protocol sql.NullString
 		var status sql.NullString
-		if err := rows.Scan(&server.ID, &server.SiteID, &server.Address, &server.Description, &status); err != nil {
+		if err := rows.Scan(&server.ID, &server.SiteID, &server.Address, &protocol, &server.Description, &status); err != nil {
 			return nil, err
 		}
+		server.Protocol = NormalizeUpstreamProtocol(nullStringValue(protocol))
 		server.Status = nullStringValue(status)
 		servers = append(servers, server)
 	}
@@ -100,11 +111,13 @@ func (store *upstreamServerStore) ListBySite(ctx context.Context, siteID int64) 
 }
 
 func (store *upstreamServerStore) Create(ctx context.Context, siteID int64, server UpstreamServerInput) (UpstreamServer, error) {
+	protocol := NormalizeUpstreamProtocol(server.Protocol)
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO upstream_servers (site_id, ip_port, description, status)
-		VALUES (?, ?, ?, ?)`,
+		INSERT INTO upstream_servers (site_id, ip_port, protocol, description, status)
+		VALUES (?, ?, ?, ?, ?)`,
 		siteID,
 		server.Address,
+		protocol,
 		server.Description,
 		nullableServerString(server.Status),
 	)
@@ -122,19 +135,22 @@ func (store *upstreamServerStore) Create(ctx context.Context, siteID int64, serv
 
 	return UpstreamServer{
 		ID:          id,
-		SiteID:    siteID,
+		SiteID:      siteID,
 		Address:     server.Address,
+		Protocol:    protocol,
 		Description: server.Description,
 		Status:      server.Status,
 	}, nil
 }
 
 func (store *upstreamServerStore) Update(ctx context.Context, siteID, upstreamID int64, server UpstreamServerInput) (UpstreamServer, error) {
+	protocol := NormalizeUpstreamProtocol(server.Protocol)
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE upstream_servers
-		SET ip_port = ?, description = ?, status = ?
+		SET ip_port = ?, protocol = ?, description = ?, status = ?
 		WHERE id = ? AND site_id = ?`,
 		server.Address,
+		protocol,
 		server.Description,
 		nullableServerString(server.Status),
 		upstreamID,
@@ -156,8 +172,9 @@ func (store *upstreamServerStore) Update(ctx context.Context, siteID, upstreamID
 
 	return UpstreamServer{
 		ID:          upstreamID,
-		SiteID:    siteID,
+		SiteID:      siteID,
 		Address:     server.Address,
+		Protocol:    protocol,
 		Description: server.Description,
 		Status:      server.Status,
 	}, nil

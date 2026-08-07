@@ -293,6 +293,7 @@ func registerRoutes(
 	blacklist store.BlacklistStore,
 	sites store.SiteStore,
 	wafRules store.WafRuleStore,
+	siteListeningPorts store.SiteListeningPortStore,
 ) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
@@ -402,7 +403,7 @@ func registerRoutes(
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
 	mux.HandleFunc("/sites", sitesHandler(sites))
-	mux.HandleFunc("/sites/", siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings))
+	mux.HandleFunc("/sites/", siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts))
 	mux.HandleFunc("/waf-rules", wafRulesHandler(wafRules))
 	mux.HandleFunc("/waf-rules/", wafRuleDetailHandler(wafRules, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent))
 }
@@ -3224,6 +3225,7 @@ type wafUserAgentBatchPayload struct {
 
 type upstreamServerPayload struct {
 	Address     string `json:"address"`
+	Protocol    string `json:"protocol"`
 	Description string `json:"description"`
 	Status      string `json:"status"`
 }
@@ -3716,6 +3718,7 @@ type upstreamServerPayloadL7 struct {
 	ID          int64  `json:"id"`
 	ServerID    int64  `json:"serverId"`
 	IpPort      string `json:"ip_port"`
+	Protocol    string `json:"protocol"`
 	Description string `json:"description"`
 }
 
@@ -3960,6 +3963,197 @@ func serverDetailHandler(
 	compressSettings store.CompressStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/listening-ports/bound") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/listening-ports/bound")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			handleServerBoundPorts(w, r, servers, serverID)
+			return
+		}
+
+		if strings.Contains(r.URL.Path, "/listening-ports") {
+			serverID, portID, isBatch, ok := parseListeningPortsPath(r.URL.Path)
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+
+			switch r.Method {
+			case http.MethodGet:
+				if portID != 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := listeningPorts.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load listening ports")
+					return
+				}
+				writeJSON(w, http.StatusOK, list)
+			case http.MethodPost:
+				if isBatch {
+					var payload listeningPortBatchPayload
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+					list, err := listeningPorts.ListByServer(r.Context(), serverID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to load listening ports")
+						return
+					}
+					deleteIDs := make(map[int64]struct{}, len(payload.IDs))
+					for _, id := range payload.IDs {
+						deleteIDs[id] = struct{}{}
+					}
+					remaining := make([]store.ListeningPort, 0, len(list))
+					for _, port := range list {
+						if _, ok := deleteIDs[port.ID]; ok {
+							continue
+						}
+						remaining = append(remaining, port)
+					}
+					if err := postL7ListeningPorts(r.Context(), servers, serverID, listeningPortsToL7Payload(serverID, remaining)); err != nil {
+						writeError(w, http.StatusBadGateway, err.Error())
+						return
+					}
+					if err := listeningPorts.DeleteBatch(r.Context(), serverID, payload.IDs); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to delete listening ports")
+						return
+					}
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				var payload listeningPortPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				if err := validateListeningPortAvailable(r.Context(), servers, listeningPorts, serverID, payload.Port, 0); err != nil {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				created, err := listeningPorts.Create(r.Context(), serverID, store.ListeningPortInput{
+					Port:        payload.Port,
+					Protocol:    strings.TrimSpace(payload.Protocol),
+					Description: strings.TrimSpace(payload.Description),
+					Status:      strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "server not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to create listening port")
+					return
+				}
+				if err := callL7UpdateListeningPorts(r.Context(), servers, serverID, listeningPorts); err != nil {
+					_ = listeningPorts.Delete(r.Context(), serverID, created.ID)
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				writeJSON(w, http.StatusCreated, created)
+			case http.MethodPut:
+				if portID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				var payload listeningPortPayload
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					writeError(w, http.StatusBadRequest, "invalid JSON body")
+					return
+				}
+				existingList, err := listeningPorts.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load listening ports")
+					return
+				}
+				var previous store.ListeningPort
+				found := false
+				for _, port := range existingList {
+					if port.ID == portID {
+						previous = port
+						found = true
+						break
+					}
+				}
+				if !found {
+					writeError(w, http.StatusNotFound, "listening port not found")
+					return
+				}
+				if err := validateListeningPortAvailable(r.Context(), servers, listeningPorts, serverID, payload.Port, portID); err != nil {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				updated, err := listeningPorts.Update(r.Context(), serverID, portID, store.ListeningPortInput{
+					Port:        payload.Port,
+					Protocol:    strings.TrimSpace(payload.Protocol),
+					Description: strings.TrimSpace(payload.Description),
+					Status:      strings.TrimSpace(payload.Status),
+				})
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "listening port not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to update listening port")
+					return
+				}
+				if err := callL7UpdateListeningPorts(r.Context(), servers, serverID, listeningPorts); err != nil {
+					_, _ = listeningPorts.Update(r.Context(), serverID, portID, store.ListeningPortInput{
+						Port:        previous.Port,
+						Protocol:    previous.Protocol,
+						Description: previous.Description,
+						Status:      previous.Status,
+					})
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				writeJSON(w, http.StatusOK, updated)
+			case http.MethodDelete:
+				if portID == 0 || isBatch {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				list, err := listeningPorts.ListByServer(r.Context(), serverID)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to load listening ports")
+					return
+				}
+				remaining := make([]store.ListeningPort, 0, len(list))
+				found := false
+				for _, port := range list {
+					if port.ID == portID {
+						found = true
+						continue
+					}
+					remaining = append(remaining, port)
+				}
+				if !found {
+					writeError(w, http.StatusNotFound, "listening port not found")
+					return
+				}
+				if err := postL7ListeningPorts(r.Context(), servers, serverID, listeningPortsToL7Payload(serverID, remaining)); err != nil {
+					writeError(w, http.StatusBadGateway, err.Error())
+					return
+				}
+				if err := listeningPorts.Delete(r.Context(), serverID, portID); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete listening port")
+					return
+				}
+				w.WriteHeader(http.StatusNoContent)
+			default:
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			}
+			return
+		}
+
 		if strings.HasSuffix(r.URL.Path, "/host-metrics") {
 			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/host-metrics")
 			if !ok {
@@ -4967,8 +5161,8 @@ func parseWafUserAgentPath(path string) (siteID int64, ruleID int64, isBatch boo
 	return 0, 0, false, false
 }
 
-func parseListeningPortsPath(path string) (siteID int64, portID int64, isBatch bool, ok bool) {
-	trimmed := strings.TrimPrefix(path, "/sites/")
+func parseListeningPortsPath(path string) (serverID int64, portID int64, isBatch bool, ok bool) {
+	trimmed := strings.TrimPrefix(path, "/servers/")
 	parts := strings.Split(trimmed, "/")
 	if len(parts) < 2 {
 		return 0, 0, false, false
@@ -4976,22 +5170,22 @@ func parseListeningPortsPath(path string) (siteID int64, portID int64, isBatch b
 	if parts[1] != "listening-ports" {
 		return 0, 0, false, false
 	}
-	siteID, ok = parsePositiveInt(parts[0])
+	serverID, ok = parsePositiveInt(parts[0])
 	if !ok {
 		return 0, 0, false, false
 	}
 	if len(parts) == 2 {
-		return siteID, 0, false, true
+		return serverID, 0, false, true
 	}
 	if len(parts) == 3 && parts[2] == "batch-delete" {
-		return siteID, 0, true, true
+		return serverID, 0, true, true
 	}
 	if len(parts) == 3 {
 		portID, ok = parsePositiveInt(parts[2])
 		if !ok {
 			return 0, 0, false, false
 		}
-		return siteID, portID, false, true
+		return serverID, portID, false, true
 	}
 	return 0, 0, false, false
 }

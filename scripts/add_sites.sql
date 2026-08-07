@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS `sites` (
   `ssl_type` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',
   `ssl_cert` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
   `ssl_cert_key` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `protocol_badges` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`) USING BTREE,

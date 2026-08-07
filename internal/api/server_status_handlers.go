@@ -123,9 +123,8 @@ func handleServerBoundPorts(w http.ResponseWriter, r *http.Request, servers stor
 func validateListeningPortAvailable(
 	ctx context.Context,
 	servers store.ServerStore,
-	sites store.SiteStore,
 	listeningPorts store.ListeningPortStore,
-	siteID int64,
+	serverID int64,
 	port int,
 	excludePortID int64,
 ) error {
@@ -133,7 +132,7 @@ func validateListeningPortAvailable(
 		return fmt.Errorf("port must be between 1 and 65535")
 	}
 
-	list, err := listeningPorts.ListBySite(ctx, siteID)
+	list, err := listeningPorts.ListByServer(ctx, serverID)
 	if err != nil {
 		return fmt.Errorf("failed to load listening ports: %w", err)
 	}
@@ -148,30 +147,20 @@ func validateListeningPortAvailable(
 		}
 	}
 
-	edgeIDs, err := siteEdgeServerIDs(ctx, sites, siteID)
+	view, err := servers.GetView(ctx, serverID)
 	if err != nil {
-		return fmt.Errorf("failed to load site servers: %w", err)
-	}
-	if len(edgeIDs) == 0 {
-		return fmt.Errorf("site has no assigned servers")
+		return fmt.Errorf("failed to load server: %w", err)
 	}
 
-	for _, edgeID := range edgeIDs {
-		view, err := servers.GetView(ctx, edgeID)
-		if err != nil {
-			return fmt.Errorf("failed to load server: %w", err)
-		}
-
-		probeCtx, cancel := context.WithTimeout(ctx, remoteHostMetricsTimeout)
-		bound, err := remotesvc.ProbeBoundPorts(probeCtx, sshTargetFromView(view))
-		cancel()
-		if err != nil {
-			return fmt.Errorf("failed to check system ports: %w", err)
-		}
-		if _, inUse := remotesvc.BoundPortNumbers(bound)[port]; inUse {
-			if _, managed := managedPorts[port]; !managed {
-				return fmt.Errorf("port %d is already in use on the system", port)
-			}
+	probeCtx, cancel := context.WithTimeout(ctx, remoteHostMetricsTimeout)
+	bound, err := remotesvc.ProbeBoundPorts(probeCtx, sshTargetFromView(view))
+	cancel()
+	if err != nil {
+		return fmt.Errorf("failed to check system ports: %w", err)
+	}
+	if _, inUse := remotesvc.BoundPortNumbers(bound)[port]; inUse {
+		if _, managed := managedPorts[port]; !managed {
+			return fmt.Errorf("port %d is already in use on the system", port)
 		}
 	}
 	return nil
