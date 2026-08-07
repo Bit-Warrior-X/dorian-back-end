@@ -44,7 +44,7 @@ func withCORS(cfg config.Config, next http.Handler) http.Handler {
 				w.Header().Set("Access-Control-Allow-Headers", requestedHeaders)
 				w.Header().Add("Vary", "Access-Control-Request-Headers")
 			} else {
-				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+				w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Actor-Id, X-Actor-Name, X-Actor-Email, X-Actor-Role")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		}

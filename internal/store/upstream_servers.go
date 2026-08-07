@@ -145,7 +145,9 @@ func (store *upstreamServerStore) Create(ctx context.Context, siteID int64, serv
 
 func (store *upstreamServerStore) Update(ctx context.Context, siteID, upstreamID int64, server UpstreamServerInput) (UpstreamServer, error) {
 	protocol := NormalizeUpstreamProtocol(server.Protocol)
-	result, err := store.db.ExecContext(ctx, `
+	// Do not treat RowsAffected == 0 as missing: MySQL returns 0 when SET
+	// values are identical to the current row.
+	_, err := store.db.ExecContext(ctx, `
 		UPDATE upstream_servers
 		SET ip_port = ?, protocol = ?, description = ?, status = ?
 		WHERE id = ? AND site_id = ?`,
@@ -161,13 +163,6 @@ func (store *upstreamServerStore) Update(ctx context.Context, siteID, upstreamID
 			return UpstreamServer{}, errNotFound
 		}
 		return UpstreamServer{}, err
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return UpstreamServer{}, err
-	}
-	if affected == 0 {
-		return UpstreamServer{}, errNotFound
 	}
 
 	return UpstreamServer{

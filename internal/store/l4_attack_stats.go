@@ -35,11 +35,11 @@ type L4TopIpRow struct {
 }
 
 type L4AttackStatsStore interface {
-	SumTrafficTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, error)
-	ListTrafficSeries(ctx context.Context, start, end time.Time, serverID int64) ([]L4TrafficPoint, error)
-	ListProtocolSeries(ctx context.Context, start, end time.Time, serverID int64) ([]L4ProtocolPoint, error)
-	ListRecentAttacks(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]L4AttackRow, error)
-	ListTopAttackIPs(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]L4TopIpRow, error)
+	SumTrafficTotals(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, int64, int64, error)
+	ListTrafficSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]L4TrafficPoint, error)
+	ListProtocolSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]L4ProtocolPoint, error)
+	ListRecentAttacks(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L4AttackRow, error)
+	ListTopAttackIPs(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L4TopIpRow, error)
 }
 
 type l4AttackStatsStore struct {
@@ -50,45 +50,40 @@ func NewL4AttackStatsStore(db *sql.DB) L4AttackStatsStore {
 	return &l4AttackStatsStore{db: db}
 }
 
-func (store *l4AttackStatsStore) SumTrafficTotals(ctx context.Context, start, end time.Time, serverID int64) (int64, int64, int64, error) {
+func (store *l4AttackStatsStore) SumTrafficTotals(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, int64, int64, error) {
 	var total int64
 	var allowed int64
 	var blocked int64
-	row := store.db.QueryRowContext(ctx, `
+	query := `
 		SELECT
 			COALESCE(SUM(total_traffic), 0),
 			COALESCE(SUM(allowed_traffic), 0),
 			COALESCE(SUM(blocked_traffic), 0)
 		FROM l4_attack_stats
-		WHERE bucket_ts >= ? AND bucket_ts <= ?
-		  AND (? = 0 OR server_id = ?)`,
-		start,
-		end,
-		serverID,
-		serverID,
-	)
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
+	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&total, &allowed, &blocked); err != nil {
 		return 0, 0, 0, err
 	}
 	return total, allowed, blocked, nil
 }
 
-func (store *l4AttackStatsStore) ListTrafficSeries(ctx context.Context, start, end time.Time, serverID int64) ([]L4TrafficPoint, error) {
-	rows, err := store.db.QueryContext(ctx, `
+func (store *l4AttackStatsStore) ListTrafficSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]L4TrafficPoint, error) {
+	query := `
 		SELECT bucket_ts,
 		       SUM(total_traffic) AS total_traffic,
 		       SUM(allowed_traffic) AS allowed_traffic,
 		       SUM(blocked_traffic) AS blocked_traffic
 		FROM l4_attack_stats
-		WHERE bucket_ts >= ? AND bucket_ts <= ?
-		  AND (? = 0 OR server_id = ?)
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
+	query += `
 		GROUP BY bucket_ts
-		ORDER BY bucket_ts`,
-		start,
-		end,
-		serverID,
-		serverID,
-	)
+		ORDER BY bucket_ts`
+	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -110,8 +105,8 @@ func (store *l4AttackStatsStore) ListTrafficSeries(ctx context.Context, start, e
 	return points, nil
 }
 
-func (store *l4AttackStatsStore) ListProtocolSeries(ctx context.Context, start, end time.Time, serverID int64) ([]L4ProtocolPoint, error) {
-	rows, err := store.db.QueryContext(ctx, `
+func (store *l4AttackStatsStore) ListProtocolSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]L4ProtocolPoint, error) {
+	query := `
 		SELECT bucket_ts,
 		       SUM(tcp) AS tcp,
 		       SUM(udp) AS udp,
@@ -119,15 +114,13 @@ func (store *l4AttackStatsStore) ListProtocolSeries(ctx context.Context, start, 
 		       SUM(gre) AS gre,
 		       SUM(other) AS other
 		FROM l4_attack_stats
-		WHERE bucket_ts >= ? AND bucket_ts <= ?
-		  AND (? = 0 OR server_id = ?)
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
+	query += `
 		GROUP BY bucket_ts
-		ORDER BY bucket_ts`,
-		start,
-		end,
-		serverID,
-		serverID,
-	)
+		ORDER BY bucket_ts`
+	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -149,23 +142,19 @@ func (store *l4AttackStatsStore) ListProtocolSeries(ctx context.Context, start, 
 	return points, nil
 }
 
-func (store *l4AttackStatsStore) ListRecentAttacks(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]L4AttackRow, error) {
+func (store *l4AttackStatsStore) ListRecentAttacks(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L4AttackRow, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	rows, err := store.db.QueryContext(ctx, `
+	query := `
 		SELECT source_ip, attack_type, created_at
 		FROM l4_live_attack
-		WHERE created_at >= ? AND created_at <= ?
-		  AND (? = 0 OR server_id = ?)
-		ORDER BY created_at DESC
-		LIMIT ?`,
-		start,
-		end,
-		serverID,
-		serverID,
-		limit,
-	)
+		WHERE created_at >= ? AND created_at <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -187,26 +176,24 @@ func (store *l4AttackStatsStore) ListRecentAttacks(ctx context.Context, start, e
 	return rowsOut, nil
 }
 
-func (store *l4AttackStatsStore) ListTopAttackIPs(ctx context.Context, start, end time.Time, serverID int64, limit int) ([]L4TopIpRow, error) {
+func (store *l4AttackStatsStore) ListTopAttackIPs(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L4TopIpRow, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	rows, err := store.db.QueryContext(ctx, `
+	query := `
 		SELECT source_ip,
 		       COUNT(*) AS seen_count,
 		       MAX(created_at) AS last_seen
 		FROM l4_live_attack
-		WHERE created_at >= ? AND created_at <= ?
-		  AND (? = 0 OR server_id = ?)
+		WHERE created_at >= ? AND created_at <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
+	query += `
 		GROUP BY source_ip
 		ORDER BY seen_count DESC
-		LIMIT ?`,
-		start,
-		end,
-		serverID,
-		serverID,
-		limit,
-	)
+		LIMIT ?`
+	args = append(args, limit)
+	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -78,6 +78,7 @@ type ServerStore interface {
 	ListWithUsers(ctx context.Context) ([]ServerView, error)
 	Count(ctx context.Context) (int64, error)
 	CountByStatus(ctx context.Context, status string) (int64, error)
+	CountActiveRuntime(ctx context.Context) (int64, error)
 	UpdateServerUsers(ctx context.Context, serverID int64, userIDs []int64) error
 	Create(ctx context.Context, input ServerInput) (Server, error)
 	GetView(ctx context.Context, serverID int64) (ServerView, error)
@@ -165,6 +166,24 @@ func (store *serverStore) Count(ctx context.Context) (int64, error) {
 func (store *serverStore) CountByStatus(ctx context.Context, status string) (int64, error) {
 	var total int64
 	row := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM servers WHERE status = ?`, strings.TrimSpace(status))
+	if err := row.Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// CountActiveRuntime counts edges whose orchestrator runtime is up (service_status),
+// falling back to row status Normal when runtime has not been probed yet.
+func (store *serverStore) CountActiveRuntime(ctx context.Context) (int64, error) {
+	var total int64
+	row := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM servers
+		WHERE LOWER(TRIM(COALESCE(service_status, ''))) IN ('running', 'active', 'enable')
+		   OR (
+		     TRIM(COALESCE(service_status, '')) = ''
+		     AND status = 'Normal'
+		   )`)
 	if err := row.Scan(&total); err != nil {
 		return 0, err
 	}

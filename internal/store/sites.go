@@ -63,6 +63,8 @@ func (input SiteInput) Normalize() SiteInput {
 
 type SiteStore interface {
 	List(ctx context.Context) ([]Site, error)
+	Count(ctx context.Context) (int64, error)
+	CountActive(ctx context.Context) (int64, error)
 	Get(ctx context.Context, id int64) (Site, error)
 	Create(ctx context.Context, input SiteInput) (Site, error)
 	Update(ctx context.Context, id int64, input SiteInput) (Site, error)
@@ -181,6 +183,18 @@ func (store *siteStore) List(ctx context.Context) ([]Site, error) {
 	}
 
 	return sites, nil
+}
+
+func (store *siteStore) Count(ctx context.Context) (int64, error) {
+	var count int64
+	err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sites`).Scan(&count)
+	return count, err
+}
+
+func (store *siteStore) CountActive(ctx context.Context) (int64, error) {
+	var count int64
+	err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sites WHERE UPPER(status) = 'ENABLE'`).Scan(&count)
+	return count, err
 }
 
 func (store *siteStore) Get(ctx context.Context, id int64) (Site, error) {

@@ -2255,6 +2255,33 @@ END//
 DELIMITER ;
 SET SQL_MODE=@OLDTMP_SQL_MODE;
 
+-- Dumping structure for table cdnproxy.audit_logs
+DROP TABLE IF EXISTS `audit_logs`;
+CREATE TABLE IF NOT EXISTS `audit_logs` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `action` varchar(64) NOT NULL,
+  `category` varchar(64) NOT NULL,
+  `resource_type` varchar(64) DEFAULT NULL,
+  `resource_id` bigint DEFAULT NULL,
+  `resource_name` varchar(255) DEFAULT NULL,
+  `actor_user_id` bigint DEFAULT NULL,
+  `actor_name` varchar(255) DEFAULT NULL,
+  `actor_email` varchar(255) DEFAULT NULL,
+  `actor_role` varchar(32) DEFAULT NULL,
+  `ip_address` varchar(64) DEFAULT NULL,
+  `user_agent` varchar(512) DEFAULT NULL,
+  `http_method` varchar(16) DEFAULT NULL,
+  `path` varchar(512) DEFAULT NULL,
+  `status_code` int DEFAULT NULL,
+  `details` text,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_audit_logs_created_at` (`created_at`),
+  KEY `idx_audit_logs_category` (`category`),
+  KEY `idx_audit_logs_action` (`action`),
+  KEY `idx_audit_logs_actor_user_id` (`actor_user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Dumping structure for trigger cdnproxy.trg_prevent_l4_id_update
 DROP TRIGGER IF EXISTS `trg_prevent_l4_id_update`;
 SET @OLDTMP_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
