@@ -2,13 +2,35 @@ openapi: 3.0.3
 info:
   title: Dorian Back-End API
   description: |
-    REST API for the Dorian dashboard. Manages protected servers, WAF/L4 rules,
-    traffic settings, analytics, and agent communication.
+    REST API for the Dorian dashboard. Manages protected servers, sites (domains),
+    WAF/L4 rules, traffic settings, analytics, audit logs, and agent communication.
 
     Most endpoints require a bearer token obtained from `POST /auth/login`.
     Traffic mutations (cache rules, upstream servers, listening ports, compress)
     sync to the edge L7 agent (angelos) on port 5000; failures return HTTP 502.
-  version: 1.0.0
+
+    **Analytics and dashboard scoping**
+
+    Many read endpoints accept optional `serverId` and `siteId` query parameters:
+
+    - Omit both (or `siteId=all`) to aggregate across all servers/sites.
+    - `serverId` narrows results to one edge node.
+    - `siteId` narrows to a site domain; when `serverId` is omitted, the site's
+      linked servers are used. When both are set, the server must serve that site.
+
+    Time windows use either `range` (e.g. `30m`, `24h`, `7d`, `today`, `yesterday`)
+    or explicit `start` / `end` (RFC3339 or `2006-01-02 15:04:05`).
+
+    Duplicate routes under `/api/v1/...` mirror the root paths listed below.
+
+    **Site and WAF rule sub-resources**
+
+    Site-scoped WAF CRUD lives under `/sites/{siteId}/waf/{resource}` where
+    `{resource}` is one of `whitelist`, `blacklist`, `geolocation`, `anti-cc`,
+    `anti-header`, `interval-freq-limit`, `second-freq-limit`, `response-freq`,
+    or `user-agent`. Predefined templates use the same pattern under
+    `/waf-rules/{wafRuleId}/waf/{resource}`.
+  version: 1.1.0
 
 servers:
   - url: http://localhost:8080
@@ -17,6 +39,14 @@ servers:
 tags:
   - name: Health
   - name: Auth
+  - name: Audit Logs
+  - name: Dashboard
+  - name: Analytics
+  - name: Security Analytics
+  - name: Layer 4 Analytics
+  - name: Sites
+  - name: WAF Rules
+  - name: Servers
   - name: Cache Rules
   - name: Upstream Servers
   - name: Listening Ports
@@ -67,6 +97,1419 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Sign out and record audit event
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  enum: [manual, idle]
+                  description: Optional logout reason for audit logging
+      responses:
+        "204":
+          description: Logged out
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+
+  /audit-logs:
+    get:
+      tags: [Audit Logs]
+      summary: List audit log entries
+      parameters:
+        - $ref: "#/components/parameters/AuditLimit"
+        - name: category
+          in: query
+          schema:
+            type: string
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: actorUserId
+          in: query
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: Audit log entries (newest first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditLog"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /dashboard/summary:
+    get:
+      tags: [Dashboard]
+      summary: Dashboard KPI totals
+      responses:
+        "200":
+          description: Summary counters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DashboardSummary"
+
+  /dashboard/security-events:
+    get:
+      tags: [Dashboard]
+      summary: Recent security events
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Security events
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /dashboard/bandwidth:
+    get:
+      tags: [Dashboard]
+      summary: Aggregate bandwidth time series
+      parameters:
+        - $ref: "#/components/parameters/DashboardRange"
+        - $ref: "#/components/parameters/ServerIdQuery"
+      responses:
+        "200":
+          description: Bandwidth series grouped by server
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BandwidthSeries"
+
+  /dashboard/bandwidth-nic-rx:
+    get:
+      tags: [Dashboard]
+      summary: NIC RX bandwidth by server
+      parameters:
+        - $ref: "#/components/parameters/DashboardRange"
+        - $ref: "#/components/parameters/ServerIdQuery"
+      responses:
+        "200":
+          description: NIC RX bandwidth series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BandwidthSeries"
+
+  /dashboard/bandwidth-nic-tx:
+    get:
+      tags: [Dashboard]
+      summary: NIC TX bandwidth by server
+      parameters:
+        - $ref: "#/components/parameters/DashboardRange"
+        - $ref: "#/components/parameters/ServerIdQuery"
+      responses:
+        "200":
+          description: NIC TX bandwidth series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BandwidthSeries"
+
+  /dashboard/bandwidth-l7-rx:
+    get:
+      tags: [Dashboard]
+      summary: L7 RX bandwidth by server
+      parameters:
+        - $ref: "#/components/parameters/DashboardRange"
+        - $ref: "#/components/parameters/ServerIdQuery"
+      responses:
+        "200":
+          description: L7 RX bandwidth series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BandwidthSeries"
+
+  /dashboard/bandwidth-l7-tx:
+    get:
+      tags: [Dashboard]
+      summary: L7 TX bandwidth by server
+      parameters:
+        - $ref: "#/components/parameters/DashboardRange"
+        - $ref: "#/components/parameters/ServerIdQuery"
+      responses:
+        "200":
+          description: L7 TX bandwidth series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BandwidthSeries"
+
+  /dashboard/request-response:
+    get:
+      tags: [Dashboard]
+      summary: Request and response counts over time
+      parameters:
+        - $ref: "#/components/parameters/DashboardRange"
+        - $ref: "#/components/parameters/ServerIdQuery"
+      responses:
+        "200":
+          description: Request/response time series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /dashboard/status-codes:
+    get:
+      tags: [Dashboard]
+      summary: HTTP status code distribution over time
+      parameters:
+        - $ref: "#/components/parameters/DashboardRange"
+        - $ref: "#/components/parameters/ServerIdQuery"
+      responses:
+        "200":
+          description: Status code time series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /dashboard/top-domains:
+    get:
+      tags: [Dashboard]
+      summary: Top domains by traffic
+      description: Supports `serverId` and `siteId` scope plus analytics time window.
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Top domains
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SecurityDomainRow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /analytics/summary:
+    get:
+      tags: [Analytics]
+      summary: Traffic analytics summary
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Aggregated traffic totals and latest bandwidth
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /analytics/series/nic-rx-bandwidth:
+    get:
+      tags: [Analytics]
+      summary: NIC RX bandwidth time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/nic-tx-bandwidth:
+    get:
+      tags: [Analytics]
+      summary: NIC TX bandwidth time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/l7-rx-bandwidth:
+    get:
+      tags: [Analytics]
+      summary: L7 RX bandwidth time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/l7-tx-bandwidth:
+    get:
+      tags: [Analytics]
+      summary: L7 TX bandwidth time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/nic-rx-traffic:
+    get:
+      tags: [Analytics]
+      summary: NIC RX traffic volume time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/nic-tx-traffic:
+    get:
+      tags: [Analytics]
+      summary: NIC TX traffic volume time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/l7-rx-traffic:
+    get:
+      tags: [Analytics]
+      summary: L7 RX traffic volume time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/l7-tx-traffic:
+    get:
+      tags: [Analytics]
+      summary: L7 TX traffic volume time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/request-response:
+    get:
+      tags: [Analytics]
+      summary: Request and response counts time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/status-codes:
+    get:
+      tags: [Analytics]
+      summary: HTTP status codes time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/ip-count:
+    get:
+      tags: [Analytics]
+      summary: Unique IP count time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/methods:
+    get:
+      tags: [Analytics]
+      summary: HTTP methods time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/series/protocols:
+    get:
+      tags: [Analytics]
+      summary: Protocol breakdown time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Time series points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/summary/status-codes:
+    get:
+      tags: [Analytics]
+      summary: Status code totals for the time window
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Status code summary rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/summary/methods:
+    get:
+      tags: [Analytics]
+      summary: HTTP method totals for the time window
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Method summary rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/summary/protocols:
+    get:
+      tags: [Analytics]
+      summary: Protocol totals for the time window
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Protocol summary rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/summary/top-ips:
+    get:
+      tags: [Analytics]
+      summary: Top client IPs
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Top IP rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/summary/isps:
+    get:
+      tags: [Analytics]
+      summary: Top ISPs by request count
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: ISP summary rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/summary/referers:
+    get:
+      tags: [Analytics]
+      summary: Top referers
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Referer summary rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/summary/countries:
+    get:
+      tags: [Analytics]
+      summary: Top countries by request count
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Country summary rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/security/summary:
+    get:
+      tags: [Security Analytics]
+      summary: Security analytics summary
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Blocked request and IP totals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecurityAnalyticsSummary"
+
+  /analytics/security/series/block-count:
+    get:
+      tags: [Security Analytics]
+      summary: Blocked requests over time
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Block count time series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/security/summary/countries:
+    get:
+      tags: [Security Analytics]
+      summary: Top countries for blocked traffic
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Country rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SecurityCountryRow"
+
+  /analytics/security/summary/top-requests:
+    get:
+      tags: [Security Analytics]
+      summary: Top requesting areas
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Area rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/security/summary/top-blocks:
+    get:
+      tags: [Security Analytics]
+      summary: Top blocked areas
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Area rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/security/summary/top-urls:
+    get:
+      tags: [Security Analytics]
+      summary: Top blocked URLs
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: URL rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/security/summary/top-referers:
+    get:
+      tags: [Security Analytics]
+      summary: Top referers for security events
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Referer rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/security/summary/top-user-agents:
+    get:
+      tags: [Security Analytics]
+      summary: Top user agents for security events
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: User-agent rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+
+  /analytics/security/summary/top-domains:
+    get:
+      tags: [Security Analytics]
+      summary: Top domains for security analytics
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Domain rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SecurityDomainRow"
+
+  /analytics/l4/summary:
+    get:
+      tags: [Layer 4 Analytics]
+      summary: Layer 4 attack traffic summary
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: L4 traffic totals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/L4Summary"
+
+  /analytics/l4/series/traffic:
+    get:
+      tags: [Layer 4 Analytics]
+      summary: Layer 4 traffic time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: L4 traffic points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/L4TrafficPoint"
+
+  /analytics/l4/series/protocols:
+    get:
+      tags: [Layer 4 Analytics]
+      summary: Layer 4 protocol breakdown time series
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Protocol points
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/L4ProtocolPoint"
+
+  /analytics/l4/attacks/recent:
+    get:
+      tags: [Layer 4 Analytics]
+      summary: Recent Layer 4 attacks
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Recent attack rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/L4AttackRow"
+
+  /analytics/l4/attacks/top-ips:
+    get:
+      tags: [Layer 4 Analytics]
+      summary: Top attacking IPs
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Top IP rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/L4TopIpRow"
+
+  /sites:
+    get:
+      tags: [Sites]
+      summary: List sites
+      responses:
+        "200":
+          description: Sites
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Site"
+    post:
+      tags: [Sites]
+      summary: Create a site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteInput"
+      responses:
+        "201":
+          description: Site created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          description: Domain already exists
+
+  /sites/{siteId}:
+    parameters:
+      - $ref: "#/components/parameters/SiteId"
+    get:
+      tags: [Sites]
+      summary: Get a site
+      responses:
+        "200":
+          description: Site
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Sites]
+      summary: Update a site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteInput"
+      responses:
+        "200":
+          description: Site updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Domain already exists
+    patch:
+      tags: [Sites]
+      summary: Partially update a site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SiteInput"
+      responses:
+        "200":
+          description: Site updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+    delete:
+      tags: [Sites]
+      summary: Delete a site
+      responses:
+        "204":
+          description: Site deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sites/{siteId}/waf/fork:
+    parameters:
+      - $ref: "#/components/parameters/SiteId"
+    post:
+      tags: [Sites]
+      summary: Fork predefined WAF rule for site editing
+      description: |
+        Creates a site-specific copy of a predefined WAF template so WAF sub-rules
+        can be modified. Returns HTTP 409 when the site still uses a predefined rule.
+      responses:
+        "200":
+          description: Site with forked WAF rule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Site"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sites/{siteId}/ports:
+    parameters:
+      - $ref: "#/components/parameters/SiteId"
+    get:
+      tags: [Sites]
+      summary: Get site listening port bindings
+      responses:
+        "200":
+          description: Port configuration for HTTP/HTTPS bindings
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Sites]
+      summary: Update site listening port bindings
+      description: Syncs bindings to the L7 agent after update.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [serverId]
+              properties:
+                serverId:
+                  type: integer
+                  format: int64
+                httpPortIds:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                httpsPortIds:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+      responses:
+        "200":
+          description: Updated port configuration
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /sites/{siteId}/compress:
+    parameters:
+      - $ref: "#/components/parameters/SiteId"
+    get:
+      tags: [Sites]
+      summary: Get site Gzip compress settings
+      responses:
+        "200":
+          description: Compress settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompressSettings"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [Sites]
+      summary: Update site Gzip compress settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CompressSettingsInput"
+      responses:
+        "200":
+          description: Compress settings updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompressSettings"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /sites/{siteId}/cache-rules:
+    parameters:
+      - $ref: "#/components/parameters/SiteId"
+    get:
+      tags: [Sites]
+      summary: List cache rules for a site
+      responses:
+        "200":
+          description: Cache rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CacheRule"
+    post:
+      tags: [Sites]
+      summary: Create a site cache rule
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CacheRuleInput"
+      responses:
+        "201":
+          description: Rule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CacheRule"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /sites/{siteId}/upstream-servers:
+    parameters:
+      - $ref: "#/components/parameters/SiteId"
+    get:
+      tags: [Sites]
+      summary: List upstream servers for a site
+      responses:
+        "200":
+          description: Upstream servers
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UpstreamServer"
+    post:
+      tags: [Sites]
+      summary: Create a site upstream server
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpstreamServerInput"
+      responses:
+        "201":
+          description: Upstream server created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpstreamServer"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /waf-rules:
+    get:
+      tags: [WAF Rules]
+      summary: List WAF rule templates
+      parameters:
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [predefined, custom]
+      responses:
+        "200":
+          description: WAF rules
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WafRule"
+    post:
+      tags: [WAF Rules]
+      summary: Create a predefined WAF rule template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WafRuleInput"
+      responses:
+        "201":
+          description: WAF rule created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WafRule"
+
+  /waf-rules/{wafRuleId}:
+    parameters:
+      - $ref: "#/components/parameters/WafRuleId"
+    get:
+      tags: [WAF Rules]
+      summary: Get a WAF rule template
+      responses:
+        "200":
+          description: WAF rule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WafRule"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [WAF Rules]
+      summary: Update a WAF rule template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WafRuleInput"
+      responses:
+        "200":
+          description: WAF rule updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WafRule"
+    patch:
+      tags: [WAF Rules]
+      summary: Partially update a WAF rule template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WafRuleInput"
+      responses:
+        "200":
+          description: WAF rule updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WafRule"
+    delete:
+      tags: [WAF Rules]
+      summary: Delete a WAF rule template
+      description: Returns HTTP 409 when the template is assigned to one or more sites.
+      responses:
+        "204":
+          description: WAF rule deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: WAF rule is in use by sites
+
+  /waf-rules/{wafRuleId}/duplicate:
+    parameters:
+      - $ref: "#/components/parameters/WafRuleId"
+    post:
+      tags: [WAF Rules]
+      summary: Duplicate a predefined WAF rule template
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+      responses:
+        "201":
+          description: Duplicated WAF rule
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WafRule"
+
+  /servers:
+    get:
+      tags: [Servers]
+      summary: List servers
+      responses:
+        "200":
+          description: Servers with assigned users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+    post:
+      tags: [Servers]
+      summary: Create and deploy a server
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "201":
+          description: Server created
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /servers/{serverId}/host-metrics:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    get:
+      tags: [Servers]
+      summary: Probe host CPU, memory, and disk via SSH
+      responses:
+        "200":
+          description: Host metrics
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
+
+  /servers/{serverId}/access-log/stream:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    get:
+      tags: [Servers]
+      summary: Stream live access log lines over WebSocket
+      description: |
+        Upgrades to WebSocket. Query params: `lines` (default 200, max 2000),
+        optional `path` for log file location.
+      parameters:
+        - name: lines
+          in: query
+          schema:
+            type: integer
+        - name: path
+          in: query
+          schema:
+            type: string
+      responses:
+        "101":
+          description: 'WebSocket upgrade; messages are JSON objects with a "line" field'
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /servers/{serverId}/refresh-runtime-status:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    post:
+      tags: [Servers]
+      summary: Refresh angelos/athens/sparta runtime status
+      responses:
+        "200":
+          description: Updated server view
+          content:
+            application/json:
+              schema:
+                type: object
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "502":
+          $ref: "#/components/responses/BadGateway"
 
   /servers/{serverId}/cache-rules:
     parameters:
@@ -508,6 +1951,20 @@ components:
         type: integer
         format: int64
       example: 1033
+    SiteId:
+      name: siteId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    WafRuleId:
+      name: wafRuleId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
     RuleId:
       name: ruleId
       in: path
@@ -515,6 +1972,65 @@ components:
       schema:
         type: integer
         format: int64
+    ServerIdQuery:
+      name: serverId
+      in: query
+      schema:
+        type: integer
+        format: int64
+      description: Optional edge server filter
+    SiteIdQuery:
+      name: siteId
+      in: query
+      schema:
+        type: integer
+        format: int64
+      description: Optional site filter; omit or use `all` for all sites
+    AnalyticsRange:
+      name: range
+      in: query
+      schema:
+        type: string
+        example: 24h
+      description: |
+        Relative window when `start`/`end` are omitted. Supports `today`,
+        `yesterday`, and suffix forms like `30m`, `12h`, `7d`.
+    AnalyticsStart:
+      name: start
+      in: query
+      schema:
+        type: string
+        format: date-time
+      description: Window start (RFC3339 or `2006-01-02 15:04:05`)
+    AnalyticsEnd:
+      name: end
+      in: query
+      schema:
+        type: string
+        format: date-time
+      description: Window end (RFC3339 or `2006-01-02 15:04:05`)
+    DashboardRange:
+      name: range
+      in: query
+      schema:
+        type: string
+        default: 30m
+        example: 24h
+      description: |
+        Relative window: `30m`, `1h`, `2h`, `4h`, `8h`, `12h`, `24h`, `48h`,
+        `7d`, `1d`, `2d`, or millisecond duration.
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 10
+    AuditLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 200
 
   responses:
     BadRequest:
@@ -556,6 +2072,12 @@ components:
           example:
             error: Bad Gateway
             message: l7_clear_url_cache returned status 400
+    MethodNotAllowed:
+      description: HTTP method not allowed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
 
   schemas:
     Error:
@@ -796,3 +2318,370 @@ components:
           type: boolean
         applications:
           type: boolean
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        action:
+          type: string
+        category:
+          type: string
+        resourceType:
+          type: string
+        resourceId:
+          type: integer
+          format: int64
+          nullable: true
+        resourceName:
+          type: string
+        actorUserId:
+          type: integer
+          format: int64
+          nullable: true
+        actorName:
+          type: string
+        actorEmail:
+          type: string
+        actorRole:
+          type: string
+        ipAddress:
+          type: string
+        userAgent:
+          type: string
+        httpMethod:
+          type: string
+        path:
+          type: string
+        statusCode:
+          type: integer
+        details:
+          type: string
+        createdAt:
+          type: string
+
+    DashboardSummary:
+      type: object
+      properties:
+        totalUsers:
+          type: integer
+          format: int64
+        totalServers:
+          type: integer
+          format: int64
+        activeServers:
+          type: integer
+          format: int64
+        totalSites:
+          type: integer
+          format: int64
+        activeSites:
+          type: integer
+          format: int64
+        blockedIps:
+          type: integer
+          format: int64
+        l4AttacksThisMonth:
+          type: integer
+          format: int64
+        l4AttacksPreviousMonth:
+          type: integer
+          format: int64
+        l7ThreatsThisMonth:
+          type: integer
+          format: int64
+        l7ThreatsPreviousMonth:
+          type: integer
+          format: int64
+
+    BandwidthSeries:
+      type: object
+      properties:
+        serverId:
+          type: integer
+          format: int64
+        points:
+          type: array
+          items:
+            type: object
+            properties:
+              timestamp:
+                type: string
+              bandwidth:
+                type: integer
+                format: int64
+
+    AnalyticsSummary:
+      type: object
+      properties:
+        totalNicRxTraffic:
+          type: integer
+          format: int64
+        totalNicTxTraffic:
+          type: integer
+          format: int64
+        totalL7RxTraffic:
+          type: integer
+          format: int64
+        totalL7TxTraffic:
+          type: integer
+          format: int64
+        nicRxBandwidthLast:
+          type: integer
+          format: int64
+        nicRxBandwidthLastTime:
+          type: string
+        nicTxBandwidthLast:
+          type: integer
+          format: int64
+        nicTxBandwidthLastTime:
+          type: string
+        l7RxBandwidthLast:
+          type: integer
+          format: int64
+        l7RxBandwidthLastTime:
+          type: string
+        l7TxBandwidthLast:
+          type: integer
+          format: int64
+        l7TxBandwidthLastTime:
+          type: string
+        totalRequest:
+          type: integer
+          format: int64
+        totalResponse:
+          type: integer
+          format: int64
+        ipCount:
+          type: integer
+          format: int64
+        refererCount:
+          type: integer
+          format: int64
+        ispCount:
+          type: integer
+          format: int64
+
+    SecurityAnalyticsSummary:
+      type: object
+      properties:
+        totalRequestCounts:
+          type: integer
+          format: int64
+        blockRequestCounts:
+          type: integer
+          format: int64
+        totalIps:
+          type: integer
+          format: int64
+        blacklistedIps:
+          type: integer
+          format: int64
+
+    SecurityCountryRow:
+      type: object
+      properties:
+        code:
+          type: string
+        name:
+          type: string
+        count:
+          type: integer
+          format: int64
+
+    SecurityDomainRow:
+      type: object
+      properties:
+        domain:
+          type: string
+        count:
+          type: integer
+          format: int64
+        bandwidth:
+          type: integer
+          format: int64
+        cacheHit:
+          type: number
+          format: double
+        status:
+          type: string
+
+    L4Summary:
+      type: object
+      properties:
+        totalTraffic:
+          type: integer
+          format: int64
+        allowedTraffic:
+          type: integer
+          format: int64
+        blockedTraffic:
+          type: integer
+          format: int64
+
+    L4TrafficPoint:
+      type: object
+      properties:
+        timestamp:
+          type: string
+        totalTraffic:
+          type: integer
+          format: int64
+        allowedTraffic:
+          type: integer
+          format: int64
+        blockedTraffic:
+          type: integer
+          format: int64
+
+    L4ProtocolPoint:
+      type: object
+      properties:
+        timestamp:
+          type: string
+        tcp:
+          type: integer
+          format: int64
+        udp:
+          type: integer
+          format: int64
+        icmp:
+          type: integer
+          format: int64
+        gre:
+          type: integer
+          format: int64
+        other:
+          type: integer
+          format: int64
+
+    L4AttackRow:
+      type: object
+      properties:
+        timestamp:
+          type: string
+        sourceIp:
+          type: string
+        attackType:
+          type: string
+
+    L4TopIpRow:
+      type: object
+      properties:
+        ip:
+          type: string
+        count:
+          type: integer
+          format: int64
+        lastSeen:
+          type: string
+
+    Site:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        domain:
+          type: string
+        status:
+          type: string
+        wafId:
+          type: integer
+          format: int64
+        wafName:
+          type: string
+        wafRole:
+          type: string
+        certificateStatus:
+          type: string
+        certificateExpiry:
+          type: string
+          format: date-time
+        cacheRatio:
+          type: number
+          format: double
+        bandwidth:
+          type: integer
+          format: int64
+        sslType:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        serverIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+        servers:
+          type: array
+          items:
+            type: string
+
+    SiteInput:
+      type: object
+      required: [domain]
+      properties:
+        domain:
+          type: string
+        status:
+          type: string
+        wafId:
+          type: integer
+          format: int64
+        certificateStatus:
+          type: string
+        certificateExpiry:
+          type: string
+        cacheRatio:
+          type: number
+          format: double
+        bandwidth:
+          type: integer
+          format: int64
+        sslType:
+          type: string
+        sslCert:
+          type: string
+        sslCertKey:
+          type: string
+        serverIds:
+          type: array
+          items:
+            type: integer
+            format: int64
+
+    WafRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        role:
+          type: string
+          enum: [predefined, custom]
+        createdAt:
+          type: string
+          format: date-time
+        siteCount:
+          type: integer
+        ruleCount:
+          type: integer
+
+    WafRuleInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        role:
+          type: string
+          enum: [predefined, custom]
