@@ -58,6 +58,22 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7WhitelistUpdate"
+            example:
+              serverId: 1033
+              serverIp: 203.0.113.10
+              rules:
+                - id: 101
+                  wafRuleId: 42
+                  ips: 192.168.1.0/24,10.0.0.5
+                  url: "/*"
+                  method: GET,POST
+                  description: Office network bypass
+                - id: 102
+                  wafRuleId: 42
+                  ips: 203.0.113.50
+                  url: /api/health
+                  method: GET
+                  description: Monitoring probe
       responses:
         "200":
           description: Rules applied
@@ -75,6 +91,17 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7BlacklistUpdate"
+            example:
+              serverId: 1033
+              serverIp: 203.0.113.10
+              rules:
+                - id: 201
+                  wafRuleId: 42
+                  ips: 198.51.100.77
+                  url: "/*"
+                  method: "*"
+                  behavior: block
+                  description: Known bad actor
       responses:
         "200":
           description: Rules applied
@@ -92,6 +119,24 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7GeolocationUpdate"
+            example:
+              serverId: 1033
+              serverIp: 203.0.113.10
+              rules:
+                - id: 301
+                  wafRuleId: 42
+                  country: CN,RU
+                  url: "/*"
+                  behavior: block
+                  operation: BLACK
+                  status: ENABLE
+                - id: 302
+                  wafRuleId: 42
+                  country: US,CA,GB
+                  url: /checkout/*
+                  behavior: allow
+                  operation: WHITE
+                  status: ENABLE
       responses:
         "200":
           description: Rules applied
@@ -109,6 +154,18 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7AntiHeaderUpdate"
+            example:
+              serverId: 1033
+              serverIp: 203.0.113.10
+              rules:
+                - id: 401
+                  wafRuleId: 42
+                  url: "/*"
+                  header: X-Forwarded-For
+                  value: ""
+                  blockMode: missing
+                  behavior: block
+                  status: ENABLE
       responses:
         "200":
           description: Rules applied
@@ -125,6 +182,17 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7IntervalFreqLimitUpdate"
+            example:
+              serverId: 1033
+              serverIp: 203.0.113.10
+              rules:
+                - id: 501
+                  serverId: 1033
+                  url: /login
+                  time: 60
+                  request_count: 30
+                  behavior: block
+                  status: ENABLE
       responses:
         "200":
           description: Rules applied
@@ -141,6 +209,17 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7SecondFreqLimitUpdate"
+            example:
+              serverId: 1033
+              serverIp: 203.0.113.10
+              rules:
+                - id: 601
+                  serverId: 1033
+                  url: /api/*
+                  request_count: 100
+                  burst: 20
+                  behavior: block
+                  status: ENABLE
       responses:
         "200":
           description: Rules applied
@@ -157,6 +236,18 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7ResponseFreqUpdate"
+            example:
+              serverId: 1033
+              serverIp: 203.0.113.10
+              rules:
+                - id: 701
+                  serverId: 1033
+                  url: /search
+                  response_code: 404
+                  time: 120
+                  response_count: 50
+                  behavior: block
+                  status: ENABLE
       responses:
         "200":
           description: Rules applied
@@ -173,6 +264,17 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7UserAgentUpdate"
+            example:
+              serverId: 1033
+              serverIp: 203.0.113.10
+              rules:
+                - id: 801
+                  serverId: 1033
+                  url: "/*"
+                  user_agent: curl/*
+                  match: prefix
+                  behavior: block
+                  status: ENABLE
       responses:
         "200":
           description: Rules applied
@@ -192,6 +294,23 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7TemporaryBlacklistUpdate"
+            example:
+              serverId: 1033
+              temporaryblacklist:
+                - ip: 198.51.100.99
+                  url: /wp-admin
+                  country: US
+                  city: New York
+                  blocked_at: "2026-08-11T09:15:00Z"
+                  ttl: 3600
+                  trigger_rule: waf_interval_freq_limit
+                - ip: 203.0.113.200
+                  url: /api/login
+                  country: DE
+                  city: Berlin
+                  blocked_at: "2026-08-11T09:20:00Z"
+                  ttl: 7200
+                  trigger_rule: anti_cc
       responses:
         "200":
           description: Blacklist applied
@@ -208,6 +327,19 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7UpstreamServersUpdate"
+            example:
+              serverId: 1033
+              upstreams:
+                - id: 11
+                  serverId: 1033
+                  ip_port: 10.10.0.5:8080
+                  protocol: http
+                  description: Primary origin
+                - id: 12
+                  serverId: 1033
+                  ip_port: 10.10.0.6:8080
+                  protocol: http
+                  description: Failover origin
       responses:
         "200":
           description: Upstreams applied
@@ -225,6 +357,21 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7ListeningPortsUpdate"
+            example:
+              serverId: 1033
+              listeningports:
+                - id: 21
+                  serverId: 1033
+                  port: 80
+                  protocol: HTTP
+                  description: Public HTTP
+                  status: ENABLE
+                - id: 22
+                  serverId: 1033
+                  port: 443
+                  protocol: HTTPS
+                  description: Public HTTPS
+                  status: ENABLE
       responses:
         "200":
           description: Ports applied
@@ -241,6 +388,15 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7CompressUpdate"
+            example:
+              serverId: 1033
+              compress:
+                css: true
+                html: true
+                js: true
+                audio: false
+                font: true
+                applications: false
       responses:
         "200":
           description: Compress settings applied
@@ -258,6 +414,33 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7CacheRulesUpdate"
+            example:
+              serverId: 1033
+              cacherules:
+                - id: 31
+                  serverId: 1033
+                  rule_name: static_assets
+                  rule_type: file
+                  caching_time: 86400
+                  url: ""
+                  file_types: jpg,png,css,js,woff2
+                  priority: 10
+                  cache_slice: 1.0
+                  without_parameter: yes
+                  cache_mode: origin
+                  status: ENABLE
+                - id: 32
+                  serverId: 1033
+                  rule_name: homepage
+                  rule_type: url
+                  caching_time: 300
+                  url: https://www.example.com/
+                  file_types: ""
+                  priority: 5
+                  cache_slice: 0
+                  without_parameter: no
+                  cache_mode: force
+                  status: ENABLE
       responses:
         "200":
           description: Cache rules applied
@@ -274,6 +457,8 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L7ServerIdOnly"
+            example:
+              serverId: 1033
       responses:
         "200":
           description: Cache cleared
@@ -342,6 +527,44 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L4ConfigPush"
+            example:
+              token: edge-agent-token-example
+              id: 1033
+              dev: eth0
+              attachMode: native
+              sensitivity: medium
+              protectionMode: drop
+              blackIpDuration: 3600
+              synValid: true
+              synThreshold: 1000
+              synBurstPkt: 200
+              synBurstCountPerSec: 50
+              synFixedThreshold: 500
+              synFixedCheckDuration: 10
+              challengeTimeout: 30
+              synProtectionDuration: 300
+              ackValid: true
+              ackThreshold: 2000
+              ackBurstPkt: 300
+              ackBurstCountPerSec: 80
+              ackFixedThreshold: 800
+              ackFixedCheckDuration: 10
+              ackProtectionDuration: 300
+              rstValid: false
+              rstThreshold: 0
+              icmpValid: true
+              icmpThreshold: 500
+              udpValid: true
+              udpThreshold: 1500
+              greValid: false
+              tcpSegCheck: true
+              geoCheck: false
+              geoDbIpv4Path: /var/lib/geoip/GeoLite2-Country.mmdb
+              geoDbLocationPath: /var/lib/geoip/GeoLite2-City.mmdb
+              geoAllowCountries: []
+              geoCountriesBlockMode: false
+              tcpConnectionLimitCheck: true
+              tcpConnectionLimitCnt: 5000
       responses:
         "200":
           description: L4 config applied
@@ -360,6 +583,8 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/AgentTokenBody"
+            example:
+              token: edge-agent-token-example
       responses:
         "200":
           description: Available L4 options
@@ -367,6 +592,21 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/L4Options"
+              example:
+                interfaces:
+                  - eth0
+                  - eth1
+                attachModes:
+                  - native
+                  - skb
+                  - drv
+                attachModesByInterface:
+                  eth0:
+                    - native
+                    - drv
+                  eth1:
+                    - native
+                    - skb
         "4XX":
           $ref: "#/components/responses/AgentError"
 
@@ -382,6 +622,9 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L4IpAction"
+            example:
+              token: edge-agent-token-example
+              ip: 192.168.50.10
       responses:
         "200":
           description: IP whitelisted
@@ -400,6 +643,9 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L4IpAction"
+            example:
+              token: edge-agent-token-example
+              ip: 192.168.50.10
       responses:
         "200":
           description: IP removed
@@ -418,6 +664,8 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/AgentTokenBody"
+            example:
+              token: edge-agent-token-example
       responses:
         "200":
           description: Whitelist cleared
@@ -436,6 +684,9 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L4IpAction"
+            example:
+              token: edge-agent-token-example
+              ip: 198.51.100.99
       responses:
         "200":
           description: IP blocked
@@ -454,6 +705,9 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/L4IpAction"
+            example:
+              token: edge-agent-token-example
+              ip: 198.51.100.99
       responses:
         "200":
           description: IP unblocked
@@ -472,6 +726,8 @@ paths:
           application/json:
             schema:
               $ref: "#/components/schemas/AgentTokenBody"
+            example:
+              token: edge-agent-token-example
       responses:
         "200":
           description: Blocklist cleared
