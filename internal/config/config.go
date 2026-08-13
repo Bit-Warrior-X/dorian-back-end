@@ -58,6 +58,8 @@ type Config struct {
 }
 
 func Load() Config {
+	loadDotEnv(".env")
+
 	cfg := Config{
 		Port:                        "8080",
 		AllowAllCORS:                true,
@@ -313,16 +315,11 @@ type fileAcmeConfig struct {
 	AccountKeyPath        *string `json:"accountKeyPath"`
 	DNSPropagationSeconds *int    `json:"dnsPropagationSeconds"`
 	RenewIntervalHours    *int    `json:"renewIntervalHours"`
-	CloudflareAPIToken    *string `json:"cloudflareApiToken"`
-	CloudflareZoneID      *string `json:"cloudflareZoneId"`
-	CloudflareRecordID    *string `json:"cloudflareRecordId"`
 	HTTPReqEndpoint       *string `json:"httpReqEndpoint"`
 	HTTPReqUsername       *string `json:"httpReqUsername"`
-	HTTPReqPassword       *string `json:"httpReqPassword"`
 	DNSListen             *string `json:"dnsListen"`
 	RFC2136Nameserver     *string `json:"rfc2136Nameserver"`
 	RFC2136TSIGKey        *string `json:"rfc2136TsigKey"`
-	RFC2136TSIGSecret     *string `json:"rfc2136TsigSecret"`
 	RFC2136TSIGAlgorithm  *string `json:"rfc2136TsigAlgorithm"`
 	RFC2136Zone           *string `json:"rfc2136Zone"`
 }
@@ -454,23 +451,12 @@ func applyFileAcmeConfig(cfg *Config, acme fileAcmeConfig) {
 	if acme.RenewIntervalHours != nil && *acme.RenewIntervalHours > 0 {
 		cfg.AcmeRenewIntervalHours = *acme.RenewIntervalHours
 	}
-	if acme.CloudflareAPIToken != nil {
-		cfg.AcmeCloudflareAPIToken = strings.TrimSpace(*acme.CloudflareAPIToken)
-	}
-	if acme.CloudflareZoneID != nil {
-		cfg.AcmeCloudflareZoneID = strings.TrimSpace(*acme.CloudflareZoneID)
-	}
-	if acme.CloudflareRecordID != nil {
-		cfg.AcmeCloudflareRecordID = strings.TrimSpace(*acme.CloudflareRecordID)
-	}
+	// Cloudflare token/zone/record and other secrets are env-only (ACME_CLOUDFLARE_*).
 	if acme.HTTPReqEndpoint != nil {
 		cfg.AcmeHTTPReqEndpoint = strings.TrimSpace(*acme.HTTPReqEndpoint)
 	}
 	if acme.HTTPReqUsername != nil {
 		cfg.AcmeHTTPReqUsername = strings.TrimSpace(*acme.HTTPReqUsername)
-	}
-	if acme.HTTPReqPassword != nil {
-		cfg.AcmeHTTPReqPassword = *acme.HTTPReqPassword
 	}
 	if acme.DNSListen != nil {
 		cfg.AcmeDNSListen = strings.TrimSpace(*acme.DNSListen)
@@ -481,13 +467,43 @@ func applyFileAcmeConfig(cfg *Config, acme fileAcmeConfig) {
 	if acme.RFC2136TSIGKey != nil {
 		cfg.AcmeRFC2136TSIGKey = strings.TrimSpace(*acme.RFC2136TSIGKey)
 	}
-	if acme.RFC2136TSIGSecret != nil {
-		cfg.AcmeRFC2136TSIGSecret = *acme.RFC2136TSIGSecret
-	}
 	if acme.RFC2136TSIGAlgorithm != nil && strings.TrimSpace(*acme.RFC2136TSIGAlgorithm) != "" {
 		cfg.AcmeRFC2136TSIGAlgorithm = strings.TrimSpace(*acme.RFC2136TSIGAlgorithm)
 	}
 	if acme.RFC2136Zone != nil {
 		cfg.AcmeRFC2136Zone = strings.TrimSpace(*acme.RFC2136Zone)
+	}
+}
+
+// loadDotEnv loads KEY=VALUE pairs from path into the process environment when
+// the key is not already set. Secrets should live here or in real env vars, not config.json.
+func loadDotEnv(path string) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, exists := os.LookupEnv(key); exists {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+		_ = os.Setenv(key, value)
 	}
 }

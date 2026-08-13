@@ -2,5 +2,10 @@
   "allowedOrigins": [
     "https://panel.dorian.center",
     "http://panel.dorian.center"
-  ]
+  ],
+  "acme": {
+    "email": "ssl@dorian.center",
+    "dnsProvider": "cloudflare",
+    "dnsAlias": "acme-validation.dorian.center"
+  }
 }
