@@ -28,12 +28,34 @@ type TemporaryBlacklistPayload struct {
 	TTL         int64  `json:"ttl"`
 	TriggerRule string `json:"trigger_rule"`
 	ServerID    int64  `json:"server_id,omitempty"`
+	SiteID      int64  `json:"site_id,omitempty"`
 	Server      string `json:"server,omitempty"`
+}
+
+func (p *TemporaryBlacklistPayload) UnmarshalJSON(data []byte) error {
+	type raw TemporaryBlacklistPayload
+	var decoded raw
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = TemporaryBlacklistPayload(decoded)
+	if p.SiteID != 0 {
+		return nil
+	}
+	var extra struct {
+		SiteIDCamel int64 `json:"siteId"`
+	}
+	if err := json.Unmarshal(data, &extra); err != nil {
+		return err
+	}
+	p.SiteID = extra.SiteIDCamel
+	return nil
 }
 
 type BlacklistEntry struct {
 	ID          int64  `json:"id"`
 	ServerID    int64  `json:"serverId"`
+	SiteID      int64  `json:"siteId,omitempty"`
 	IPAddress   string `json:"ipAddress"`
 	Geolocation string `json:"geolocation"`
 	Reason      string `json:"reason"`
@@ -54,10 +76,11 @@ type BlacklistInput struct {
 	Server      string
 	TTL         string
 	TriggerRule string
+	SiteID      int64
 }
 
 type BlacklistStore interface {
-	List(ctx context.Context, serverID int64) ([]BlacklistEntry, error)
+	List(ctx context.Context, serverID, siteID int64) ([]BlacklistEntry, error)
 	Count(ctx context.Context) (int64, error)
 	Create(ctx context.Context, serverID int64, input BlacklistInput) (BlacklistEntry, error)
 	CreateFromPayload(ctx context.Context, p TemporaryBlacklistPayload) (BlacklistEntry, error)
@@ -79,7 +102,7 @@ func NewBlacklistStore(rdb *redis.Client) BlacklistStore {
 	return &blacklistStore{rdb: rdb}
 }
 
-func (s *blacklistStore) List(ctx context.Context, serverID int64) ([]BlacklistEntry, error) {
+func (s *blacklistStore) List(ctx context.Context, serverID, siteID int64) ([]BlacklistEntry, error) {
 	keys, err := s.entryKeys(ctx)
 	if err != nil {
 		return nil, err
@@ -103,6 +126,9 @@ func (s *blacklistStore) List(ctx context.Context, serverID int64) ([]BlacklistE
 			continue
 		}
 		if serverID != 0 && p.ServerID != serverID {
+			continue
+		}
+		if siteID != 0 && p.SiteID != siteID {
 			continue
 		}
 		entries = append(entries, payloadToEntry(id, p))
@@ -150,6 +176,7 @@ func (s *blacklistStore) Create(ctx context.Context, serverID int64, input Black
 		TTL:         0,
 		TriggerRule: strings.TrimSpace(input.TriggerRule),
 		ServerID:    serverID,
+		SiteID:      input.SiteID,
 		Server:      strings.TrimSpace(input.Server),
 	}
 	if ttl, _ := strconv.ParseInt(strings.TrimSpace(input.TTL), 10, 64); ttl > 0 {
@@ -283,6 +310,7 @@ func payloadToEntry(id int64, p TemporaryBlacklistPayload) BlacklistEntry {
 	return BlacklistEntry{
 		ID:          id,
 		ServerID:    p.ServerID,
+		SiteID:      p.SiteID,
 		IPAddress:   p.IP,
 		Geolocation: geolocation,
 		Reason:      "",

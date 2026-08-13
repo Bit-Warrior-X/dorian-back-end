@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS `sites` (
   `waf_id` bigint DEFAULT NULL,
   `certificate_status` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',
   `certificate_expiry` datetime DEFAULT NULL,
+  `certificate_error` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
   `cache_ratio` double NOT NULL DEFAULT 0,
   `bandwidth` bigint unsigned NOT NULL DEFAULT 0,
   `ssl_type` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',

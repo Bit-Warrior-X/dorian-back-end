@@ -38,6 +38,7 @@ type SiteEdgeServer struct {
 type SiteListeningPortStore interface {
 	BuildConfig(ctx context.Context, siteID int64, edges []SiteEdgeServer) (SitePortsConfig, error)
 	ListPortsForServer(ctx context.Context, serverID int64) ([]ListeningPort, error)
+	ListSelectedForServer(ctx context.Context, siteID, serverID int64) ([]ListeningPort, error)
 	ReplaceForServer(ctx context.Context, siteID, serverID int64, portIDs []int64) error
 	DeleteForServers(ctx context.Context, siteID int64, serverIDs []int64) error
 }
@@ -130,6 +131,33 @@ func (store *siteListeningPortStore) ListPortsForServer(ctx context.Context, ser
 		FROM listening_ports
 		WHERE server_id = ?
 		ORDER BY port ASC, id ASC`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	ports := make([]ListeningPort, 0)
+	for rows.Next() {
+		var port ListeningPort
+		var protocol sql.NullString
+		var status sql.NullString
+		if err := rows.Scan(&port.ID, &port.ServerID, &port.Port, &protocol, &port.Description, &status); err != nil {
+			return nil, err
+		}
+		port.Protocol = nullStringValue(protocol)
+		port.Status = nullStringValue(status)
+		ports = append(ports, port)
+	}
+	return ports, rows.Err()
+}
+
+func (store *siteListeningPortStore) ListSelectedForServer(ctx context.Context, siteID, serverID int64) ([]ListeningPort, error) {
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT lp.id, lp.server_id, lp.port, lp.protocol, lp.description, lp.status
+		FROM site_listening_ports slp
+		INNER JOIN listening_ports lp ON lp.id = slp.listening_port_id
+		WHERE slp.site_id = ? AND lp.server_id = ?
+		ORDER BY lp.port ASC, lp.id ASC`, siteID, serverID)
 	if err != nil {
 		return nil, err
 	}

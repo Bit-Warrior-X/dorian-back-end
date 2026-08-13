@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"vue-project-backend/internal/acme"
 	"vue-project-backend/internal/api"
 	"vue-project-backend/internal/config"
 	"vue-project-backend/internal/db"
@@ -69,11 +70,13 @@ func main() {
 	wafRuleStore := store.NewWafRuleStore(connection)
 	siteListeningPortStore := store.NewSiteListeningPortStore(connection)
 	auditLogStore := store.NewAuditLogStore(connection)
-	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore)
+	certIssuer := acme.NewIssuer(cfg, siteStore)
+	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore, certIssuer)
 
 	// Start background worker to periodically collect IP request statistics
 	// from each server and store them into the database.
 	worker.StartIPRequestStatsCollector(ctx, cfg, connection, serverStore)
+	certIssuer.Start(ctx)
 
 	server := &http.Server{
 		Addr:    ":" + cfg.Port,

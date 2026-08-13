@@ -2,5 +2,13 @@
   "allowedOrigins": [
     "https://panel.dorian.center",
     "http://panel.dorian.center"
-  ]
+  ],
+  "acme": {
+    "email": "ssl@dorian.center",
+    "dnsProvider": "cloudflare",
+    "dnsAlias": "acme-validation.dorian.center",
+    "cloudflareApiToken": "cfut_SwAWHNq6K66QnfuNNXv1M6UqaGocgcK2SIVqG5O67fa76689",
+    "cloudflareZoneId": "8c5d645c2cb7a9d2edbd1333e2f6a8ad",
+    "cloudflareRecordId": "9de741739b895e7a0774508bbb107646"
+  }
 }

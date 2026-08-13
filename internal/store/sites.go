@@ -20,6 +20,7 @@ type Site struct {
 	WafRole           string     `json:"wafRole,omitempty"`
 	CertificateStatus string     `json:"certificateStatus"`
 	CertificateExpiry *time.Time `json:"certificateExpiry,omitempty"`
+	CertificateError  string     `json:"certificateError,omitempty"`
 	CacheRatio        float64    `json:"cacheRatio"`
 	Bandwidth         int64      `json:"bandwidth"`
 	SslType           string     `json:"sslType"`
@@ -68,6 +69,8 @@ type SiteStore interface {
 	Get(ctx context.Context, id int64) (Site, error)
 	Create(ctx context.Context, input SiteInput) (Site, error)
 	Update(ctx context.Context, id int64, input SiteInput) (Site, error)
+	UpdateCertificate(ctx context.Context, id int64, certPEM, keyPEM, status string, expiry *time.Time) error
+	UpdateCertificateStatus(ctx context.Context, id int64, status, errMsg string) error
 	Delete(ctx context.Context, id int64) error
 	UpdateSiteServers(ctx context.Context, siteID int64, serverIDs []int64) error
 	EnsureWafRule(ctx context.Context, siteID int64, wafRules WafRuleStore) (int64, error)
@@ -85,7 +88,7 @@ func NewSiteStore(db *sql.DB) SiteStore {
 
 const siteSelectColumns = `
 	s.id, s.domain, s.status, s.waf_id, wr.name AS waf_name, wr.role AS waf_role,
-	s.certificate_status, s.certificate_expiry,
+	s.certificate_status, s.certificate_expiry, s.certificate_error,
 	s.cache_ratio, s.bandwidth, s.ssl_type, s.ssl_cert, s.ssl_cert_key,
 	s.created_at, s.updated_at`
 
@@ -97,6 +100,7 @@ func (store *siteStore) scanSite(row interface {
 	var wafName sql.NullString
 	var wafRole sql.NullString
 	var certExpiry sql.NullTime
+	var certError sql.NullString
 	var sslCert sql.NullString
 	var sslCertKey sql.NullString
 
@@ -109,6 +113,7 @@ func (store *siteStore) scanSite(row interface {
 		&wafRole,
 		&item.CertificateStatus,
 		&certExpiry,
+		&certError,
 		&item.CacheRatio,
 		&item.Bandwidth,
 		&item.SslType,
@@ -132,6 +137,9 @@ func (store *siteStore) scanSite(row interface {
 	if certExpiry.Valid {
 		t := certExpiry.Time
 		item.CertificateExpiry = &t
+	}
+	if certError.Valid {
+		item.CertificateError = certError.String
 	}
 	if sslCert.Valid {
 		item.SslCert = sslCert.String
@@ -299,6 +307,64 @@ func (store *siteStore) Update(ctx context.Context, id int64, input SiteInput) (
 	}
 
 	return store.Get(ctx, id)
+}
+
+func (store *siteStore) UpdateCertificate(ctx context.Context, id int64, certPEM, keyPEM, status string, expiry *time.Time) error {
+	result, err := store.db.ExecContext(ctx, `
+		UPDATE sites
+		SET ssl_cert = ?, ssl_cert_key = ?, certificate_status = ?, certificate_expiry = ?, certificate_error = NULL
+		WHERE id = ?`,
+		nullableString(certPEM),
+		nullableString(keyPEM),
+		coalesceSiteCertStatus(status),
+		nullTime(expiry),
+		id,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		exists, err := store.siteExists(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return errNotFound
+		}
+	}
+	return nil
+}
+
+func (store *siteStore) UpdateCertificateStatus(ctx context.Context, id int64, status, errMsg string) error {
+	result, err := store.db.ExecContext(ctx, `
+		UPDATE sites
+		SET certificate_status = ?, certificate_error = ?
+		WHERE id = ?`,
+		coalesceSiteCertStatus(status),
+		nullableString(strings.TrimSpace(errMsg)),
+		id,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		exists, err := store.siteExists(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return errNotFound
+		}
+	}
+	return nil
 }
 
 func (store *siteStore) Delete(ctx context.Context, id int64) error {
@@ -506,7 +572,7 @@ func coalesceSiteStatus(value string) string {
 func coalesceSiteCertStatus(value string) string {
 	trimmed := strings.ToLower(strings.TrimSpace(value))
 	switch trimmed {
-	case "valid", "expiring", "expired", "none":
+	case "valid", "expiring", "expired", "none", "pending", "queued", "dns", "validating", "syncing", "failed":
 		return trimmed
 	default:
 		return "none"
@@ -521,6 +587,13 @@ func coalesceSiteSslType(value string) string {
 	default:
 		return "none"
 	}
+}
+
+func nullTime(value *time.Time) sql.NullTime {
+	if value == nil {
+		return sql.NullTime{Valid: false}
+	}
+	return sql.NullTime{Time: *value, Valid: true}
 }
 
 func nullableInt64(value *int64) sql.NullInt64 {

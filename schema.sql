@@ -25,6 +25,7 @@ DROP TABLE IF EXISTS `blacklist`;
 CREATE TABLE IF NOT EXISTS `blacklist` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `server_id` bigint NOT NULL,
+  `site_id` bigint DEFAULT NULL,
   `ip_address` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `url` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
   `geolocation` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -37,6 +38,7 @@ CREATE TABLE IF NOT EXISTS `blacklist` (
   `updated_at` timestamp NULL DEFAULT (now()),
   PRIMARY KEY (`id`) USING BTREE,
   KEY `server_id` (`server_id`) USING BTREE,
+  KEY `site_id` (`site_id`) USING BTREE,
   CONSTRAINT `blacklist_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB AUTO_INCREMENT=1011 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -1960,6 +1962,7 @@ CREATE TABLE IF NOT EXISTS `sites` (
   `waf_id` bigint DEFAULT NULL,
   `certificate_status` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',
   `certificate_expiry` datetime DEFAULT NULL,
+  `certificate_error` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
   `cache_ratio` double NOT NULL DEFAULT 0,
   `bandwidth` bigint unsigned NOT NULL DEFAULT 0,
   `ssl_type` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',

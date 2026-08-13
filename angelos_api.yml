@@ -60,6 +60,7 @@ paths:
               $ref: "#/components/schemas/L7WhitelistUpdate"
             example:
               serverId: 1033
+              siteId: 55
               serverIp: 203.0.113.10
               rules:
                 - id: 101
@@ -93,6 +94,7 @@ paths:
               $ref: "#/components/schemas/L7BlacklistUpdate"
             example:
               serverId: 1033
+              siteId: 55
               serverIp: 203.0.113.10
               rules:
                 - id: 201
@@ -121,6 +123,7 @@ paths:
               $ref: "#/components/schemas/L7GeolocationUpdate"
             example:
               serverId: 1033
+              siteId: 55
               serverIp: 203.0.113.10
               rules:
                 - id: 301
@@ -156,6 +159,7 @@ paths:
               $ref: "#/components/schemas/L7AntiHeaderUpdate"
             example:
               serverId: 1033
+              siteId: 55
               serverIp: 203.0.113.10
               rules:
                 - id: 401
@@ -184,6 +188,7 @@ paths:
               $ref: "#/components/schemas/L7IntervalFreqLimitUpdate"
             example:
               serverId: 1033
+              siteId: 55
               serverIp: 203.0.113.10
               rules:
                 - id: 501
@@ -211,6 +216,7 @@ paths:
               $ref: "#/components/schemas/L7SecondFreqLimitUpdate"
             example:
               serverId: 1033
+              siteId: 55
               serverIp: 203.0.113.10
               rules:
                 - id: 601
@@ -238,6 +244,7 @@ paths:
               $ref: "#/components/schemas/L7ResponseFreqUpdate"
             example:
               serverId: 1033
+              siteId: 55
               serverIp: 203.0.113.10
               rules:
                 - id: 701
@@ -266,6 +273,7 @@ paths:
               $ref: "#/components/schemas/L7UserAgentUpdate"
             example:
               serverId: 1033
+              siteId: 55
               serverIp: 203.0.113.10
               rules:
                 - id: 801
@@ -286,8 +294,10 @@ paths:
       tags: [L7 WAF]
       summary: Replace temporary blacklist entries
       description: |
-        Server-scoped. Dorian sends the full list when temporary blacklist rows
-        are added or when syncing after agent reports.
+        Dorian sends the full temporary blacklist for an edge when rows are
+        added, deleted, or flushed. Each entry includes `site_id` so the block
+        is applied to that site. Incoming agent reports to
+        `/temporary_blacklist_added` should also send `site_id`.
       requestBody:
         required: true
         content:
@@ -304,6 +314,7 @@ paths:
                   blocked_at: "2026-08-11T09:15:00Z"
                   ttl: 3600
                   trigger_rule: waf_interval_freq_limit
+                  site_id: 55
                 - ip: 203.0.113.200
                   url: /api/login
                   country: DE
@@ -311,6 +322,7 @@ paths:
                   blocked_at: "2026-08-11T09:20:00Z"
                   ttl: 7200
                   trigger_rule: anti_cc
+                  site_id: 55
       responses:
         "200":
           description: Blacklist applied
@@ -329,6 +341,7 @@ paths:
               $ref: "#/components/schemas/L7UpstreamServersUpdate"
             example:
               serverId: 1033
+              siteId: 55
               upstreams:
                 - id: 11
                   serverId: 1033
@@ -346,11 +359,219 @@ paths:
         "4XX":
           $ref: "#/components/responses/AgentError"
 
+  /API/L7/l7_update_site:
+    post:
+      tags: [L7 Traffic]
+      summary: Push full site configuration
+      description: |
+        Called by Dorian when a site is created or updated (once per assigned
+        edge server). Carries domain, SSL, classified WAF rules from
+        `waf_rule_id`, compress, cache rules, selected HTTP/HTTPS site
+        listening ports, and upstream servers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7SiteConfig"
+            example:
+              server_id: 1033
+              site_id: 55
+              domain: www.example.com
+              ssl:
+                ssl_type: custom
+                ssl_cert: |
+                  -----BEGIN CERTIFICATE-----
+                  MIIB...
+                  -----END CERTIFICATE-----
+                ssl_cert_key: |
+                  -----BEGIN PRIVATE KEY-----
+                  MIIE...
+                  -----END PRIVATE KEY-----
+              waf_rules:
+                waf_rule_id: 42
+                waf_whitelist:
+                  - id: 101
+                    wafRuleId: 42
+                    ips: 192.168.1.0/24
+                    url: "/*"
+                    method: GET,POST
+                    description: Office network
+                waf_blacklist:
+                  - id: 201
+                    wafRuleId: 42
+                    ips: 198.51.100.77
+                    url: "/*"
+                    method: "*"
+                    behavior: block
+                    description: Known bad actor
+                waf_geolocation:
+                  - id: 301
+                    wafRuleId: 42
+                    country: CN,RU
+                    url: "/*"
+                    behavior: block
+                    operation: BLACK
+                    status: ENABLE
+                waf_anticc:
+                  - id: 401
+                    wafRuleId: 42
+                    url: /login
+                    method: POST
+                    threshold: 20
+                    window: 60
+                    action: block
+                    behavior: block
+                    status: ENABLE
+                waf_antiheader:
+                  - id: 501
+                    wafRuleId: 42
+                    url: "/*"
+                    header: X-Forwarded-For
+                    value: ""
+                    blockMode: missing
+                    behavior: block
+                    status: ENABLE
+                waf_intervalfreqlimit:
+                  - id: 601
+                    wafRuleId: 42
+                    url: /login
+                    time: 60
+                    requestCount: 30
+                    behavior: block
+                    status: ENABLE
+                waf_secondfreqlimit:
+                  - id: 701
+                    wafRuleId: 42
+                    url: /api/*
+                    requestCount: 100
+                    burst: 20
+                    behavior: block
+                    status: ENABLE
+                waf_responsefreq:
+                  - id: 801
+                    wafRuleId: 42
+                    url: /search
+                    responseCode: "404"
+                    time: 120
+                    responseCount: 50
+                    behavior: block
+                    status: ENABLE
+                waf_useragent:
+                  - id: 901
+                    wafRuleId: 42
+                    url: "/*"
+                    userAgent: curl/*
+                    match: prefix
+                    behavior: block
+                    status: ENABLE
+              compress_settings:
+                css: true
+                html: true
+                js: true
+                audio: false
+                font: true
+                applications: false
+              cache_rules:
+                - id: 31
+                  serverId: 1033
+                  rule_name: static_assets
+                  rule_type: file
+                  caching_time: 86400
+                  url: ""
+                  file_types: jpg,png,css,js
+                  priority: 10
+                  cache_slice: 1.0
+                  without_parameter: yes
+                  cache_mode: origin
+                  status: ENABLE
+              http_ports:
+                - id: 21
+                  serverId: 1033
+                  port: 80
+                  protocol: HTTP
+                  description: Public HTTP
+                  status: ENABLE
+              https_ports:
+                - id: 22
+                  serverId: 1033
+                  port: 443
+                  protocol: HTTPS
+                  description: Public HTTPS
+                  status: ENABLE
+              upstream_servers:
+                - id: 11
+                  serverId: 1033
+                  ip_port: 10.10.0.5:8080
+                  protocol: http
+                  description: Primary origin
+      responses:
+        "200":
+          description: Site configuration applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_domain:
+    post:
+      tags: [L7 Traffic]
+      summary: Rename a site domain on the edge
+      description: |
+        Called by Dorian when a site domain is changed (once per assigned edge
+        server), before `l7_update_site` pushes the full config for the new
+        hostname. Angelos should retarget the existing site from `old_domain`
+        to `new_domain`. Older angelos builds that do not implement this route
+        return HTML 404; Dorian still saves the new domain and surfaces that
+        as a warning.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7SiteDomainUpdate"
+            example:
+              server_id: 1033
+              site_id: 55
+              old_domain: old.example.com
+              new_domain: www.example.com
+      responses:
+        "200":
+          description: Site domain renamed on edge
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_delete_site:
+    post:
+      tags: [L7 Traffic]
+      summary: Remove a site from the edge
+      description: |
+        Called by Dorian before deleting a site from the database (once per
+        assigned edge server). Angelos should drop the site domain and related
+        L7 configuration for that `site_id`. Older angelos builds that do not
+        implement this route return HTML 404; Dorian still deletes the site and
+        surfaces that as a warning.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7SiteDelete"
+            example:
+              server_id: 1033
+              site_id: 55
+              domain: www.example.com
+      responses:
+        "200":
+          description: Site removed from edge
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
   /API/L7/l7_update_listeningports:
     post:
       tags: [L7 Traffic]
-      summary: Replace listening ports on an edge server
-      description: Server-scoped (not site-scoped).
+      summary: Replace nginx listening ports on an edge server
+      description: |
+        Server-scoped. Syncs the `listening_ports` table for this edge — the
+        ports nginx listens on overall. Does not include `site_id`.
       requestBody:
         required: true
         content:
@@ -378,6 +599,44 @@ paths:
         "4XX":
           $ref: "#/components/responses/AgentError"
 
+  /API/L7/l7_update_site_listeningports:
+    post:
+      tags: [L7 Traffic]
+      summary: Replace a site's selected HTTP/HTTPS listening ports
+      description: |
+        Site-scoped. Syncs `site_listening_ports` for one site on one edge —
+        which HTTP and HTTPS ports that site should use. Called when site port
+        selections are saved, and the same HTTP/HTTPS split is included in
+        `l7_update_site`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7SiteListeningPortsUpdate"
+            example:
+              server_id: 1033
+              site_id: 55
+              http_ports:
+                - id: 21
+                  serverId: 1033
+                  port: 80
+                  protocol: HTTP
+                  description: Public HTTP
+                  status: ENABLE
+              https_ports:
+                - id: 22
+                  serverId: 1033
+                  port: 443
+                  protocol: HTTPS
+                  description: Public HTTPS
+                  status: ENABLE
+      responses:
+        "200":
+          description: Site listening ports applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
   /API/L7/l7_update_compress:
     post:
       tags: [L7 Traffic]
@@ -390,6 +649,7 @@ paths:
               $ref: "#/components/schemas/L7CompressUpdate"
             example:
               serverId: 1033
+              siteId: 55
               compress:
                 css: true
                 html: true
@@ -416,6 +676,7 @@ paths:
               $ref: "#/components/schemas/L7CacheRulesUpdate"
             example:
               serverId: 1033
+              siteId: 55
               cacherules:
                 - id: 31
                   serverId: 1033
@@ -459,6 +720,7 @@ paths:
               $ref: "#/components/schemas/L7ServerIdOnly"
             example:
               serverId: 1033
+              siteId: 55
       responses:
         "200":
           description: Cache cleared
@@ -489,18 +751,21 @@ paths:
                 summary: Prefix purge
                 value:
                   serverId: 1033
+                  siteId: 55
                   match_type: 1
                   match_content: https://www.example.com/
               exact:
                 summary: Exact URL purge
                 value:
                   serverId: 1033
+                  siteId: 55
                   match_type: 2
                   match_content: https://www.example.com/index.html
               advanced:
                 summary: Advanced wildcard purge
                 value:
                   serverId: 1033
+                  siteId: 55
                   match_type: 3
                   match_content: www.example.com/*/api/*
       responses:
@@ -755,20 +1020,28 @@ components:
   schemas:
     L7ServerIdOnly:
       type: object
-      required: [serverId]
+      required: [serverId, siteId]
       properties:
         serverId:
           type: integer
           format: int64
           description: Edge server ID in Dorian
+        siteId:
+          type: integer
+          format: int64
+          description: Site whose cache should be purged
 
     L7ServerContext:
       type: object
-      required: [serverId, serverIp]
+      required: [serverId, siteId, serverIp]
       properties:
         serverId:
           type: integer
           format: int64
+        siteId:
+          type: integer
+          format: int64
+          description: Site these L7 rules belong to
         serverIp:
           type: string
           description: Edge node public IP
@@ -867,15 +1140,250 @@ components:
 
     L7UpstreamServersUpdate:
       type: object
-      required: [serverId, upstreams]
+      required: [serverId, siteId, upstreams]
       properties:
         serverId:
+          type: integer
+          format: int64
+        siteId:
           type: integer
           format: int64
         upstreams:
           type: array
           items:
             $ref: "#/components/schemas/UpstreamServerL7"
+
+    L7SiteConfig:
+      type: object
+      required: [server_id, site_id, domain, ssl, waf_rules, compress_settings, cache_rules, http_ports, https_ports, upstream_servers]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+          description: Edge server receiving this site config
+        site_id:
+          type: integer
+          format: int64
+        domain:
+          type: string
+        ssl:
+          $ref: "#/components/schemas/L7SiteSSL"
+        waf_rules:
+          $ref: "#/components/schemas/L7SiteWafRules"
+        compress_settings:
+          $ref: "#/components/schemas/CompressSettingsL7"
+        cache_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/CacheRuleL7"
+        http_ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListeningPortL7"
+          description: HTTP listening ports selected for this site on this edge
+        https_ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListeningPortL7"
+          description: HTTPS listening ports selected for this site on this edge
+        upstream_servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/UpstreamServerL7"
+
+    L7SiteDomainUpdate:
+      type: object
+      required: [server_id, site_id, old_domain, new_domain]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+          description: Edge server that should rename the site
+        site_id:
+          type: integer
+          format: int64
+        old_domain:
+          type: string
+          description: Current hostname on the edge
+        new_domain:
+          type: string
+          description: Replacement hostname
+
+    L7SiteDelete:
+      type: object
+      required: [server_id, site_id, domain]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+          description: Edge server that should drop the site
+        site_id:
+          type: integer
+          format: int64
+        domain:
+          type: string
+          description: Site domain being removed
+
+    L7SiteSSL:
+      type: object
+      properties:
+        ssl_type:
+          type: string
+          description: none, custom, letsencrypt, zerossl, googletrust, managed
+        ssl_cert:
+          type: string
+        ssl_cert_key:
+          type: string
+
+    L7SiteWafRules:
+      type: object
+      properties:
+        waf_rule_id:
+          type: integer
+          format: int64
+          description: Dorian waf_rules.id assigned to the site (0 if none)
+        waf_whitelist:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafWhitelistRule"
+        waf_blacklist:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafBlacklistRule"
+        waf_geolocation:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafGeoRule"
+        waf_anticc:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafAntiCcRule"
+        waf_antiheader:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafAntiHeaderRule"
+        waf_intervalfreqlimit:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafIntervalRule"
+        waf_secondfreqlimit:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafSecondRule"
+        waf_responsefreq:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafResponseRule"
+        waf_useragent:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafUserAgentRule"
+
+    WafAntiCcRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        method:
+          type: string
+        threshold:
+          type: integer
+        window:
+          type: integer
+        action:
+          type: string
+        behavior:
+          type: string
+        status:
+          type: string
+
+    WafIntervalRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        time:
+          type: integer
+        requestCount:
+          type: integer
+        behavior:
+          type: string
+        status:
+          type: string
+
+    WafSecondRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        requestCount:
+          type: integer
+        burst:
+          type: integer
+        behavior:
+          type: string
+        status:
+          type: string
+
+    WafResponseRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        responseCode:
+          type: string
+        time:
+          type: integer
+        responseCount:
+          type: integer
+        behavior:
+          type: string
+        status:
+          type: string
+
+    WafUserAgentRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        userAgent:
+          type: string
+        match:
+          type: string
+        behavior:
+          type: string
+        status:
+          type: string
 
     L7ListeningPortsUpdate:
       type: object
@@ -889,11 +1397,33 @@ components:
           items:
             $ref: "#/components/schemas/ListeningPortL7"
 
+    L7SiteListeningPortsUpdate:
+      type: object
+      required: [server_id, site_id, http_ports, https_ports]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+          format: int64
+        http_ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListeningPortL7"
+        https_ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListeningPortL7"
+
     L7CompressUpdate:
       type: object
-      required: [serverId, compress]
+      required: [serverId, siteId, compress]
       properties:
         serverId:
+          type: integer
+          format: int64
+        siteId:
           type: integer
           format: int64
         compress:
@@ -901,9 +1431,12 @@ components:
 
     L7CacheRulesUpdate:
       type: object
-      required: [serverId, cacherules]
+      required: [serverId, siteId, cacherules]
       properties:
         serverId:
+          type: integer
+          format: int64
+        siteId:
           type: integer
           format: int64
         cacherules:
@@ -913,9 +1446,12 @@ components:
 
     L7ClearUrlCache:
       type: object
-      required: [serverId, match_type, match_content]
+      required: [serverId, siteId, match_type, match_content]
       properties:
         serverId:
+          type: integer
+          format: int64
+        siteId:
           type: integer
           format: int64
         match_type:
@@ -1112,6 +1648,10 @@ components:
           format: int64
         trigger_rule:
           type: string
+        site_id:
+          type: integer
+          format: int64
+          description: Site this temporary block belongs to
 
     UpstreamServerL7:
       type: object

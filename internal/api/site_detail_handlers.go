@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"vue-project-backend/internal/acme"
 	"vue-project-backend/internal/store"
 )
 
@@ -40,10 +41,64 @@ func siteDetailHandler(
 	cacheRules store.CacheRuleStore,
 	compressSettings store.CompressStore,
 	siteListeningPorts store.SiteListeningPortStore,
+	certIssuer *acme.Issuer,
 ) http.HandlerFunc {
+	deps := siteL7Stores{
+		wafWhitelist:       wafWhitelist,
+		wafBlacklist:       wafBlacklist,
+		wafGeo:             wafGeo,
+		wafAntiCc:          wafAntiCc,
+		wafAntiHeader:      wafAntiHeader,
+		wafInterval:        wafInterval,
+		wafSecond:          wafSecond,
+		wafResponse:        wafResponse,
+		wafUserAgent:       wafUserAgent,
+		upstreamServers:    upstreamServers,
+		cacheRules:         cacheRules,
+		compressSettings:   compressSettings,
+		siteListeningPorts: siteListeningPorts,
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if strings.HasPrefix(path, "/sites/") && strings.Count(strings.Trim(path, "/"), "/") >= 2 {
+			if strings.HasSuffix(path, "/certificate/renew") {
+				siteID, ok := parseIDWithSuffix(path, "/sites/", "/certificate/renew")
+				if !ok {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				if r.Method != http.MethodPost {
+					writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+					return
+				}
+				site, err := sites.Get(r.Context(), siteID)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "site not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load site")
+					return
+				}
+				switch strings.ToLower(strings.TrimSpace(site.SslType)) {
+				case "letsencrypt":
+					if !isLetsEncryptIssuing(site.CertificateStatus) {
+						enqueueLetsEncrypt(certIssuer, sites, site)
+					}
+					writeJSON(w, http.StatusOK, withLatestCertificate(r.Context(), sites, site))
+					return
+				case "zerossl", "googletrust":
+					writeError(w, http.StatusBadRequest, "automatic renewal is only available for Let's Encrypt")
+					return
+				case "custom":
+					writeError(w, http.StatusBadRequest, "manual certificates cannot be renewed automatically; upload a new certificate in Origin settings")
+					return
+				default:
+					writeError(w, http.StatusBadRequest, "no automatic certificate provider is configured for this site")
+					return
+				}
+			}
+
 			if strings.Contains(r.URL.Path, "/waf/fork") {
 				trimmed := strings.TrimPrefix(path, "/sites/")
 				parts := strings.Split(trimmed, "/")
@@ -1259,6 +1314,15 @@ func siteDetailHandler(
 						writeError(w, http.StatusBadRequest, err.Error())
 						return
 					}
+					selectedPorts, err := siteListeningPorts.ListSelectedForServer(r.Context(), siteID, payload.ServerID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to load selected listening ports")
+						return
+					}
+					if err := postL7SiteListeningPorts(r.Context(), servers, payload.ServerID, siteID, selectedPorts); err != nil {
+						writeError(w, http.StatusBadGateway, err.Error())
+						return
+					}
 					config, err := loadSitePortsConfig(r.Context(), sites, servers, siteListeningPorts, siteID)
 					if err != nil {
 						writeError(w, http.StatusInternalServerError, "failed to load site ports")
@@ -1382,7 +1446,7 @@ func siteDetailHandler(
 					writeError(w, http.StatusNotFound, "not found")
 					return
 				}
-				if err := postL7CacheClear(r.Context(), servers, sites, siteID, "l7_clear_cache"); err != nil {
+				if err := postL7CacheClear(r.Context(), servers, sites, siteID); err != nil {
 					writeError(w, http.StatusBadGateway, err.Error())
 					return
 				}
@@ -1800,6 +1864,26 @@ func siteDetailHandler(
 				writeError(w, http.StatusBadRequest, "domain is required")
 				return
 			}
+			existing, err := sites.Get(r.Context(), id)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "site not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load site")
+				return
+			}
+			preserveManagedCertificates(existing, &payload)
+			issueCert := shouldIssueLetsEncrypt(&existing, store.Site{
+				Domain:            payload.Domain,
+				SslType:           payload.SslType,
+				SslCert:           payload.SslCert,
+				SslCertKey:        payload.SslCertKey,
+				CertificateStatus: payload.CertificateStatus,
+			})
+			if issueCert {
+				payload.CertificateStatus = "queued"
+			}
 			if _, err := sites.Update(r.Context(), id, payload); err != nil {
 				if store.IsNotFound(err) {
 					writeError(w, http.StatusNotFound, "site not found")
@@ -1825,8 +1909,40 @@ func siteDetailHandler(
 				writeError(w, http.StatusInternalServerError, "failed to load updated site")
 				return
 			}
-			writeJSON(w, http.StatusOK, updated)
+			if issueCert {
+				enqueueLetsEncrypt(certIssuer, sites, updated)
+			}
+			var domainReport edgeSyncReport
+			if !sameSiteDomain(existing.Domain, updated.Domain) {
+				domainReport, err = callL7UpdateDomain(r.Context(), servers, sites, updated.ID, existing.Domain, updated.Domain)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, err.Error())
+					return
+				}
+			}
+			report, err := callL7UpdateSite(r.Context(), servers, sites, updated.ID, deps)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			report = mergeEdgeSyncWarnings(report, domainReport)
+			finalSite, err := applySiteEdgeSync(r.Context(), sites, siteListeningPorts, updated.ID, report)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			finalSite = withLatestCertificate(r.Context(), sites, finalSite)
+			writeJSON(w, http.StatusOK, siteResponseWithEdgeSync(finalSite, report))
 		case http.MethodDelete:
+			report, err := callL7DeleteSite(r.Context(), servers, sites, id)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "site not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			if err := sites.Delete(r.Context(), id); err != nil {
 				if store.IsNotFound(err) {
 					writeError(w, http.StatusNotFound, "site not found")
@@ -1835,7 +1951,19 @@ func siteDetailHandler(
 				writeError(w, http.StatusInternalServerError, "failed to delete site")
 				return
 			}
-			w.WriteHeader(http.StatusNoContent)
+			if report.Succeeded == nil {
+				report.Succeeded = []edgeSyncServerInfo{}
+			}
+			if report.Failed == nil {
+				report.Failed = []edgeSyncServerInfo{}
+			}
+			if report.Warnings == nil {
+				report.Warnings = []edgeSyncServerInfo{}
+			}
+			writeJSON(w, http.StatusOK, siteDeleteResponse{
+				Deleted:  true,
+				EdgeSync: report,
+			})
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}

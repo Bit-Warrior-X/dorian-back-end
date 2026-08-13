@@ -1042,6 +1042,13 @@ paths:
     post:
       tags: [Sites]
       summary: Create a site
+      description: |
+        Creates the site, assigns edge servers, then pushes full site config to
+        angelos on each assigned server via `POST /API/L7/l7_update_site`
+        (domain, SSL, classified WAF rules, compress, cache rules, listening
+        ports, upstreams). Every selected edge is attempted. Failed edges are
+        removed from the site assignment. Response includes `edgeSync` with
+        `succeeded` and `failed` arrays.
       requestBody:
         required: true
         content:
@@ -1059,6 +1066,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "409":
           description: Domain already exists
+        "502":
+          $ref: "#/components/responses/BadGateway"
 
   /sites/{siteId}:
     parameters:
@@ -1078,6 +1087,14 @@ paths:
     put:
       tags: [Sites]
       summary: Update a site
+      description: |
+        Updates the site and assigned edge servers. When the domain changes,
+        angelos is notified via `POST /API/L7/l7_update_domain` (old and new
+        hostname). Full site config is then pushed via
+        `POST /API/L7/l7_update_site`. Every selected edge is attempted. Failed
+        edges are removed from the site assignment. Outdated angelos agents
+        that return HTTP 404 for domain rename are reported in
+        `edgeSync.warnings`. Response includes `edgeSync`.
       requestBody:
         required: true
         content:
@@ -1097,9 +1114,15 @@ paths:
           $ref: "#/components/responses/NotFound"
         "409":
           description: Domain already exists
+        "502":
+          $ref: "#/components/responses/BadGateway"
     patch:
       tags: [Sites]
       summary: Partially update a site
+      description: |
+        Same as PUT — domain changes call `POST /API/L7/l7_update_domain`, then
+        full site config is synced via `POST /API/L7/l7_update_site`. Failed
+        edges are deselected; response includes `edgeSync`.
       requestBody:
         required: true
         content:
@@ -1113,12 +1136,24 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Site"
+        "502":
+          $ref: "#/components/responses/BadGateway"
     delete:
       tags: [Sites]
       summary: Delete a site
+      description: |
+        Notifies angelos on each assigned edge server via
+        `POST /API/L7/l7_delete_site`, then always removes the site from the
+        database. Outdated angelos agents that return HTTP 404 (no
+        `l7_delete_site` route) are reported in `edgeSync.warnings` and do not
+        block deletion. Other edge notify failures are also warnings.
       responses:
-        "204":
+        "200":
           description: Site deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteDeleteResponse"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -1161,7 +1196,10 @@ paths:
     put:
       tags: [Sites]
       summary: Update site listening port bindings
-      description: Syncs bindings to the L7 agent after update.
+      description: |
+        Saves the site's selected HTTP/HTTPS ports, then syncs them to angelos
+        via `POST /API/L7/l7_update_site_listeningports` (`site_id`,
+        `http_ports`, `https_ports`).
       requestBody:
         required: true
         content:
@@ -1215,6 +1253,7 @@ paths:
     put:
       tags: [Sites]
       summary: Update site Gzip compress settings
+      description: Syncs to angelos via `POST /API/L7/l7_update_compress` with `siteId`.
       requestBody:
         required: true
         content:
@@ -2623,6 +2662,43 @@ components:
           type: array
           items:
             type: string
+
+    EdgeSyncServer:
+      type: object
+      properties:
+        serverId:
+          type: integer
+          format: int64
+        name:
+          type: string
+        ip:
+          type: string
+        error:
+          type: string
+
+    EdgeSyncReport:
+      type: object
+      properties:
+        succeeded:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeSyncServer"
+        failed:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeSyncServer"
+        warnings:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeSyncServer"
+
+    SiteDeleteResponse:
+      type: object
+      properties:
+        deleted:
+          type: boolean
+        edgeSync:
+          $ref: "#/components/schemas/EdgeSyncReport"
 
     SiteInput:
       type: object

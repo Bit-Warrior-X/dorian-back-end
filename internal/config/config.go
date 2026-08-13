@@ -36,6 +36,25 @@ type Config struct {
 	MetricsServerTrafficPath    string
 	MetricsUserAgentBucketPath  string
 	MetricsPollIntervalSeconds  int
+	AcmeEmail                   string
+	AcmeDirectoryURL            string
+	AcmeDNSProvider             string
+	AcmeDNSAlias                string
+	AcmeAccountKeyPath          string
+	AcmeDNSPropagationSeconds   int
+	AcmeRenewIntervalHours      int
+	AcmeCloudflareAPIToken      string
+	AcmeCloudflareZoneID        string
+	AcmeCloudflareRecordID      string
+	AcmeHTTPReqEndpoint         string
+	AcmeHTTPReqUsername         string
+	AcmeHTTPReqPassword         string
+	AcmeDNSListen               string
+	AcmeRFC2136Nameserver       string
+	AcmeRFC2136TSIGKey          string
+	AcmeRFC2136TSIGSecret       string
+	AcmeRFC2136TSIGAlgorithm    string
+	AcmeRFC2136Zone             string
 }
 
 func Load() Config {
@@ -66,6 +85,12 @@ func Load() Config {
 		MetricsServerTrafficPath:    "/server_traffic_stats",
 		MetricsUserAgentBucketPath:  "/useragent_request_stats",
 		MetricsPollIntervalSeconds:  30,
+		AcmeDirectoryURL:            "https://acme-v02.api.letsencrypt.org/directory",
+		AcmeDNSAlias:                "acme-validation.dorian.center",
+		AcmeAccountKeyPath:          "data/acme-account.pem",
+		AcmeDNSPropagationSeconds:   3,
+		AcmeRenewIntervalHours:      12,
+		AcmeRFC2136TSIGAlgorithm:    "hmac-sha256",
 	}
 
 	configPath := strings.TrimSpace(os.Getenv("CONFIG_FILE"))
@@ -162,6 +187,68 @@ func Load() Config {
 		}
 	}
 
+	if email := strings.TrimSpace(os.Getenv("ACME_EMAIL")); email != "" {
+		cfg.AcmeEmail = email
+	}
+	if directory := strings.TrimSpace(os.Getenv("ACME_DIRECTORY_URL")); directory != "" {
+		cfg.AcmeDirectoryURL = directory
+	}
+	if provider := strings.TrimSpace(os.Getenv("ACME_DNS_PROVIDER")); provider != "" {
+		cfg.AcmeDNSProvider = provider
+	}
+	if alias := strings.TrimSpace(os.Getenv("ACME_DNS_ALIAS")); alias != "" {
+		cfg.AcmeDNSAlias = alias
+	}
+	if keyPath := strings.TrimSpace(os.Getenv("ACME_ACCOUNT_KEY_PATH")); keyPath != "" {
+		cfg.AcmeAccountKeyPath = keyPath
+	}
+	if raw := strings.TrimSpace(os.Getenv("ACME_DNS_PROPAGATION_SECONDS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
+			cfg.AcmeDNSPropagationSeconds = parsed
+		}
+	}
+	if raw := strings.TrimSpace(os.Getenv("ACME_RENEW_INTERVAL_HOURS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			cfg.AcmeRenewIntervalHours = parsed
+		}
+	}
+	if token := strings.TrimSpace(os.Getenv("ACME_CLOUDFLARE_API_TOKEN")); token != "" {
+		cfg.AcmeCloudflareAPIToken = token
+	}
+	if zoneID := strings.TrimSpace(os.Getenv("ACME_CLOUDFLARE_ZONE_ID")); zoneID != "" {
+		cfg.AcmeCloudflareZoneID = zoneID
+	}
+	if recordID := strings.TrimSpace(os.Getenv("ACME_CLOUDFLARE_RECORD_ID")); recordID != "" {
+		cfg.AcmeCloudflareRecordID = recordID
+	}
+	if endpoint := strings.TrimSpace(os.Getenv("ACME_HTTPREQ_ENDPOINT")); endpoint != "" {
+		cfg.AcmeHTTPReqEndpoint = endpoint
+	}
+	if username := strings.TrimSpace(os.Getenv("ACME_HTTPREQ_USERNAME")); username != "" {
+		cfg.AcmeHTTPReqUsername = username
+	}
+	if os.Getenv("ACME_HTTPREQ_PASSWORD") != "" {
+		cfg.AcmeHTTPReqPassword = os.Getenv("ACME_HTTPREQ_PASSWORD")
+	}
+	if listen := strings.TrimSpace(os.Getenv("ACME_DNS_LISTEN")); listen != "" {
+		cfg.AcmeDNSListen = listen
+	}
+	if nameserver := strings.TrimSpace(os.Getenv("ACME_RFC2136_NAMESERVER")); nameserver != "" {
+		cfg.AcmeRFC2136Nameserver = nameserver
+	}
+	if key := strings.TrimSpace(os.Getenv("ACME_RFC2136_TSIG_KEY")); key != "" {
+		cfg.AcmeRFC2136TSIGKey = key
+	}
+	if os.Getenv("ACME_RFC2136_TSIG_SECRET") != "" {
+		cfg.AcmeRFC2136TSIGSecret = os.Getenv("ACME_RFC2136_TSIG_SECRET")
+	}
+	if algo := strings.TrimSpace(os.Getenv("ACME_RFC2136_TSIG_ALGORITHM")); algo != "" {
+		cfg.AcmeRFC2136TSIGAlgorithm = algo
+	}
+	if zone := strings.TrimSpace(os.Getenv("ACME_RFC2136_ZONE")); zone != "" {
+		cfg.AcmeRFC2136Zone = zone
+	}
+
 	if origins := strings.TrimSpace(os.Getenv("ALLOWED_ORIGINS")); origins != "" {
 		cfg.AllowedOrigins = splitAndTrim(origins)
 		cfg.AllowAllCORS = false
@@ -215,6 +302,29 @@ type fileConfig struct {
 	MetricsServerTrafficPath    *string  `json:"metricsServerTrafficPath"`
 	MetricsUserAgentBucketPath  *string  `json:"metricsUserAgentBucketPath"`
 	MetricsPollIntervalSeconds  *int     `json:"metricsPollIntervalSeconds"`
+	Acme                        *fileAcmeConfig `json:"acme"`
+}
+
+type fileAcmeConfig struct {
+	Email                 *string `json:"email"`
+	DirectoryURL          *string `json:"directoryURL"`
+	DNSProvider           *string `json:"dnsProvider"`
+	DNSAlias              *string `json:"dnsAlias"`
+	AccountKeyPath        *string `json:"accountKeyPath"`
+	DNSPropagationSeconds *int    `json:"dnsPropagationSeconds"`
+	RenewIntervalHours    *int    `json:"renewIntervalHours"`
+	CloudflareAPIToken    *string `json:"cloudflareApiToken"`
+	CloudflareZoneID      *string `json:"cloudflareZoneId"`
+	CloudflareRecordID    *string `json:"cloudflareRecordId"`
+	HTTPReqEndpoint       *string `json:"httpReqEndpoint"`
+	HTTPReqUsername       *string `json:"httpReqUsername"`
+	HTTPReqPassword       *string `json:"httpReqPassword"`
+	DNSListen             *string `json:"dnsListen"`
+	RFC2136Nameserver     *string `json:"rfc2136Nameserver"`
+	RFC2136TSIGKey        *string `json:"rfc2136TsigKey"`
+	RFC2136TSIGSecret     *string `json:"rfc2136TsigSecret"`
+	RFC2136TSIGAlgorithm  *string `json:"rfc2136TsigAlgorithm"`
+	RFC2136Zone           *string `json:"rfc2136Zone"`
 }
 
 func loadFileConfig(path string) (*fileConfig, error) {
@@ -316,5 +426,68 @@ func applyFileConfig(cfg *Config, fileCfg fileConfig) {
 	}
 	if fileCfg.MetricsPollIntervalSeconds != nil && *fileCfg.MetricsPollIntervalSeconds > 0 {
 		cfg.MetricsPollIntervalSeconds = *fileCfg.MetricsPollIntervalSeconds
+	}
+	if fileCfg.Acme != nil {
+		applyFileAcmeConfig(cfg, *fileCfg.Acme)
+	}
+}
+
+func applyFileAcmeConfig(cfg *Config, acme fileAcmeConfig) {
+	if acme.Email != nil {
+		cfg.AcmeEmail = strings.TrimSpace(*acme.Email)
+	}
+	if acme.DirectoryURL != nil && strings.TrimSpace(*acme.DirectoryURL) != "" {
+		cfg.AcmeDirectoryURL = strings.TrimSpace(*acme.DirectoryURL)
+	}
+	if acme.DNSProvider != nil {
+		cfg.AcmeDNSProvider = strings.TrimSpace(*acme.DNSProvider)
+	}
+	if acme.DNSAlias != nil {
+		cfg.AcmeDNSAlias = strings.TrimSpace(*acme.DNSAlias)
+	}
+	if acme.AccountKeyPath != nil && strings.TrimSpace(*acme.AccountKeyPath) != "" {
+		cfg.AcmeAccountKeyPath = strings.TrimSpace(*acme.AccountKeyPath)
+	}
+	if acme.DNSPropagationSeconds != nil && *acme.DNSPropagationSeconds >= 0 {
+		cfg.AcmeDNSPropagationSeconds = *acme.DNSPropagationSeconds
+	}
+	if acme.RenewIntervalHours != nil && *acme.RenewIntervalHours > 0 {
+		cfg.AcmeRenewIntervalHours = *acme.RenewIntervalHours
+	}
+	if acme.CloudflareAPIToken != nil {
+		cfg.AcmeCloudflareAPIToken = strings.TrimSpace(*acme.CloudflareAPIToken)
+	}
+	if acme.CloudflareZoneID != nil {
+		cfg.AcmeCloudflareZoneID = strings.TrimSpace(*acme.CloudflareZoneID)
+	}
+	if acme.CloudflareRecordID != nil {
+		cfg.AcmeCloudflareRecordID = strings.TrimSpace(*acme.CloudflareRecordID)
+	}
+	if acme.HTTPReqEndpoint != nil {
+		cfg.AcmeHTTPReqEndpoint = strings.TrimSpace(*acme.HTTPReqEndpoint)
+	}
+	if acme.HTTPReqUsername != nil {
+		cfg.AcmeHTTPReqUsername = strings.TrimSpace(*acme.HTTPReqUsername)
+	}
+	if acme.HTTPReqPassword != nil {
+		cfg.AcmeHTTPReqPassword = *acme.HTTPReqPassword
+	}
+	if acme.DNSListen != nil {
+		cfg.AcmeDNSListen = strings.TrimSpace(*acme.DNSListen)
+	}
+	if acme.RFC2136Nameserver != nil {
+		cfg.AcmeRFC2136Nameserver = strings.TrimSpace(*acme.RFC2136Nameserver)
+	}
+	if acme.RFC2136TSIGKey != nil {
+		cfg.AcmeRFC2136TSIGKey = strings.TrimSpace(*acme.RFC2136TSIGKey)
+	}
+	if acme.RFC2136TSIGSecret != nil {
+		cfg.AcmeRFC2136TSIGSecret = *acme.RFC2136TSIGSecret
+	}
+	if acme.RFC2136TSIGAlgorithm != nil && strings.TrimSpace(*acme.RFC2136TSIGAlgorithm) != "" {
+		cfg.AcmeRFC2136TSIGAlgorithm = strings.TrimSpace(*acme.RFC2136TSIGAlgorithm)
+	}
+	if acme.RFC2136Zone != nil {
+		cfg.AcmeRFC2136Zone = strings.TrimSpace(*acme.RFC2136Zone)
 	}
 }

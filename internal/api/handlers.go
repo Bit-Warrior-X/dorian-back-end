@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"vue-project-backend/internal/acme"
 	"vue-project-backend/internal/config"
 	"vue-project-backend/internal/remotesvc"
 	"vue-project-backend/internal/store"
@@ -295,6 +296,7 @@ func registerRoutes(
 	sites store.SiteStore,
 	wafRules store.WafRuleStore,
 	siteListeningPorts store.SiteListeningPortStore,
+	certIssuer *acme.Issuer,
 ) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
@@ -402,16 +404,41 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/deploy-versions", deployLicenseVersionsHandler(cfg))
 	mux.HandleFunc("/api/v1/servers/probe-host-versions", probeHostVersionsHandler(cfg))
 	mux.HandleFunc("/servers", serversHandler(cfg, servers))
-	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, blacklist))
-	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(servers, blacklist))
-	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
-	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
-	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, blacklist))
+	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, sites, blacklist))
+	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(servers, sites, blacklist))
+	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
+	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
+	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
 	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings))
 	mux.HandleFunc("/users", usersHandler(users))
 	mux.HandleFunc("/users/", userHandler(users))
-	mux.HandleFunc("/sites", sitesHandler(sites))
-	mux.HandleFunc("/sites/", siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts))
+	l7Deps := siteL7Stores{
+		wafWhitelist:       wafWhitelist,
+		wafBlacklist:       wafBlacklist,
+		wafGeo:             wafGeo,
+		wafAntiCc:          wafAntiCc,
+		wafAntiHeader:      wafAntiHeader,
+		wafInterval:        wafInterval,
+		wafSecond:          wafSecond,
+		wafResponse:        wafResponse,
+		wafUserAgent:       wafUserAgent,
+		upstreamServers:    upstreamServers,
+		cacheRules:         cacheRules,
+		compressSettings:   compressSettings,
+		siteListeningPorts: siteListeningPorts,
+	}
+	if certIssuer != nil {
+		certIssuer.SetAfterIssue(func(ctx context.Context, siteID int64) error {
+			report, err := callL7UpdateSite(ctx, servers, sites, siteID, l7Deps)
+			if err != nil {
+				return err
+			}
+			_, err = applySiteEdgeSync(ctx, sites, siteListeningPorts, siteID, report)
+			return err
+		})
+	}
+	mux.HandleFunc("/sites", sitesHandler(sites, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, certIssuer))
+	mux.HandleFunc("/sites/", siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, certIssuer))
 	mux.HandleFunc("/waf-rules", wafRulesHandler(wafRules))
 	mux.HandleFunc("/waf-rules/", wafRuleDetailHandler(wafRules, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent))
 }
@@ -3233,12 +3260,14 @@ type clearUrlCachePayload struct {
 
 type l7ClearUrlCachePayload struct {
 	ServerID     int64  `json:"serverId"`
+	SiteID       int64  `json:"siteId"`
 	MatchType    int    `json:"match_type"`
 	MatchContent string `json:"match_content"`
 }
 
 type serverBlacklistPayload struct {
 	ServerID    int64  `json:"serverId"`
+	SiteID      int64  `json:"siteId"`
 	IPAddress   string `json:"ipAddress"`
 	Geolocation string `json:"geolocation"`
 	Reason      string `json:"reason"`
@@ -3258,7 +3287,7 @@ type l4WhitelistPayload struct {
 	Reason    string `json:"reason"`
 }
 
-func serverBlacklistHandler(servers store.ServerStore, blacklist store.BlacklistStore) http.HandlerFunc {
+func serverBlacklistHandler(servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/servers/blacklist")
 		if path == "" || path == "/" {
@@ -3274,7 +3303,17 @@ func serverBlacklistHandler(servers store.ServerStore, blacklist store.Blacklist
 					}
 					serverID = parsed
 				}
-				list, err := blacklist.List(r.Context(), serverID)
+				var siteID int64
+				rawSiteID := strings.TrimSpace(r.URL.Query().Get("siteId"))
+				if rawSiteID != "" {
+					parsed, ok := parsePositiveInt(rawSiteID)
+					if !ok {
+						writeError(w, http.StatusBadRequest, "invalid siteId")
+						return
+					}
+					siteID = parsed
+				}
+				list, err := blacklist.List(r.Context(), serverID, siteID)
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to load blacklist entries")
 					return
@@ -3289,6 +3328,16 @@ func serverBlacklistHandler(servers store.ServerStore, blacklist store.Blacklist
 				if payload.ServerID == 0 {
 					writeError(w, http.StatusBadRequest, "serverId is required")
 					return
+				}
+				if payload.SiteID > 0 {
+					if _, err := sites.Get(r.Context(), payload.SiteID); err != nil {
+						if store.IsNotFound(err) {
+							writeError(w, http.StatusBadRequest, "site not found")
+							return
+						}
+						writeError(w, http.StatusInternalServerError, "failed to load site")
+						return
+					}
 				}
 				ipAddress := strings.TrimSpace(payload.IPAddress)
 				if ipAddress == "" {
@@ -3308,6 +3357,10 @@ func serverBlacklistHandler(servers store.ServerStore, blacklist store.Blacklist
 				serverName := strings.TrimSpace(payload.Server)
 				url := strings.TrimSpace(payload.URL)
 
+				siteID := payload.SiteID
+				if siteID == 0 {
+					siteID = resolveSiteIDFromURL(r.Context(), sites, payload.ServerID, url)
+				}
 				created, err := blacklist.Create(r.Context(), payload.ServerID, store.BlacklistInput{
 					IPAddress:   ipAddress,
 					Geolocation: geolocation,
@@ -3316,6 +3369,7 @@ func serverBlacklistHandler(servers store.ServerStore, blacklist store.Blacklist
 					Server:      serverName,
 					TTL:         ttl,
 					TriggerRule: triggerRule,
+					SiteID:      siteID,
 				})
 				if err != nil {
 					if store.IsNotFound(err) {
@@ -3384,10 +3438,9 @@ func serverBlacklistHandler(servers store.ServerStore, blacklist store.Blacklist
 			}
 			serverID = parsed
 		}
-		if serverID == 0 {
-			if payload, err := blacklist.GetPayload(r.Context(), entryID); err == nil {
-				serverID = payload.ServerID
-			}
+		stored, storedErr := blacklist.GetPayload(r.Context(), entryID)
+		if serverID == 0 && storedErr == nil {
+			serverID = stored.ServerID
 		}
 		if err := blacklist.Delete(r.Context(), entryID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to delete blacklist entry")
@@ -3404,7 +3457,7 @@ func serverBlacklistHandler(servers store.ServerStore, blacklist store.Blacklist
 	}
 }
 
-func temporaryBlacklistAddedHandler(servers store.ServerStore, blacklist store.BlacklistStore) http.HandlerFunc {
+func temporaryBlacklistAddedHandler(servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -3437,6 +3490,9 @@ func temporaryBlacklistAddedHandler(servers store.ServerStore, blacklist store.B
 
 		payload.ServerID = server.ID
 		payload.Server = server.Name
+		if payload.SiteID == 0 {
+			payload.SiteID = resolveSiteIDFromURL(r.Context(), sites, server.ID, payload.URL)
+		}
 
 		created, err := blacklist.CreateFromPayload(r.Context(), payload)
 		if err != nil {
@@ -3447,10 +3503,62 @@ func temporaryBlacklistAddedHandler(servers store.ServerStore, blacklist store.B
 	}
 }
 
+func hostFromRequestURL(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	if value == "" || strings.HasPrefix(value, "/") {
+		return ""
+	}
+	if !strings.Contains(value, "://") {
+		value = "https://" + value
+	}
+	rest := value
+	if idx := strings.Index(rest, "://"); idx >= 0 {
+		rest = rest[idx+3:]
+	}
+	host, _, _ := strings.Cut(rest, "/")
+	host, _, _ = strings.Cut(host, ":")
+	return strings.TrimPrefix(strings.TrimSpace(host), "www.")
+}
+
+func resolveSiteIDFromURL(ctx context.Context, sites store.SiteStore, serverID int64, rawURL string) int64 {
+	if sites == nil {
+		return 0
+	}
+	host := hostFromRequestURL(rawURL)
+	if host == "" {
+		return 0
+	}
+	list, err := sites.List(ctx)
+	if err != nil {
+		return 0
+	}
+	var fallback int64
+	for _, site := range list {
+		domain := strings.ToLower(strings.TrimSpace(site.Domain))
+		domain = strings.TrimPrefix(domain, "www.")
+		if domain == "" {
+			continue
+		}
+		if host != domain && !strings.HasSuffix(host, "."+domain) {
+			continue
+		}
+		for _, id := range site.ServerIDs {
+			if id == serverID {
+				return site.ID
+			}
+		}
+		if fallback == 0 {
+			fallback = site.ID
+		}
+	}
+	return fallback
+}
+
 // l7WhitelistUpdatePayload is sent to api_parser's /api/l7_update_whitelist
 // endpoint to keep the L7 (WAF) whitelist rules for a server in sync.
 type l7WhitelistUpdatePayload struct {
 	ServerID int64                    `json:"serverId"`
+	SiteID   int64                    `json:"siteId"`
 	ServerIP string                   `json:"serverIp"`
 	Rules    []store.WafWhitelistRule `json:"rules"`
 }
@@ -3462,6 +3570,7 @@ type l7WhitelistUpdatePayload struct {
 // endpoint to keep the L7 (WAF) blacklist rules for a server in sync.
 type l7BlacklistUpdatePayload struct {
 	ServerID int64                    `json:"serverId"`
+	SiteID   int64                    `json:"siteId"`
 	ServerIP string                   `json:"serverIp"`
 	Rules    []store.WafBlacklistRule `json:"rules"`
 }
@@ -3473,6 +3582,7 @@ type l7BlacklistUpdatePayload struct {
 // keep the L7 (WAF) geolocation rules for a server in sync.
 type l7GeoUpdatePayload struct {
 	ServerID int64              `json:"serverId"`
+	SiteID   int64              `json:"siteId"`
 	ServerIP string             `json:"serverIp"`
 	Rules    []store.WafGeoRule `json:"rules"`
 }
@@ -3485,6 +3595,7 @@ type l7GeoUpdatePayload struct {
 // endpoint to keep the L7 (WAF) anti-header rules for a server in sync.
 type l7AntiHeaderUpdatePayload struct {
 	ServerID int64                     `json:"serverId"`
+	SiteID   int64                     `json:"siteId"`
 	ServerIP string                    `json:"serverIp"`
 	Rules    []store.WafAntiHeaderRule `json:"rules"`
 }
@@ -3498,6 +3609,7 @@ type l7AntiHeaderUpdatePayload struct {
 // interval frequency limit rules for a server in sync.
 type l7IntervalFreqLimitUpdatePayload struct {
 	ServerID int64                          `json:"serverId"`
+	SiteID   int64                          `json:"siteId"`
 	ServerIP string                         `json:"serverIp"`
 	Rules    []intervalFreqLimitRulePayload `json:"rules"`
 }
@@ -3522,6 +3634,7 @@ type intervalFreqLimitRulePayload struct {
 // second frequency limit rules for a server in sync.
 type l7SecondFreqLimitUpdatePayload struct {
 	ServerID int64                        `json:"serverId"`
+	SiteID   int64                        `json:"siteId"`
 	ServerIP string                       `json:"serverIp"`
 	Rules    []secondFreqLimitRulePayload `json:"rules"`
 }
@@ -3546,6 +3659,7 @@ type secondFreqLimitRulePayload struct {
 // entries in sync for a server.
 type l7TemporaryBlacklistUpdatePayload struct {
 	ServerID           int64                             `json:"serverId"`
+	SiteID             int64                             `json:"siteId,omitempty"`
 	TemporaryBlacklist []l7TemporaryBlacklistUpdateEntry `json:"temporaryblacklist"`
 }
 
@@ -3559,6 +3673,7 @@ type l7TemporaryBlacklistUpdateEntry struct {
 	BlockedAt   string `json:"blocked_at"`
 	TTL         int64  `json:"ttl"`
 	TriggerRule string `json:"trigger_rule"`
+	SiteID      int64  `json:"site_id,omitempty"`
 }
 
 // callL7UpdateTemporaryBlacklist loads all temporary blacklist payloads for the
@@ -3589,6 +3704,7 @@ func callL7UpdateTemporaryBlacklist(ctx context.Context, servers store.ServerSto
 			BlockedAt:   strings.TrimSpace(p.BlockedAt),
 			TTL:         p.TTL,
 			TriggerRule: strings.TrimSpace(p.TriggerRule),
+			SiteID:      p.SiteID,
 		})
 	}
 
@@ -3626,6 +3742,7 @@ func callL7UpdateTemporaryBlacklist(ctx context.Context, servers store.ServerSto
 // response frequency rules for a server in sync.
 type l7ResponseFreqUpdatePayload struct {
 	ServerID int64                     `json:"serverId"`
+	SiteID   int64                     `json:"siteId"`
 	ServerIP string                    `json:"serverIp"`
 	Rules    []responseFreqRulePayload `json:"rules"`
 }
@@ -3651,6 +3768,7 @@ type responseFreqRulePayload struct {
 // for a server in sync.
 type l7UserAgentUpdatePayload struct {
 	ServerID int64                  `json:"serverId"`
+	SiteID   int64                  `json:"siteId"`
 	ServerIP string                 `json:"serverIp"`
 	Rules    []userAgentRulePayload `json:"rules"`
 }
@@ -3674,6 +3792,7 @@ type userAgentRulePayload struct {
 // /API/L7/l7_update_upstreamservers endpoint when upstream servers change.
 type l7UpstreamServersUpdatePayload struct {
 	ServerID  int64                     `json:"serverId"`
+	SiteID    int64                     `json:"siteId"`
 	Upstreams []upstreamServerPayloadL7 `json:"upstreams"`
 }
 
@@ -3694,8 +3813,17 @@ type upstreamServerPayloadL7 struct {
 // l7ListeningPortsUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_listeningports endpoint when listening ports change.
 type l7ListeningPortsUpdatePayload struct {
-	ServerID       int64                     `json:"serverId"`
+	ServerID       int64                    `json:"serverId"`
 	ListeningPorts []listeningPortPayloadL7 `json:"listeningports"`
+}
+
+// l7SiteListeningPortsUpdatePayload is sent to angelos when a site's selected
+// HTTP/HTTPS listening ports change.
+type l7SiteListeningPortsUpdatePayload struct {
+	ServerID   int64                    `json:"server_id"`
+	SiteID     int64                    `json:"site_id"`
+	HTTPPorts  []listeningPortPayloadL7 `json:"http_ports"`
+	HTTPSPorts []listeningPortPayloadL7 `json:"https_ports"`
 }
 
 // listeningPortPayloadL7 is the per-port shape expected by api_parser.
@@ -3716,8 +3844,9 @@ type listeningPortPayloadL7 struct {
 // l7CompressUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_compress endpoint when gzip MIME settings change.
 type l7CompressUpdatePayload struct {
-	ServerID int64                 `json:"serverId"`
-	Compress compressPayloadL7     `json:"compress"`
+	ServerID int64             `json:"serverId"`
+	SiteID   int64             `json:"siteId"`
+	Compress compressPayloadL7 `json:"compress"`
 }
 
 // compressPayloadL7 is the gzip MIME category shape expected by api_parser.
@@ -3747,6 +3876,7 @@ func compressSettingsToL7Payload(settings store.CompressSettings) compressPayloa
 // /API/L7/l7_update_cacherules endpoint when cache rules change.
 type l7CacheRulesUpdatePayload struct {
 	ServerID   int64                `json:"serverId"`
+	SiteID     int64                `json:"siteId"`
 	CacheRules []cacheRulePayloadL7 `json:"cacherules"`
 }
 
@@ -3771,6 +3901,7 @@ type cacheRulePayloadL7 struct {
 
 type l7CacheActionPayload struct {
 	ServerID int64 `json:"serverId"`
+	SiteID   int64 `json:"siteId"`
 }
 
 
@@ -5315,7 +5446,39 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 	}
 }
 
-func sitesHandler(sites store.SiteStore) http.HandlerFunc {
+func sitesHandler(
+	sites store.SiteStore,
+	servers store.ServerStore,
+	wafWhitelist store.WafWhitelistStore,
+	wafBlacklist store.WafBlacklistStore,
+	wafGeo store.WafGeoStore,
+	wafAntiCc store.WafAntiCcStore,
+	wafAntiHeader store.WafAntiHeaderStore,
+	wafInterval store.WafIntervalStore,
+	wafSecond store.WafSecondStore,
+	wafResponse store.WafResponseStore,
+	wafUserAgent store.WafUserAgentStore,
+	upstreamServers store.UpstreamServerStore,
+	cacheRules store.CacheRuleStore,
+	compressSettings store.CompressStore,
+	siteListeningPorts store.SiteListeningPortStore,
+	certIssuer *acme.Issuer,
+) http.HandlerFunc {
+	deps := siteL7Stores{
+		wafWhitelist:       wafWhitelist,
+		wafBlacklist:       wafBlacklist,
+		wafGeo:             wafGeo,
+		wafAntiCc:          wafAntiCc,
+		wafAntiHeader:      wafAntiHeader,
+		wafInterval:        wafInterval,
+		wafSecond:          wafSecond,
+		wafResponse:        wafResponse,
+		wafUserAgent:       wafUserAgent,
+		upstreamServers:    upstreamServers,
+		cacheRules:         cacheRules,
+		compressSettings:   compressSettings,
+		siteListeningPorts: siteListeningPorts,
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -5336,6 +5499,9 @@ func sitesHandler(sites store.SiteStore) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "domain is required")
 				return
 			}
+			if strings.EqualFold(payload.SslType, "letsencrypt") {
+				payload.CertificateStatus = "queued"
+			}
 			created, err := sites.Create(r.Context(), payload)
 			if err != nil {
 				if store.IsDuplicateDomain(err) {
@@ -5350,15 +5516,31 @@ func sitesHandler(sites store.SiteStore) http.HandlerFunc {
 				return
 			}
 			if err := sites.UpdateSiteServers(r.Context(), created.ID, payload.ServerIDs); err != nil {
+				_ = sites.Delete(r.Context(), created.ID)
 				writeError(w, http.StatusInternalServerError, "failed to assign servers")
 				return
 			}
 			updated, err := sites.Get(r.Context(), created.ID)
 			if err != nil {
+				_ = sites.Delete(r.Context(), created.ID)
 				writeError(w, http.StatusInternalServerError, "failed to load created site")
 				return
 			}
-			writeJSON(w, http.StatusCreated, updated)
+			if shouldIssueLetsEncrypt(nil, updated) {
+				enqueueLetsEncrypt(certIssuer, sites, updated)
+			}
+			report, err := callL7UpdateSite(r.Context(), servers, sites, updated.ID, deps)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			finalSite, err := applySiteEdgeSync(r.Context(), sites, siteListeningPorts, updated.ID, report)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			finalSite = withLatestCertificate(r.Context(), sites, finalSite)
+			writeJSON(w, http.StatusCreated, siteResponseWithEdgeSync(finalSite, report))
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
