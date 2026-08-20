@@ -14,6 +14,10 @@ func preserveManagedCertificates(existing store.Site, payload *store.SiteInput) 
 		return
 	}
 	sslType := strings.ToLower(strings.TrimSpace(payload.SslType))
+	if sslType == "" || sslType == "none" {
+		clearSiteSslConfiguration(payload)
+		return
+	}
 	switch sslType {
 	case "letsencrypt", "zerossl", "googletrust", "managed":
 	default:
@@ -26,6 +30,29 @@ func preserveManagedCertificates(existing store.Site, payload *store.SiteInput) 
 	if payload.CertificateExpiry == nil && existing.CertificateExpiry != nil {
 		formatted := existing.CertificateExpiry.UTC().Format(time.RFC3339)
 		payload.CertificateExpiry = &formatted
+	}
+}
+
+// clearSiteSslConfiguration forces "Not Configured" SSL: no provider, no cert material,
+// and certificate status none. Used for create/update and before Angelos sync.
+func clearSiteSslConfiguration(payload *store.SiteInput) {
+	if payload == nil {
+		return
+	}
+	payload.SslType = "none"
+	payload.SslCert = ""
+	payload.SslCertKey = ""
+	payload.CertificateStatus = "none"
+	payload.CertificateExpiry = nil
+}
+
+func applySiteSslDefaults(payload *store.SiteInput) {
+	if payload == nil {
+		return
+	}
+	sslType := strings.ToLower(strings.TrimSpace(payload.SslType))
+	if sslType == "" || sslType == "none" {
+		clearSiteSslConfiguration(payload)
 	}
 }
 

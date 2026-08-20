@@ -233,6 +233,7 @@ func (store *siteStore) Get(ctx context.Context, id int64) (Site, error) {
 }
 
 func (store *siteStore) Create(ctx context.Context, input SiteInput) (Site, error) {
+	input = normalizeSiteSslInput(input)
 	certExpiry, err := parseOptionalDateTime(input.CertificateExpiry)
 	if err != nil {
 		return Site{}, err
@@ -267,16 +268,19 @@ func (store *siteStore) Create(ctx context.Context, input SiteInput) (Site, erro
 }
 
 func (store *siteStore) Update(ctx context.Context, id int64, input SiteInput) (Site, error) {
+	input = normalizeSiteSslInput(input)
 	certExpiry, err := parseOptionalDateTime(input.CertificateExpiry)
 	if err != nil {
 		return Site{}, err
 	}
 
-	result, err := store.db.ExecContext(ctx, `
+	clearError := coalesceSiteSslType(input.SslType) == "none"
+	query := `
 		UPDATE sites
 		SET domain = ?, status = ?, waf_id = ?, certificate_status = ?, certificate_expiry = ?,
 			cache_ratio = ?, bandwidth = ?, ssl_type = ?, ssl_cert = ?, ssl_cert_key = ?
-		WHERE id = ?`,
+		WHERE id = ?`
+	args := []any{
 		input.Domain,
 		coalesceSiteStatus(input.Status),
 		nullableInt64(input.WafID),
@@ -288,7 +292,17 @@ func (store *siteStore) Update(ctx context.Context, id int64, input SiteInput) (
 		nullableString(input.SslCert),
 		nullableString(input.SslCertKey),
 		id,
-	)
+	}
+	if clearError {
+		query = `
+			UPDATE sites
+			SET domain = ?, status = ?, waf_id = ?, certificate_status = ?, certificate_expiry = ?,
+				certificate_error = NULL,
+				cache_ratio = ?, bandwidth = ?, ssl_type = ?, ssl_cert = ?, ssl_cert_key = ?
+			WHERE id = ?`
+	}
+
+	result, err := store.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return Site{}, err
 	}
@@ -307,6 +321,18 @@ func (store *siteStore) Update(ctx context.Context, id int64, input SiteInput) (
 	}
 
 	return store.Get(ctx, id)
+}
+
+func normalizeSiteSslInput(input SiteInput) SiteInput {
+	sslType := coalesceSiteSslType(input.SslType)
+	input.SslType = sslType
+	if sslType == "none" {
+		input.CertificateStatus = "none"
+		input.CertificateExpiry = nil
+		input.SslCert = ""
+		input.SslCertKey = ""
+	}
+	return input
 }
 
 func (store *siteStore) UpdateCertificate(ctx context.Context, id int64, certPEM, keyPEM, status string, expiry *time.Time) error {

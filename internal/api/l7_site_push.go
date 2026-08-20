@@ -742,14 +742,23 @@ func buildL7SiteConfigPayload(
 	}
 	httpPorts, httpsPorts := splitListeningPortsByProtocol(edgeServerID, selectedPorts)
 
+	sslType := strings.ToLower(strings.TrimSpace(site.SslType))
+	sslCert := site.SslCert
+	sslCertKey := site.SslCertKey
+	if sslType == "" || sslType == "none" {
+		sslType = "none"
+		sslCert = ""
+		sslCertKey = ""
+	}
+
 	return l7SiteConfigPayload{
 		ServerID: edgeServerID,
 		SiteID:   site.ID,
 		Domain:   site.Domain,
 		SSL: l7SiteSSLPayload{
-			SslType:    site.SslType,
-			SslCert:    site.SslCert,
-			SslCertKey: site.SslCertKey,
+			SslType:    sslType,
+			SslCert:    sslCert,
+			SslCertKey: sslCertKey,
 		},
 		WafRules:         wafRules,
 		CompressSettings: compressSettingsToL7Payload(compress),

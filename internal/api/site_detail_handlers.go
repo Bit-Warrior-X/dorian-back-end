@@ -1874,6 +1874,7 @@ func siteDetailHandler(
 				return
 			}
 			preserveManagedCertificates(existing, &payload)
+			applySiteSslDefaults(&payload)
 			issueCert := shouldIssueLetsEncrypt(&existing, store.Site{
 				Domain:            payload.Domain,
 				SslType:           payload.SslType,

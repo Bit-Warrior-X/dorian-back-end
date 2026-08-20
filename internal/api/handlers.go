@@ -5507,6 +5507,7 @@ func sitesHandler(
 				writeError(w, http.StatusBadRequest, "domain is required")
 				return
 			}
+			applySiteSslDefaults(&payload)
 			if strings.EqualFold(payload.SslType, "letsencrypt") {
 				payload.CertificateStatus = "queued"
 			}
