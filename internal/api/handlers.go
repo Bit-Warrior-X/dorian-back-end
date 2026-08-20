@@ -307,20 +307,20 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, l4LiveAttack, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/api/v1/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
-	mux.HandleFunc("/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats))
-	mux.HandleFunc("/api/v1/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats))
-	mux.HandleFunc("/dashboard/bandwidth-nic-rx", dashboardBandwidthNicRxHandler(serverTrafficStats))
-	mux.HandleFunc("/api/v1/dashboard/bandwidth-nic-rx", dashboardBandwidthNicRxHandler(serverTrafficStats))
-	mux.HandleFunc("/dashboard/bandwidth-nic-tx", dashboardBandwidthNicTxHandler(serverTrafficStats))
-	mux.HandleFunc("/api/v1/dashboard/bandwidth-nic-tx", dashboardBandwidthNicTxHandler(serverTrafficStats))
-	mux.HandleFunc("/dashboard/bandwidth-l7-rx", dashboardBandwidthL7RxHandler(serverTrafficStats))
-	mux.HandleFunc("/api/v1/dashboard/bandwidth-l7-rx", dashboardBandwidthL7RxHandler(serverTrafficStats))
-	mux.HandleFunc("/dashboard/bandwidth-l7-tx", dashboardBandwidthL7TxHandler(serverTrafficStats))
-	mux.HandleFunc("/api/v1/dashboard/bandwidth-l7-tx", dashboardBandwidthL7TxHandler(serverTrafficStats))
-	mux.HandleFunc("/dashboard/request-response", dashboardRequestResponseHandler(serverTrafficStats))
-	mux.HandleFunc("/api/v1/dashboard/request-response", dashboardRequestResponseHandler(serverTrafficStats))
-	mux.HandleFunc("/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats))
-	mux.HandleFunc("/api/v1/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats))
+	mux.HandleFunc("/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/dashboard/bandwidth-nic-rx", dashboardBandwidthNicRxHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth-nic-rx", dashboardBandwidthNicRxHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/dashboard/bandwidth-nic-tx", dashboardBandwidthNicTxHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth-nic-tx", dashboardBandwidthNicTxHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/dashboard/bandwidth-l7-rx", dashboardBandwidthL7RxHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth-l7-rx", dashboardBandwidthL7RxHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/dashboard/bandwidth-l7-tx", dashboardBandwidthL7TxHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/dashboard/bandwidth-l7-tx", dashboardBandwidthL7TxHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/dashboard/request-response", dashboardRequestResponseHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/dashboard/request-response", dashboardRequestResponseHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/dashboard/top-domains", dashboardTopDomainsHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/dashboard/top-domains", dashboardTopDomainsHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/summary", analyticsSummaryHandler(serverTrafficStats, sites))
@@ -880,29 +880,29 @@ type bandwidthSeries struct {
 	Points   []bandwidthPoint `json:"points"`
 }
 
-func dashboardBandwidthHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
-	return dashboardBandwidthByServerHandler(stats, stats.ListBandwidth)
+func dashboardBandwidthHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, sites, stats.ListBandwidth)
 }
 
-func dashboardBandwidthNicRxHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
-	return dashboardBandwidthByServerHandler(stats, stats.ListNicRxBandwidthByServer)
+func dashboardBandwidthNicRxHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, sites, stats.ListNicRxBandwidthByServer)
 }
 
-func dashboardBandwidthNicTxHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
-	return dashboardBandwidthByServerHandler(stats, stats.ListNicTxBandwidthByServer)
+func dashboardBandwidthNicTxHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, sites, stats.ListNicTxBandwidthByServer)
 }
 
-func dashboardBandwidthL7RxHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
-	return dashboardBandwidthByServerHandler(stats, stats.ListL7RxBandwidthByServer)
+func dashboardBandwidthL7RxHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, sites, stats.ListL7RxBandwidthByServer)
 }
 
-func dashboardBandwidthL7TxHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
-	return dashboardBandwidthByServerHandler(stats, stats.ListL7TxBandwidthByServer)
+func dashboardBandwidthL7TxHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return dashboardBandwidthByServerHandler(stats, sites, stats.ListL7TxBandwidthByServer)
 }
 
 type bandwidthByServerFunc func(context.Context, time.Time, time.Time, store.TrafficScope) ([]store.ServerBandwidthPoint, error)
 
-func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, listFn bandwidthByServerFunc) http.HandlerFunc {
+func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore, listFn bandwidthByServerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -910,21 +910,20 @@ func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, list
 		}
 
 		rangeValue := parseBandwidthRange(r.URL.Query().Get("range"))
-
-		var serverID int64
-		if rawServerID := strings.TrimSpace(r.URL.Query().Get("serverId")); rawServerID != "" {
-			parsed, err := strconv.ParseInt(rawServerID, 10, 64)
-			if err != nil || parsed < 0 {
-				writeError(w, http.StatusBadRequest, "invalid serverId")
+		scope, err := parseDashboardScope(r, sites)
+		if err != nil {
+			if err.Error() == "site not found" {
+				writeError(w, http.StatusNotFound, "site not found")
 				return
 			}
-			serverID = parsed
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
 
 		end := time.Now()
 		start := end.Add(-rangeValue)
 
-		points, err := listFn(r.Context(), start, end, store.TrafficScope{ServerID: serverID})
+		points, err := listFn(r.Context(), start, end, scope)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load bandwidth stats")
 			return
@@ -956,7 +955,7 @@ func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, list
 	}
 }
 
-func dashboardRequestResponseHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+func dashboardRequestResponseHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -964,16 +963,20 @@ func dashboardRequestResponseHandler(stats store.ServerTrafficStatsStore) http.H
 		}
 
 		rangeValue := parseTrafficRange(r.URL.Query().Get("range"))
-		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		scope, err := parseDashboardScope(r, sites)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid serverId")
+			if err.Error() == "site not found" {
+				writeError(w, http.StatusNotFound, "site not found")
+				return
+			}
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		end := time.Now()
 		start := end.Add(-rangeValue)
 
-		points, err := stats.ListRequestResponse(r.Context(), start, end, store.TrafficScope{ServerID: serverID})
+		points, err := stats.ListRequestResponse(r.Context(), start, end, scope)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load request response stats")
 			return
@@ -983,7 +986,7 @@ func dashboardRequestResponseHandler(stats store.ServerTrafficStatsStore) http.H
 	}
 }
 
-func dashboardStatusCodesHandler(stats store.ServerTrafficStatsStore) http.HandlerFunc {
+func dashboardStatusCodesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -991,16 +994,20 @@ func dashboardStatusCodesHandler(stats store.ServerTrafficStatsStore) http.Handl
 		}
 
 		rangeValue := parseTrafficRange(r.URL.Query().Get("range"))
-		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		scope, err := parseDashboardScope(r, sites)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid serverId")
+			if err.Error() == "site not found" {
+				writeError(w, http.StatusNotFound, "site not found")
+				return
+			}
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		end := time.Now()
 		start := end.Add(-rangeValue)
 
-		points, err := stats.ListStatusCodes(r.Context(), start, end, store.TrafficScope{ServerID: serverID})
+		points, err := stats.ListStatusCodes(r.Context(), start, end, scope)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load status code stats")
 			return
@@ -1104,6 +1111,7 @@ func parseDashboardScope(r *http.Request, sites store.SiteStore) (store.TrafficS
 		return store.TrafficScope{}, err
 	}
 
+	scope.SiteID = siteID
 	scope.Domain = site.Domain
 	if scope.ServerID == 0 {
 		scope.ServerIDs = site.ServerIDs

@@ -35,6 +35,8 @@ type Config struct {
 	MetricsURLBucketPath        string
 	MetricsServerTrafficPath    string
 	MetricsUserAgentBucketPath  string
+	MetricsSiteTrafficPath      string
+	MetricsDomainRequestPath    string
 	MetricsPollIntervalSeconds  int
 	AcmeEmail                   string
 	AcmeDirectoryURL            string
@@ -86,11 +88,13 @@ func Load() Config {
 		MetricsURLBucketPath:        "/url_request_stats",
 		MetricsServerTrafficPath:    "/server_traffic_stats",
 		MetricsUserAgentBucketPath:  "/useragent_request_stats",
+		MetricsSiteTrafficPath:      "/site_traffic_stats",
+		MetricsDomainRequestPath:    "/domain_request_stats",
 		MetricsPollIntervalSeconds:  30,
 		AcmeDirectoryURL:            "https://acme-v02.api.letsencrypt.org/directory",
 		AcmeDNSAlias:                "acme-validation.dorian.center",
 		AcmeAccountKeyPath:          "data/acme-account.pem",
-		AcmeDNSPropagationSeconds:   3,
+		AcmeDNSPropagationSeconds:   120,
 		AcmeRenewIntervalHours:      12,
 		AcmeRFC2136TSIGAlgorithm:    "hmac-sha256",
 	}
@@ -182,6 +186,12 @@ func Load() Config {
 	}
 	if metricsUserAgentBucketPath := strings.TrimSpace(os.Getenv("METRICS_USERAGENT_BUCKET_PATH")); metricsUserAgentBucketPath != "" {
 		cfg.MetricsUserAgentBucketPath = metricsUserAgentBucketPath
+	}
+	if metricsSiteTrafficPath := strings.TrimSpace(os.Getenv("METRICS_SITE_TRAFFIC_PATH")); metricsSiteTrafficPath != "" {
+		cfg.MetricsSiteTrafficPath = metricsSiteTrafficPath
+	}
+	if metricsDomainRequestPath := strings.TrimSpace(os.Getenv("METRICS_DOMAIN_REQUEST_PATH")); metricsDomainRequestPath != "" {
+		cfg.MetricsDomainRequestPath = metricsDomainRequestPath
 	}
 	if pollRaw := strings.TrimSpace(os.Getenv("METRICS_POLL_INTERVAL_SECONDS")); pollRaw != "" {
 		if parsed, err := strconv.Atoi(pollRaw); err == nil && parsed > 0 {
@@ -303,6 +313,8 @@ type fileConfig struct {
 	MetricsURLBucketPath        *string  `json:"metricsURLBucketPath"`
 	MetricsServerTrafficPath    *string  `json:"metricsServerTrafficPath"`
 	MetricsUserAgentBucketPath  *string  `json:"metricsUserAgentBucketPath"`
+	MetricsSiteTrafficPath      *string  `json:"metricsSiteTrafficPath"`
+	MetricsDomainRequestPath    *string  `json:"metricsDomainRequestPath"`
 	MetricsPollIntervalSeconds  *int     `json:"metricsPollIntervalSeconds"`
 	Acme                        *fileAcmeConfig `json:"acme"`
 }
@@ -420,6 +432,12 @@ func applyFileConfig(cfg *Config, fileCfg fileConfig) {
 	}
 	if fileCfg.MetricsUserAgentBucketPath != nil && strings.TrimSpace(*fileCfg.MetricsUserAgentBucketPath) != "" {
 		cfg.MetricsUserAgentBucketPath = strings.TrimSpace(*fileCfg.MetricsUserAgentBucketPath)
+	}
+	if fileCfg.MetricsSiteTrafficPath != nil && strings.TrimSpace(*fileCfg.MetricsSiteTrafficPath) != "" {
+		cfg.MetricsSiteTrafficPath = strings.TrimSpace(*fileCfg.MetricsSiteTrafficPath)
+	}
+	if fileCfg.MetricsDomainRequestPath != nil && strings.TrimSpace(*fileCfg.MetricsDomainRequestPath) != "" {
+		cfg.MetricsDomainRequestPath = strings.TrimSpace(*fileCfg.MetricsDomainRequestPath)
 	}
 	if fileCfg.MetricsPollIntervalSeconds != nil && *fileCfg.MetricsPollIntervalSeconds > 0 {
 		cfg.MetricsPollIntervalSeconds = *fileCfg.MetricsPollIntervalSeconds

@@ -124,12 +124,14 @@ DELIMITER ;
 DROP TABLE IF EXISTS `country_request_stats`;
 CREATE TABLE IF NOT EXISTS `country_request_stats` (
   `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL DEFAULT 0,
   `bucket_ts` datetime NOT NULL,
   `country_code` char(2) NOT NULL,
   `request_count` int unsigned NOT NULL DEFAULT '0',
   `blocked_request_count` int unsigned NOT NULL DEFAULT '0',
-  PRIMARY KEY (`server_id`,`bucket_ts`,`country_code`),
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`country_code`),
   KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
   KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
   CONSTRAINT `country_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -1354,12 +1356,14 @@ DELIMITER ;
 DROP TABLE IF EXISTS `ip_request_stats`;
 CREATE TABLE IF NOT EXISTS `ip_request_stats` (
   `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL DEFAULT 0,
   `bucket_ts` datetime NOT NULL,
   `ip` varbinary(16) NOT NULL,
   `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`bucket_ts`,`ip`),
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`ip`),
   KEY `idx_bucket` (`bucket_ts`),
   KEY `idx_ip` (`ip`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
   KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
   CONSTRAINT `ip_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -1370,12 +1374,14 @@ CREATE TABLE IF NOT EXISTS `ip_request_stats` (
 DROP TABLE IF EXISTS `isp_request_stats`;
 CREATE TABLE IF NOT EXISTS `isp_request_stats` (
   `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL DEFAULT 0,
   `bucket_ts` datetime NOT NULL,
   `isp_hash` binary(16) NOT NULL,
   `request_isp` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`bucket_ts`,`isp_hash`) USING BTREE,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`isp_hash`) USING BTREE,
   KEY `idx_bucket` (`bucket_ts`) USING BTREE,
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
   KEY `idx_server_bucket` (`server_id`,`bucket_ts`) USING BTREE,
   CONSTRAINT `isp_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -1523,12 +1529,14 @@ CREATE TABLE IF NOT EXISTS `l4_whitelist` (
 DROP TABLE IF EXISTS `referer_request_stats`;
 CREATE TABLE IF NOT EXISTS `referer_request_stats` (
   `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL DEFAULT 0,
   `bucket_ts` datetime NOT NULL,
   `referer_hash` binary(16) NOT NULL,
   `request_referer` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`bucket_ts`,`referer_hash`) USING BTREE,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`referer_hash`) USING BTREE,
   KEY `idx_bucket` (`bucket_ts`) USING BTREE,
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
   KEY `idx_server_bucket` (`server_id`,`bucket_ts`) USING BTREE,
   CONSTRAINT `referer_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -1993,16 +2001,93 @@ CREATE TABLE IF NOT EXISTS `site_servers` (
 
 -- Data exporting was unselected.
 
+-- Dumping structure for table cdnproxy.site_traffic_stats
+DROP TABLE IF EXISTS `site_traffic_stats`;
+CREATE TABLE IF NOT EXISTS `site_traffic_stats` (
+  `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL,
+  `bucket_ts` datetime NOT NULL,
+  `traffic_l7_rx` float unsigned NOT NULL DEFAULT (0),
+  `traffic_l7_tx` float unsigned NOT NULL DEFAULT (0),
+  `bandwidth_l7_rx` bigint unsigned NOT NULL DEFAULT '0',
+  `bandwidth_l7_tx` bigint unsigned NOT NULL DEFAULT '0',
+  `request_count` bigint unsigned NOT NULL DEFAULT '0',
+  `response_count` bigint unsigned NOT NULL DEFAULT '0',
+  `blocked_request_count` bigint unsigned NOT NULL DEFAULT '0',
+  `ip_count` int unsigned NOT NULL DEFAULT '0',
+  `blocked_ip_count` int unsigned NOT NULL DEFAULT '0',
+  `code200` bigint unsigned NOT NULL DEFAULT '0',
+  `code206` bigint unsigned NOT NULL DEFAULT '0',
+  `code301` bigint unsigned NOT NULL DEFAULT '0',
+  `code302` bigint unsigned NOT NULL DEFAULT '0',
+  `code400` bigint unsigned NOT NULL DEFAULT '0',
+  `code403` bigint unsigned NOT NULL DEFAULT '0',
+  `code404` bigint unsigned NOT NULL DEFAULT '0',
+  `code444` bigint unsigned NOT NULL DEFAULT '0',
+  `code499` bigint unsigned NOT NULL DEFAULT '0',
+  `code500` bigint unsigned NOT NULL DEFAULT '0',
+  `code501` bigint unsigned NOT NULL DEFAULT '0',
+  `code502` bigint unsigned NOT NULL DEFAULT '0',
+  `code503` bigint unsigned NOT NULL DEFAULT '0',
+  `code504` bigint unsigned NOT NULL DEFAULT '0',
+  `code904` bigint unsigned NOT NULL DEFAULT '0',
+  `code929` bigint unsigned NOT NULL DEFAULT '0',
+  `code978` bigint unsigned NOT NULL DEFAULT '0',
+  `get_count` bigint unsigned NOT NULL DEFAULT '0',
+  `post_count` bigint unsigned NOT NULL DEFAULT '0',
+  `delete_count` bigint unsigned NOT NULL DEFAULT '0',
+  `put_count` bigint unsigned NOT NULL DEFAULT '0',
+  `head_count` bigint unsigned NOT NULL DEFAULT '0',
+  `patch_count` bigint unsigned NOT NULL DEFAULT '0',
+  `options_count` bigint unsigned NOT NULL DEFAULT '0',
+  `others_count` bigint unsigned NOT NULL DEFAULT '0',
+  `http1_0_count` bigint unsigned NOT NULL DEFAULT '0',
+  `http1_1_count` bigint unsigned NOT NULL DEFAULT '0',
+  `http2_count` bigint unsigned NOT NULL DEFAULT '0',
+  `http3_count` bigint unsigned NOT NULL DEFAULT '0',
+  PRIMARY KEY (`server_id`, `site_id`, `bucket_ts`),
+  KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`, `bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`, `bucket_ts`),
+  CONSTRAINT `site_traffic_stats_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Data exporting was unselected.
+
+-- Dumping structure for table cdnproxy.domain_request_stats
+DROP TABLE IF EXISTS `domain_request_stats`;
+CREATE TABLE IF NOT EXISTS `domain_request_stats` (
+  `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL,
+  `bucket_ts` datetime NOT NULL,
+  `domain_hash` binary(16) NOT NULL,
+  `request_domain` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+  `request_count` int unsigned NOT NULL DEFAULT '1',
+  `traffic_l7_rx` bigint unsigned NOT NULL DEFAULT '0',
+  `traffic_l7_tx` bigint unsigned NOT NULL DEFAULT '0',
+  `bandwidth_l7_rx` bigint unsigned NOT NULL DEFAULT '0',
+  `bandwidth_l7_tx` bigint unsigned NOT NULL DEFAULT '0',
+  PRIMARY KEY (`server_id`, `site_id`, `bucket_ts`, `domain_hash`),
+  KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`, `bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`, `bucket_ts`),
+  CONSTRAINT `domain_request_stats_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Data exporting was unselected.
+
 -- Dumping structure for table cdnproxy.url_request_stats
 DROP TABLE IF EXISTS `url_request_stats`;
 CREATE TABLE IF NOT EXISTS `url_request_stats` (
   `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL DEFAULT 0,
   `bucket_ts` datetime NOT NULL,
   `url_hash` binary(16) NOT NULL,
   `request_url` text NOT NULL,
   `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`bucket_ts`,`url_hash`),
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`url_hash`),
   KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
   KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
   CONSTRAINT `url_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -2013,12 +2098,14 @@ CREATE TABLE IF NOT EXISTS `url_request_stats` (
 DROP TABLE IF EXISTS `useragent_request_stats`;
 CREATE TABLE IF NOT EXISTS `useragent_request_stats` (
   `server_id` bigint NOT NULL,
+  `site_id` bigint NOT NULL DEFAULT 0,
   `bucket_ts` datetime NOT NULL,
   `useragent_hash` binary(16) NOT NULL,
   `request_useragent` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
   `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`bucket_ts`,`useragent_hash`) USING BTREE,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`useragent_hash`) USING BTREE,
   KEY `idx_bucket` (`bucket_ts`) USING BTREE,
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
   KEY `idx_server_bucket` (`server_id`,`bucket_ts`) USING BTREE,
   CONSTRAINT `useragent_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

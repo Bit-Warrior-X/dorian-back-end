@@ -291,10 +291,10 @@ func (store *serverTrafficStatsStore) ListNicTxBandwidthByServer(ctx context.Con
 func (store *serverTrafficStatsStore) ListL7RxBandwidthByServer(ctx context.Context, start, end time.Time, scope TrafficScope) ([]ServerBandwidthPoint, error) {
 	query := `
 		SELECT server_id, bucket_ts, bandwidth_l7_rx
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		ORDER BY server_id, bucket_ts
 		`
@@ -323,10 +323,10 @@ func (store *serverTrafficStatsStore) ListL7RxBandwidthByServer(ctx context.Cont
 func (store *serverTrafficStatsStore) ListL7TxBandwidthByServer(ctx context.Context, start, end time.Time, scope TrafficScope) ([]ServerBandwidthPoint, error) {
 	query := `
 		SELECT server_id, bucket_ts, bandwidth_l7_tx
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		ORDER BY server_id, bucket_ts
 		`
@@ -421,10 +421,10 @@ func (store *serverTrafficStatsStore) ListNicTxBandwidthAggregate(ctx context.Co
 func (store *serverTrafficStatsStore) ListL7RxBandwidthAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
 	query := `
 		SELECT bucket_ts, SUM(bandwidth_l7_rx) AS bandwidth_l7_rx	
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -454,10 +454,10 @@ func (store *serverTrafficStatsStore) ListL7RxBandwidthAggregate(ctx context.Con
 func (store *serverTrafficStatsStore) ListL7TxBandwidthAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
 	query := `
 		SELECT bucket_ts, SUM(bandwidth_l7_tx) AS bandwidth_l7_tx	
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -489,10 +489,10 @@ func (store *serverTrafficStatsStore) ListRequestResponse(ctx context.Context, s
 		SELECT bucket_ts,
 		       SUM(request_count) AS request_count,
 		       SUM(response_count) AS response_count
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -526,10 +526,10 @@ func (store *serverTrafficStatsStore) ListStatusCodes(ctx context.Context, start
 		       SUM(code301 + code302) AS redirect_count,
 		       SUM(code400 + code403 + code404 + code444 + code499) AS client_count,
 		       SUM(code500 + code502 + code503 + code504 + code904 + code929 + code978) AS server_count
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -581,7 +581,7 @@ func (store *serverTrafficStatsStore) ListTopIPs(ctx context.Context, start, end
 		FROM ip_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY ip
 		ORDER BY request_count DESC
@@ -618,7 +618,7 @@ func (store *serverTrafficStatsStore) ListTopIsps(ctx context.Context, start, en
 		FROM isp_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY request_isp
 		ORDER BY request_count DESC
@@ -655,7 +655,7 @@ func (store *serverTrafficStatsStore) ListTopReferers(ctx context.Context, start
 		FROM referer_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY request_referer
 		ORDER BY request_count DESC
@@ -692,7 +692,7 @@ func (store *serverTrafficStatsStore) ListTopUrls(ctx context.Context, start, en
 		FROM url_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY request_url
 		ORDER BY request_count DESC
@@ -729,7 +729,7 @@ func (store *serverTrafficStatsStore) ListTopUserAgents(ctx context.Context, sta
 		FROM useragent_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY request_useragent
 		ORDER BY request_count DESC
@@ -761,20 +761,18 @@ func (store *serverTrafficStatsStore) ListTopDomains(ctx context.Context, start,
 		limit = 10
 	}
 	innerQuery := `
-		SELECT LOWER(TRIM(BOTH '/' FROM SUBSTRING_INDEX(SUBSTRING_INDEX(SUBSTRING_INDEX(request_url, '://', -1), '/', 1), ':', 1))) AS domain,
+		SELECT request_domain AS domain,
 		       SUM(request_count) AS request_count
-		FROM url_request_stats
-		WHERE bucket_ts >= ? AND bucket_ts <= ?
-		  AND request_url LIKE 'http%://%'`
+		FROM domain_request_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	innerArgs := []any{start, end}
-	innerQuery, innerArgs = appendServerScope(innerQuery, innerArgs, scope)
-	innerQuery += `
-		GROUP BY domain
-		HAVING domain <> ''`
-	if domain := strings.ToLower(strings.TrimSpace(scope.Domain)); domain != "" {
-		innerQuery += ` AND domain = ?`
+	innerQuery, innerArgs = appendTrafficScope(innerQuery, innerArgs, scope, true)
+	if domain := strings.ToLower(strings.TrimSpace(scope.Domain)); domain != "" && scope.SiteID == 0 {
+		innerQuery += ` AND request_domain = ?`
 		innerArgs = append(innerArgs, domain)
 	}
+	innerQuery += `
+		GROUP BY request_domain`
 
 	query := fmt.Sprintf(`
 		SELECT agg.domain,
@@ -783,7 +781,7 @@ func (store *serverTrafficStatsStore) ListTopDomains(ctx context.Context, start,
 		       COALESCE(s.cache_ratio, 0) AS cache_ratio,
 		       COALESCE(s.status, 'UNKNOWN') AS status
 		FROM (%s) agg
-		LEFT JOIN sites s ON LOWER(s.domain) = agg.domain
+		LEFT JOIN sites s ON LOWER(s.domain) = LOWER(agg.domain)
 		ORDER BY agg.request_count DESC
 		LIMIT ?`, innerQuery)
 	innerArgs = append(innerArgs, limit)
@@ -815,7 +813,7 @@ func (store *serverTrafficStatsStore) SumIspRequests(ctx context.Context, start,
 		FROM isp_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&total); err != nil {
 		return 0, err
@@ -830,7 +828,7 @@ func (store *serverTrafficStatsStore) SumIPCountStats(ctx context.Context, start
 		FROM ip_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&total); err != nil {
 		return 0, err
@@ -845,7 +843,7 @@ func (store *serverTrafficStatsStore) SumRefererRequests(ctx context.Context, st
 		FROM referer_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&total); err != nil {
 		return 0, err
@@ -861,7 +859,7 @@ func (store *serverTrafficStatsStore) ListCountryRequests(ctx context.Context, s
 		FROM country_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY country_code
 		ORDER BY request_count DESC
@@ -897,7 +895,7 @@ func (store *serverTrafficStatsStore) ListCountryRequestsByRequests(ctx context.
 		FROM country_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY country_code
 		ORDER BY request_count DESC
@@ -935,7 +933,7 @@ func (store *serverTrafficStatsStore) ListCountryRequestsByBlocked(ctx context.C
 		FROM country_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY country_code
 		ORDER BY blocked_request_count DESC
@@ -1031,10 +1029,10 @@ func (store *serverTrafficStatsStore) ListNicRxTraffic(ctx context.Context, star
 func (store *serverTrafficStatsStore) ListL7TxTraffic(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
 	query := `
 		SELECT bucket_ts, CAST(SUM(traffic_l7_tx) AS UNSIGNED) AS traffic_l7_tx
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -1064,10 +1062,10 @@ func (store *serverTrafficStatsStore) ListL7TxTraffic(ctx context.Context, start
 func (store *serverTrafficStatsStore) ListL7RxTraffic(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
 	query := `
 		SELECT bucket_ts, CAST(SUM(traffic_l7_rx) AS UNSIGNED) AS traffic_l7_rx
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -1097,10 +1095,10 @@ func (store *serverTrafficStatsStore) ListL7RxTraffic(ctx context.Context, start
 func (store *serverTrafficStatsStore) ListIpCount(ctx context.Context, start, end time.Time, scope TrafficScope) ([]IpCountPoint, error) {
 	query := `
 		SELECT bucket_ts, SUM(ip_count) AS ip_count
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -1130,10 +1128,10 @@ func (store *serverTrafficStatsStore) ListIpCount(ctx context.Context, start, en
 func (store *serverTrafficStatsStore) ListBlockedRequestSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]BlockedRequestPoint, error) {
 	query := `
 		SELECT bucket_ts, SUM(blocked_request_count) AS blocked_request_count
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -1171,10 +1169,10 @@ func (store *serverTrafficStatsStore) ListMethodSeries(ctx context.Context, star
 		       SUM(patch_count) AS patch_count,
 		       SUM(options_count) AS options_count,
 		       SUM(others_count) AS others_count
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -1218,10 +1216,10 @@ func (store *serverTrafficStatsStore) ListProtocolSeries(ctx context.Context, st
 		       SUM(http1_1_count) AS http1_1_count,
 		       SUM(http2_count) AS http2_count,
 		       SUM(http3_count) AS http3_count
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts
@@ -1274,10 +1272,10 @@ func (store *serverTrafficStatsStore) SumStatusCodes(ctx context.Context, start,
 			COALESCE(SUM(code904), 0),
 			COALESCE(SUM(code929), 0),
 			COALESCE(SUM(code978), 0)
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(
 		&summary.Code200,
@@ -1314,10 +1312,10 @@ func (store *serverTrafficStatsStore) SumMethods(ctx context.Context, start, end
 			COALESCE(SUM(patch_count), 0),
 			COALESCE(SUM(options_count), 0),
 			COALESCE(SUM(others_count), 0)
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(
 		&summary.GetCount,
@@ -1342,10 +1340,10 @@ func (store *serverTrafficStatsStore) SumProtocols(ctx context.Context, start, e
 			COALESCE(SUM(http1_1_count), 0),
 			COALESCE(SUM(http2_count), 0),
 			COALESCE(SUM(http3_count), 0)
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(
 		&summary.Http1_0,
@@ -1365,6 +1363,25 @@ func (store *serverTrafficStatsStore) SumTotals(ctx context.Context, start, end 
 	var totalL7TxTraffic int64
 	var totalRequest int64
 	var totalResponse int64
+
+	if usesSiteTraffic(scope) {
+		query := `
+			SELECT
+				COALESCE(CAST(SUM(traffic_l7_rx) AS UNSIGNED), 0),
+				COALESCE(CAST(SUM(traffic_l7_tx) AS UNSIGNED), 0),
+				COALESCE(SUM(request_count), 0),
+				COALESCE(SUM(response_count), 0)
+			FROM ` + l7StatsTable(scope) + `
+			WHERE bucket_ts >= ? AND bucket_ts <= ?`
+		args := []any{start, end}
+		query, args = appendTrafficScope(query, args, scope, true)
+		row := store.db.QueryRowContext(ctx, query, args...)
+		if err := row.Scan(&totalL7RxTraffic, &totalL7TxTraffic, &totalRequest, &totalResponse); err != nil {
+			return 0, 0, 0, 0, 0, 0, nil
+		}
+		return 0, 0, totalL7RxTraffic, totalL7TxTraffic, totalRequest, totalResponse, nil
+	}
+
 	query := `
 		SELECT
 			COALESCE(CAST(SUM(traffic_nic_rx) AS UNSIGNED), 0),
@@ -1372,7 +1389,7 @@ func (store *serverTrafficStatsStore) SumTotals(ctx context.Context, start, end 
 			COALESCE(CAST(SUM(traffic_l7_rx) AS UNSIGNED), 0),
 			COALESCE(CAST(SUM(traffic_l7_tx) AS UNSIGNED), 0),
 			COALESCE(SUM(request_count), 0),
-			COALESCE(SUM(response_count), 0),
+			COALESCE(SUM(response_count), 0)
 		FROM server_traffic_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
@@ -1395,10 +1412,10 @@ func (store *serverTrafficStatsStore) SumSecurityTotals(ctx context.Context, sta
 			COALESCE(SUM(blocked_request_count), 0),
 			COALESCE(SUM(ip_count), 0),
 			COALESCE(SUM(blocked_ip_count), 0)
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&totalRequest, &blockedRequest, &totalIp, &blockedIp); err != nil {
 		return 0, 0, 0, 0, err
@@ -1435,10 +1452,10 @@ func (store *serverTrafficStatsStore) LatestL7RxBandwidth(ctx context.Context, s
 	var bandwidthL7Rx int64
 	query := `
 		SELECT bucket_ts, SUM(bandwidth_l7_rx) AS bandwidth_l7_rx
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts DESC
@@ -1459,10 +1476,10 @@ func (store *serverTrafficStatsStore) LatestL7TxBandwidth(ctx context.Context, s
 	var bandwidthL7Tx int64
 	query := `
 		SELECT bucket_ts, SUM(bandwidth_l7_tx) AS bandwidth_l7_tx
-		FROM server_traffic_stats
+		FROM ` + l7StatsTable(scope) + `
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendTrafficScope(query, args, scope, usesSiteTraffic(scope))
 	query += `
 		GROUP BY bucket_ts
 		ORDER BY bucket_ts DESC

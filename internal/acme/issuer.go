@@ -284,17 +284,28 @@ func (i *Issuer) obtain(ctx context.Context, siteID int64, domain string) ([]byt
 		presented = append(presented, presentedChallenge{domain: ident, fqdn: publishFQDN, value: value})
 		i.setStatus(ctx, siteID, "validating", "")
 
-		wait := time.Duration(i.cfg.AcmeDNSPropagationSeconds) * time.Second
-		if wait <= 0 {
-			wait = 3 * time.Second
+		// Shared alias TXT (acme-validation.*) is overwritten per site. Blind sleeps
+		// are too short: LE often still sees the previous token (or "-"). Poll public
+		// DNS for the challenge hostname LE queries, then settle before Accept.
+		propTimeout := time.Duration(i.cfg.AcmeDNSPropagationSeconds) * time.Second
+		if propTimeout < 90*time.Second {
+			propTimeout = 90 * time.Second
 		}
-		if wait > 8*time.Second {
-			wait = 8 * time.Second
+		if propTimeout > 5*time.Minute {
+			propTimeout = 5 * time.Minute
+		}
+		checkFQDN := challengeFQDN(ident)
+		if err := waitForTXT(ctx, checkFQDN, value, i.provider.Resolver(), propTimeout); err != nil {
+			// Also try the publish target directly (useful if CNAME is missing).
+			if aliasErr := waitForTXT(ctx, publishFQDN, value, i.provider.Resolver(), 30*time.Second); aliasErr != nil {
+				return nil, nil, nil, fmt.Errorf("wait dns-01 propagation: %v (alias: %v)", err, aliasErr)
+			}
+			log.Printf("acme dns-01: challenge CNAME for %s not resolving challenge TXT yet; alias TXT is visible", ident)
 		}
 		select {
 		case <-ctx.Done():
 			return nil, nil, nil, ctx.Err()
-		case <-time.After(wait):
+		case <-time.After(20 * time.Second): // extra settle for LE multi-VA caches
 		}
 		if _, err := client.Accept(ctx, challenge); err != nil {
 			return nil, nil, nil, fmt.Errorf("accept dns-01 challenge: %w", err)

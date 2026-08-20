@@ -79,23 +79,52 @@ func txtPublishFQDN(cfg config.Config, domain string) string {
 
 func waitForTXT(ctx context.Context, fqdn, value, nameserver string, timeout time.Duration) error {
 	if timeout <= 0 {
-		timeout = 30 * time.Second
+		timeout = 2 * time.Minute
 	}
 	fqdn = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(fqdn)), ".")
+	value = strings.TrimSpace(value)
 	deadline := time.Now().Add(timeout)
-	resolver := txtResolver(nameserver)
+
+	// Prefer public resolvers so we observe what Let's Encrypt is likely to see.
+	nameservers := make([]string, 0, 3)
+	if trimmed := strings.TrimSpace(nameserver); trimmed != "" {
+		nameservers = append(nameservers, trimmed)
+	}
+	for _, ns := range []string{"1.1.1.1:53", "8.8.8.8:53"} {
+		if !containsString(nameservers, ns) {
+			nameservers = append(nameservers, ns)
+		}
+	}
+
 	var lastErr error
 	for {
-		records, err := resolver.LookupTXT(ctx, fqdn)
-		if err == nil {
+		matched := 0
+		for _, ns := range nameservers {
+			records, err := txtResolver(ns).LookupTXT(ctx, fqdn)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			found := false
 			for _, record := range records {
 				if strings.TrimSpace(record) == value {
-					return nil
+					found = true
+					break
 				}
 			}
-			lastErr = fmt.Errorf("TXT %s does not contain the challenge value yet", fqdn)
-		} else {
-			lastErr = err
+			if found {
+				matched++
+				continue
+			}
+			lastErr = fmt.Errorf("TXT %s via %s has %q (want challenge value)", fqdn, ns, strings.Join(records, ","))
+		}
+		// Require agreement from at least two resolvers (or one if only one configured).
+		need := 2
+		if len(nameservers) < 2 {
+			need = 1
+		}
+		if matched >= need {
+			return nil
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("DNS-01 TXT %s not visible: %w", fqdn, lastErr)
@@ -103,9 +132,18 @@ func waitForTXT(ctx context.Context, fqdn, value, nameserver string, timeout tim
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(2 * time.Second):
+		case <-time.After(3 * time.Second):
 		}
 	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func txtResolver(nameserver string) *net.Resolver {
