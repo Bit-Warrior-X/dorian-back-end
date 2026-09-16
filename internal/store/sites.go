@@ -23,6 +23,7 @@ type Site struct {
 	CertificateError  string     `json:"certificateError,omitempty"`
 	CacheRatio        float64    `json:"cacheRatio"`
 	Bandwidth         int64      `json:"bandwidth"`
+	CurrentBandwidth  int64      `json:"currentBandwidth"`
 	SslType           string     `json:"sslType"`
 	SslCert           string     `json:"sslCert,omitempty"`
 	SslCertKey        string     `json:"sslCertKey,omitempty"`
@@ -190,6 +191,10 @@ func (store *siteStore) List(ctx context.Context) ([]Site, error) {
 		sites[i].Servers = ref.names
 	}
 
+	if err := store.attachCurrentBandwidth(ctx, sites); err != nil {
+		return nil, err
+	}
+
 	return sites, nil
 }
 
@@ -229,7 +234,11 @@ func (store *siteStore) Get(ctx context.Context, id int64) (Site, error) {
 	item.ServerIDs = ref.ids
 	item.Servers = ref.names
 
-	return item, nil
+	list := []Site{item}
+	if err := store.attachCurrentBandwidth(ctx, list); err != nil {
+		return Site{}, err
+	}
+	return list[0], nil
 }
 
 func (store *siteStore) Create(ctx context.Context, input SiteInput) (Site, error) {
@@ -418,6 +427,66 @@ func (store *siteStore) siteExists(ctx context.Context, id int64) (bool, error) 
 		return false, err
 	}
 	return true, nil
+}
+
+// attachCurrentBandwidth fills CurrentBandwidth from the latest site_traffic_stats
+// egress sample (bandwidth_l7_tx, KB/s). sites.bandwidth remains the unused ceiling.
+func (store *siteStore) attachCurrentBandwidth(ctx context.Context, sites []Site) error {
+	if len(sites) == 0 {
+		return nil
+	}
+
+	ids := make([]int64, len(sites))
+	indexByID := make(map[int64]int, len(sites))
+	for i := range sites {
+		ids[i] = sites[i].ID
+		indexByID[sites[i].ID] = i
+		sites[i].CurrentBandwidth = 0
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	// Ignore very stale collector gaps so idle sites fall back to 0.
+	args = append(args, time.Now().Add(-15*time.Minute))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+
+	// Use the newest bucket per site (summed across edges), not a multi-hour peak.
+	query := `
+		SELECT t.site_id, SUM(t.bandwidth_l7_tx) AS bandwidth
+		FROM site_traffic_stats t
+		INNER JOIN (
+			SELECT site_id, MAX(bucket_ts) AS bucket_ts
+			FROM site_traffic_stats
+			WHERE bucket_ts >= ? AND site_id IN (` + strings.Join(placeholders, ",") + `)
+			GROUP BY site_id
+		) latest ON latest.site_id = t.site_id AND latest.bucket_ts = t.bucket_ts
+		GROUP BY t.site_id`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		// Table may not exist yet on older installs — keep zeros.
+		if strings.Contains(strings.ToLower(err.Error()), "doesn't exist") ||
+			strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+			return nil
+		}
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var siteID int64
+		var bandwidth sql.NullInt64
+		if err := rows.Scan(&siteID, &bandwidth); err != nil {
+			return err
+		}
+		if idx, ok := indexByID[siteID]; ok && bandwidth.Valid {
+			sites[idx].CurrentBandwidth = bandwidth.Int64
+		}
+	}
+	return rows.Err()
 }
 
 func (store *siteStore) UpdateSiteServers(ctx context.Context, siteID int64, serverIDs []int64) error {

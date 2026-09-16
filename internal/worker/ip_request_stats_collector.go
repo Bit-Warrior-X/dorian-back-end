@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"sort"
@@ -1661,6 +1662,9 @@ func insertSiteTrafficBucket(ctx context.Context, dbConn *sql.DB, serverID int64
 	args := make([]any, 0, len(data.SiteTrafficStats)*42)
 
 	for _, p := range data.SiteTrafficStats {
+		if p.SiteID <= 0 {
+			continue
+		}
 		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			serverID,
@@ -1668,8 +1672,9 @@ func insertSiteTrafficBucket(ctx context.Context, dbConn *sql.DB, serverID int64
 			bucket,
 			p.TrafficL7Rx/1024,
 			p.TrafficL7Tx/1024,
-			p.BandwidthL7Rx/1024,
-			p.BandwidthL7Tx/1024,
+			// Angelos reports bandwidth as bytes/sec; store KB/s to match server_traffic_stats.
+			int64(math.Round(p.BandwidthL7Rx / 1024)),
+			int64(math.Round(p.BandwidthL7Tx / 1024)),
 			p.RequestCount,
 			p.ResponseCount,
 			p.BlockedRequestCount,
@@ -1828,8 +1833,8 @@ func insertDomainRequestBucket(ctx context.Context, dbConn *sql.DB, serverID int
 			row.RequestCount,
 			int64(row.TrafficL7Rx/1024),
 			int64(row.TrafficL7Tx/1024),
-			int64(row.BandwidthL7Rx/1024),
-			int64(row.BandwidthL7Tx/1024),
+			int64(math.Round(row.BandwidthL7Rx / 1024)),
+			int64(math.Round(row.BandwidthL7Tx / 1024)),
 		)
 	}
 

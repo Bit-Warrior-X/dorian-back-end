@@ -178,7 +178,8 @@ func performServerCreate(
 	deployResp, err := createDeployLicenseServer(deployCtx, cfg, payload, token)
 	if err != nil {
 		log.Printf("[api] POST /servers: deploy_license failed: %v", err)
-		return store.ServerView{}, apiHTTPError(http.StatusBadGateway, err.Error())
+		// Prefer 422 over 502 so Cloudflare does not strip the error JSON body.
+		return store.ServerView{}, apiHTTPError(http.StatusUnprocessableEntity, err.Error())
 	}
 	expireRaw := strings.TrimSpace(deployResp.DeployComplete.ExpireDate)
 	if expireRaw == "" {
@@ -2635,7 +2636,7 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 	logDeployLicenseClientf("response status=%d bodyBytes=%d preview=%q",
 		resp.StatusCode, len(limitedBody), bodyPreview)
 	if resp.StatusCode != http.StatusOK {
-		return deployCreateServerResponse{}, fmt.Errorf("deploy create_server failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(limitedBody)))
+		return deployCreateServerResponse{}, formatDeployLicenseHTTPError("deploy create_server", resp.StatusCode, limitedBody)
 	}
 
 	var decoded deployCreateServerResponse
@@ -2701,7 +2702,7 @@ func fetchDeployLicenseVersions(ctx context.Context, cfg config.Config) (deployL
 	}
 	if resp.StatusCode != http.StatusOK {
 		logDeployLicenseClientf("get_versions status=%d body=%q", resp.StatusCode, oneLineLogPreview(string(body), 400))
-		return deployLicenseVersionsEnvelope{}, fmt.Errorf("get_versions failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return deployLicenseVersionsEnvelope{}, formatDeployLicenseHTTPError("get_versions", resp.StatusCode, body)
 	}
 	var decoded deployLicenseVersionsEnvelope
 	if err := json.Unmarshal(body, &decoded); err != nil {
@@ -2789,14 +2790,16 @@ func probeHostVersionsHandler(cfg config.Config) http.HandlerFunc {
 		if err != nil {
 			log.Printf("[api] POST /api/v1/servers/probe-host-versions: detect os failed ip=%q sshUser=%q: %v",
 				ip, sshUser, err)
-			writeError(w, http.StatusBadGateway, fmt.Sprintf("failed to detect host OS: %v", err))
+			// Use 422 (not 502): Cloudflare replaces origin 502 bodies with "error code: 502",
+			// which hides the actionable SSH/host detail from the console UI.
+			writeError(w, http.StatusUnprocessableEntity, formatProbeHostOSError(sshUser, ip, err))
 			return
 		}
 
 		catalog, err := fetchDeployLicenseVersions(r.Context(), cfg)
 		if err != nil {
 			log.Printf("[api] POST /api/v1/servers/probe-host-versions: get_versions failed: %v", err)
-			writeError(w, http.StatusBadGateway, err.Error())
+			writeError(w, http.StatusServiceUnavailable, err.Error())
 			return
 		}
 		filtered := filterDeployVersionsForHostOS(catalog.Versions, hostOS)
@@ -2868,7 +2871,7 @@ func deployLicenseUpgradeVersion(ctx context.Context, cfg config.Config, view st
 		return deployCreateServerResponse{}, fmt.Errorf("read upgrade_version response: %w", readErr)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return deployCreateServerResponse{}, fmt.Errorf("upgrade_version failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(limitedBody)))
+		return deployCreateServerResponse{}, formatDeployLicenseHTTPError("upgrade_version", resp.StatusCode, limitedBody)
 	}
 	var decoded deployCreateServerResponse
 	if err := json.Unmarshal(limitedBody, &decoded); err != nil {
@@ -2939,7 +2942,7 @@ func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view st
 		return deployCreateServerResponse{}, fmt.Errorf("read upgrade_license response: %w", readErr)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return deployCreateServerResponse{}, fmt.Errorf("upgrade_license failed with status %d: %s", resp.StatusCode, strings.TrimSpace(string(limitedBody)))
+		return deployCreateServerResponse{}, formatDeployLicenseHTTPError("upgrade_license", resp.StatusCode, limitedBody)
 	}
 	var decoded deployCreateServerResponse
 	if err := json.Unmarshal(limitedBody, &decoded); err != nil {
@@ -3038,7 +3041,7 @@ func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Conf
 	deployResp, err := deployLicenseUpgradeVersion(deployCtx, cfg, view, versionUUID)
 	if err != nil {
 		log.Printf("[api] POST /servers/%d/upgrade: deploy_license failed: %v", serverID, err)
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	expireRaw := strings.TrimSpace(deployResp.DeployComplete.ExpireDate)
@@ -3118,7 +3121,7 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 	deployResp, err := deployLicenseUpgradeLicense(deployCtx, cfg, view, licenseType, billingPeriod)
 	if err != nil {
 		log.Printf("[api] POST /servers/%d/upgrade-license: deploy_license failed: %v", serverID, err)
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	expireRaw := strings.TrimSpace(deployResp.DeployComplete.ExpireDate)
