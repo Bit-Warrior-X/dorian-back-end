@@ -51,6 +51,7 @@ type AuditLogFilter struct {
 	Action      string
 	ActorUserID int64
 	Search      string
+	IPAddress   string
 }
 
 type AuditLogStore interface {
@@ -120,6 +121,10 @@ func (store *auditLogStore) List(ctx context.Context, filter AuditLogFilter) ([]
 	if filter.ActorUserID > 0 {
 		query += " AND actor_user_id = ?"
 		args = append(args, filter.ActorUserID)
+	}
+	if ipAddress := strings.TrimSpace(filter.IPAddress); ipAddress != "" {
+		query += " AND ip_address LIKE ?"
+		args = append(args, "%"+ipAddress+"%")
 	}
 	if search := strings.TrimSpace(filter.Search); search != "" {
 		like := "%" + search + "%"

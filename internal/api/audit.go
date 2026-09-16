@@ -394,10 +394,11 @@ func auditLogsHandler(audit store.AuditLogStore) http.HandlerFunc {
 		}
 
 		filter := store.AuditLogFilter{
-			Limit:    limit,
-			Category: strings.TrimSpace(r.URL.Query().Get("category")),
-			Action:   strings.TrimSpace(r.URL.Query().Get("action")),
-			Search:   strings.TrimSpace(r.URL.Query().Get("search")),
+			Limit:     limit,
+			Category:  strings.TrimSpace(r.URL.Query().Get("category")),
+			Action:    strings.TrimSpace(r.URL.Query().Get("action")),
+			Search:    strings.TrimSpace(r.URL.Query().Get("search")),
+			IPAddress: strings.TrimSpace(r.URL.Query().Get("ip")),
 		}
 		if raw := strings.TrimSpace(r.URL.Query().Get("actorUserId")); raw != "" {
 			if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil {
