@@ -184,12 +184,7 @@ func performServerCreate(
 	if expireRaw == "" {
 		expireRaw = strings.TrimSpace(deployResp.ExpireDate)
 	}
-	expiredAt, err := parseDeployExpireDate(expireRaw)
-	if err != nil {
-		log.Printf("[api] POST /servers: invalid expire_date from deploy_license raw=%q err=%v",
-			expireRaw, err)
-		return store.ServerView{}, apiHTTPError(http.StatusBadGateway, "deploy license returned invalid expire_date")
-	}
+	expiredAt := resolveDeployExpireDate(expireRaw, payload.LicenseType, payload.BillingPeriod, time.Now())
 	deployToken := strings.TrimSpace(deployResp.DeployComplete.Token)
 	if deployToken == "" {
 		deployToken = token
@@ -2379,18 +2374,19 @@ type serverUsersPayload struct {
 }
 
 type serverCreatePayload struct {
-	Name          string  `json:"name"`
-	IP            string  `json:"ip"`
-	Status        string  `json:"status"`
-	LicenseType   string  `json:"licenseType"`
-	LicenseFile   string  `json:"licenseFile"`
-	Version       string  `json:"version"`
-	VersionUUID   string  `json:"versionUuid"`
-	OS            string  `json:"os"`
-	SSHUser       string  `json:"sshUser"`
-	SSHPassword   string  `json:"sshPassword"`
-	SSHPort       string  `json:"sshPort"`
-	UserIDs       []int64 `json:"userIds"`
+	Name           string  `json:"name"`
+	IP             string  `json:"ip"`
+	Status         string  `json:"status"`
+	LicenseType    string  `json:"licenseType"`
+	BillingPeriod  string  `json:"billingPeriod"`
+	LicenseFile    string  `json:"licenseFile"`
+	Version        string  `json:"version"`
+	VersionUUID    string  `json:"versionUuid"`
+	OS             string  `json:"os"`
+	SSHUser        string  `json:"sshUser"`
+	SSHPassword    string  `json:"sshPassword"`
+	SSHPort        string  `json:"sshPort"`
+	UserIDs        []int64 `json:"userIds"`
 }
 
 type deployCreateServerRequest struct {
@@ -2403,6 +2399,8 @@ type deployCreateServerRequest struct {
 	LicenseString string `json:"license_string,omitempty"`
 	Token         string `json:"token"`
 	VersionUUID   string `json:"version_uuid,omitempty"`
+	DurationDays  int    `json:"duration_days,omitempty"`
+	BillingPeriod string `json:"billing_period,omitempty"`
 }
 
 type deployDorianVersion struct {
@@ -2480,6 +2478,60 @@ func deployLicenseServiceLicenseType(licenseType string) string {
 	}
 }
 
+// deployBillingPeriod normalizes dashboard billingPeriod to monthly|annual.
+// Empty / unknown defaults to annual (legacy paid licenses were 365 days).
+func deployBillingPeriod(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "monthly", "month", "mo":
+		return "monthly"
+	default:
+		return "annual"
+	}
+}
+
+// deployDurationDays returns license length in days for the selected billing period.
+// Trial is always 3 days; paid tiers are 30 (monthly) or 365 (annual).
+func deployDurationDays(licenseType, billingPeriod string) int {
+	lt := deployLicenseServiceLicenseType(licenseType)
+	if lt == "trial" || lt == "" {
+		return 3
+	}
+	if deployBillingPeriod(billingPeriod) == "monthly" {
+		return 30
+	}
+	return 365
+}
+
+// expireTimeFromBilling is the dashboard source of truth for servers.expired / Edge List.
+func expireTimeFromBilling(licenseType, billingPeriod string, now time.Time) time.Time {
+	days := deployDurationDays(licenseType, billingPeriod)
+	if days < 1 {
+		days = 3
+	}
+	return now.UTC().Add(time.Duration(days) * 24 * time.Hour)
+}
+
+// resolveDeployExpireDate prefers a parseable deploy_license expire_date when it matches
+// the billing period (±2 days). Otherwise uses the billing-derived expire so Edge List
+// stays correct even if an older license-server ignored duration_days.
+func resolveDeployExpireDate(expireRaw, licenseType, billingPeriod string, now time.Time) *time.Time {
+	expected := expireTimeFromBilling(licenseType, billingPeriod, now)
+	parsed, err := parseDeployExpireDate(expireRaw)
+	if err != nil || parsed == nil {
+		return &expected
+	}
+	diff := parsed.UTC().Sub(expected)
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff <= 48*time.Hour {
+		return parsed
+	}
+	log.Printf("[api] expire_date mismatch deploy=%s expected_billing=%s (licenseType=%q billingPeriod=%q); using billing-derived expire",
+		parsed.UTC().Format(time.RFC3339), expected.Format(time.RFC3339), licenseType, billingPeriod)
+	return &expected
+}
+
 type deployCompleteResponse struct {
 	Status       string `json:"status"`
 	IP           string `json:"ip"`
@@ -2521,6 +2573,8 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 		LicenseString: strings.TrimSpace(payload.LicenseFile),
 		Token:         token,
 		VersionUUID:   strings.TrimSpace(payload.VersionUUID),
+		DurationDays:  deployDurationDays(payload.LicenseType, payload.BillingPeriod),
+		BillingPeriod: deployBillingPeriod(payload.BillingPeriod),
 	}
 	body, err := json.Marshal(reqPayload)
 	if err != nil {
@@ -2807,16 +2861,18 @@ func deployLicenseUpgradeVersion(ctx context.Context, cfg config.Config, view st
 }
 
 type deployUpgradeLicenseRequest struct {
-	Name        string `json:"name"`
-	IP          string `json:"ip"`
-	User        string `json:"user"`
-	Pass        string `json:"pass"`
-	SSHPort     string `json:"ssh_port"`
-	Token       string `json:"token"`
-	LicenseType string `json:"license_type"`
+	Name          string `json:"name"`
+	IP            string `json:"ip"`
+	User          string `json:"user"`
+	Pass          string `json:"pass"`
+	SSHPort       string `json:"ssh_port"`
+	Token         string `json:"token"`
+	LicenseType   string `json:"license_type"`
+	DurationDays  int    `json:"duration_days,omitempty"`
+	BillingPeriod string `json:"billing_period,omitempty"`
 }
 
-func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view store.ServerView, licenseType string) (deployCreateServerResponse, error) {
+func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view store.ServerView, licenseType, billingPeriod string) (deployCreateServerResponse, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.DeployLicenseBaseURL), "/")
 	if baseURL == "" {
 		logDeployLicenseClientf("abort: DEPLOY_LICENSE_BASE_URL is empty (upgrade_license)")
@@ -2827,13 +2883,15 @@ func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view st
 		return deployCreateServerResponse{}, errors.New("deploy license base url is invalid")
 	}
 	reqPayload := deployUpgradeLicenseRequest{
-		Name:        strings.TrimSpace(view.Name),
-		IP:          strings.TrimSpace(view.IP),
-		User:        strings.TrimSpace(view.SSHUser),
-		Pass:        strings.TrimSpace(view.SSHPassword),
-		SSHPort:     strings.TrimSpace(view.SSHPort),
-		Token:       strings.TrimSpace(view.Token),
-		LicenseType: deployLicenseServiceLicenseType(licenseType),
+		Name:          strings.TrimSpace(view.Name),
+		IP:            strings.TrimSpace(view.IP),
+		User:          strings.TrimSpace(view.SSHUser),
+		Pass:          strings.TrimSpace(view.SSHPassword),
+		SSHPort:       strings.TrimSpace(view.SSHPort),
+		Token:         strings.TrimSpace(view.Token),
+		LicenseType:   deployLicenseServiceLicenseType(licenseType),
+		DurationDays:  deployDurationDays(licenseType, billingPeriod),
+		BillingPeriod: deployBillingPeriod(billingPeriod),
 	}
 	body, err := json.Marshal(reqPayload)
 	if err != nil {
@@ -2845,8 +2903,8 @@ func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view st
 	}
 	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
 	target := baseURL + "/upgrade_license"
-	logDeployLicenseClientf("POST %s timeout=%ds server payload name=%q ip=%q license_type=%q",
-		target, timeout, reqPayload.Name, reqPayload.IP, reqPayload.LicenseType)
+	logDeployLicenseClientf("POST %s timeout=%ds server payload name=%q ip=%q license_type=%q billing_period=%q duration_days=%d",
+		target, timeout, reqPayload.Name, reqPayload.IP, reqPayload.LicenseType, reqPayload.BillingPeriod, reqPayload.DurationDays)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		return deployCreateServerResponse{}, fmt.Errorf("build upgrade_license request: %w", err)
@@ -3004,7 +3062,8 @@ func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Conf
 }
 
 type serverUpgradeLicenseRequestBody struct {
-	LicenseType string `json:"licenseType"`
+	LicenseType   string `json:"licenseType"`
+	BillingPeriod string `json:"billingPeriod"`
 }
 
 func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg config.Config, servers store.ServerStore, serverID int64) {
@@ -3018,6 +3077,7 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 		writeError(w, http.StatusBadRequest, "licenseType is required")
 		return
 	}
+	billingPeriod := deployBillingPeriod(body.BillingPeriod)
 	view, err := servers.GetView(r.Context(), serverID)
 	if err != nil {
 		if store.IsNotFound(err) {
@@ -3037,7 +3097,7 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 	}
 	deployCtx, cancelDeploy := context.WithTimeout(r.Context(), time.Duration(deployTimeout)*time.Second)
 	defer cancelDeploy()
-	deployResp, err := deployLicenseUpgradeLicense(deployCtx, cfg, view, licenseType)
+	deployResp, err := deployLicenseUpgradeLicense(deployCtx, cfg, view, licenseType, billingPeriod)
 	if err != nil {
 		log.Printf("[api] POST /servers/%d/upgrade-license: deploy_license failed: %v", serverID, err)
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -3047,12 +3107,7 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 	if expireRaw == "" {
 		expireRaw = strings.TrimSpace(deployResp.ExpireDate)
 	}
-	expiredAt, err := parseDeployExpireDate(expireRaw)
-	if err != nil {
-		log.Printf("[api] POST /servers/%d/upgrade-license: invalid expire_date raw=%q err=%v", serverID, expireRaw, err)
-		writeError(w, http.StatusBadGateway, "deploy license returned invalid expire_date")
-		return
-	}
+	expiredAt := resolveDeployExpireDate(expireRaw, licenseType, billingPeriod, time.Now())
 	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
 		r.Context(),
 		view.IP,
@@ -3086,6 +3141,7 @@ func parseDeployExpireDate(raw string) (*time.Time, error) {
 		return nil, nil
 	}
 	layouts := []string{
+		time.RFC3339Nano,
 		time.RFC3339,
 		"2006-01-02 15:04:05",
 		"2006-01-02",
