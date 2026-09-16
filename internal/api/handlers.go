@@ -875,6 +875,24 @@ type bandwidthSeries struct {
 	Points   []bandwidthPoint `json:"points"`
 }
 
+// dashboardChartMaxPoints keeps Overview payloads chart-sized. Raw 1-minute
+// buckets for multi-day ranges overwhelm ApexCharts and the browser.
+const dashboardChartMaxPoints = 360
+
+func downsampleSlice[T any](items []T, maxPoints int) []T {
+	if maxPoints <= 0 || len(items) <= maxPoints {
+		return items
+	}
+	out := make([]T, maxPoints)
+	last := len(items) - 1
+	step := float64(last) / float64(maxPoints-1)
+	for i := 0; i < maxPoints-1; i++ {
+		out[i] = items[int(float64(i)*step+0.5)]
+	}
+	out[maxPoints-1] = items[last]
+	return out
+}
+
 func dashboardBandwidthHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
 	return dashboardBandwidthByServerHandler(stats, sites, stats.ListBandwidth)
 }
@@ -942,7 +960,7 @@ func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, site
 		for _, id := range serverIDs {
 			series = append(series, bandwidthSeries{
 				ServerID: id,
-				Points:   grouped[id],
+				Points:   downsampleSlice(grouped[id], dashboardChartMaxPoints),
 			})
 		}
 
@@ -977,7 +995,7 @@ func dashboardRequestResponseHandler(stats store.ServerTrafficStatsStore, sites 
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, downsampleSlice(points, dashboardChartMaxPoints))
 	}
 }
 
@@ -1008,7 +1026,7 @@ func dashboardStatusCodesHandler(stats store.ServerTrafficStatsStore, sites stor
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, downsampleSlice(points, dashboardChartMaxPoints))
 	}
 }
 
