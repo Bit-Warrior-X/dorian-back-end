@@ -484,6 +484,10 @@ type serverTrafficStatsPayload struct {
 	HTTP11Count         float64 `json:"http1_1_count"`
 	HTTP2Count          float64 `json:"http2_count"`
 	HTTP3Count          float64 `json:"http3_count"`
+	CacheHitCount       float64 `json:"cache_hit_count"`
+	CacheMissCount      float64 `json:"cache_miss_count"`
+	CacheBypassCount    float64 `json:"cache_bypass_count"`
+	CacheHitRatio       float64 `json:"cache_hit_ratio"`
 }
 
 // siteTrafficStatsEntry is per-site L7 aggregates (no NIC fields).
@@ -527,6 +531,10 @@ type siteTrafficStatsEntry struct {
 	HTTP11Count         float64 `json:"http1_1_count"`
 	HTTP2Count          float64 `json:"http2_count"`
 	HTTP3Count          float64 `json:"http3_count"`
+	CacheHitCount       float64 `json:"cache_hit_count"`
+	CacheMissCount      float64 `json:"cache_miss_count"`
+	CacheBypassCount    float64 `json:"cache_bypass_count"`
+	CacheHitRatio       float64 `json:"cache_hit_ratio"`
 }
 
 // siteTrafficStatsList accepts:
@@ -1659,13 +1667,17 @@ func insertSiteTrafficBucket(ctx context.Context, dbConn *sql.DB, serverID int64
 	}
 
 	valuePlaceholders := make([]string, 0, len(data.SiteTrafficStats))
-	args := make([]any, 0, len(data.SiteTrafficStats)*42)
+	args := make([]any, 0, len(data.SiteTrafficStats)*45)
 
 	for _, p := range data.SiteTrafficStats {
 		if p.SiteID <= 0 {
 			continue
 		}
-		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		hit := int64(math.Round(p.CacheHitCount))
+		miss := int64(math.Round(p.CacheMissCount))
+		bypass := int64(math.Round(p.CacheBypassCount))
+		ratio := resolveCacheHitRatio(hit, miss, p.CacheHitRatio)
+		valuePlaceholders = append(valuePlaceholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 		args = append(args,
 			serverID,
 			p.SiteID,
@@ -1709,6 +1721,10 @@ func insertSiteTrafficBucket(ctx context.Context, dbConn *sql.DB, serverID int64
 			p.HTTP11Count,
 			p.HTTP2Count,
 			p.HTTP3Count,
+			hit,
+			miss,
+			bypass,
+			ratio,
 		)
 	}
 
@@ -1758,7 +1774,11 @@ func insertSiteTrafficBucket(ctx context.Context, dbConn *sql.DB, serverID int64
 			http1_0_count,
 			http1_1_count,
 			http2_count,
-			http3_count
+			http3_count,
+			cache_hit_count,
+			cache_miss_count,
+			cache_bypass_count,
+			cache_hit_ratio
 		) VALUES ` + strings.Join(valuePlaceholders, ",") + `
 		ON DUPLICATE KEY UPDATE
 			traffic_l7_rx = VALUES(traffic_l7_rx),
@@ -1798,13 +1818,33 @@ func insertSiteTrafficBucket(ctx context.Context, dbConn *sql.DB, serverID int64
 			http1_0_count = VALUES(http1_0_count),
 			http1_1_count = VALUES(http1_1_count),
 			http2_count = VALUES(http2_count),
-			http3_count = VALUES(http3_count)`
+			http3_count = VALUES(http3_count),
+			cache_hit_count = VALUES(cache_hit_count),
+			cache_miss_count = VALUES(cache_miss_count),
+			cache_bypass_count = VALUES(cache_bypass_count),
+			cache_hit_ratio = VALUES(cache_hit_ratio)`
 
 	_, err := dbConn.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("insert site_traffic_stats: %w", err)
 	}
 	return nil
+}
+
+// resolveCacheHitRatio prefers hit/(hit+miss) per Athens OpenAPI; falls back to reported ratio.
+func resolveCacheHitRatio(hit, miss int64, reported float64) float64 {
+	denom := hit + miss
+	if denom > 0 {
+		return float64(hit) / float64(denom)
+	}
+	if reported < 0 {
+		return 0
+	}
+	if reported > 1 {
+		// Tolerate percentage-style values from older agents.
+		return reported / 100
+	}
+	return reported
 }
 
 func insertDomainRequestBucket(ctx context.Context, dbConn *sql.DB, serverID int64, bucket time.Time, data domainRequestStatsBucketResponse) error {

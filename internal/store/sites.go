@@ -22,6 +22,9 @@ type Site struct {
 	CertificateExpiry *time.Time `json:"certificateExpiry,omitempty"`
 	CertificateError  string     `json:"certificateError,omitempty"`
 	CacheRatio        float64    `json:"cacheRatio"`
+	CacheHitCount     int64      `json:"cacheHitCount"`
+	CacheMissCount    int64      `json:"cacheMissCount"`
+	CacheBypassCount  int64      `json:"cacheBypassCount"`
 	Bandwidth         int64      `json:"bandwidth"`
 	CurrentBandwidth  int64      `json:"currentBandwidth"`
 	SslType           string     `json:"sslType"`
@@ -194,6 +197,9 @@ func (store *siteStore) List(ctx context.Context) ([]Site, error) {
 	if err := store.attachCurrentBandwidth(ctx, sites); err != nil {
 		return nil, err
 	}
+	if err := store.attachCurrentCacheHit(ctx, sites); err != nil {
+		return nil, err
+	}
 
 	return sites, nil
 }
@@ -236,6 +242,9 @@ func (store *siteStore) Get(ctx context.Context, id int64) (Site, error) {
 
 	list := []Site{item}
 	if err := store.attachCurrentBandwidth(ctx, list); err != nil {
+		return Site{}, err
+	}
+	if err := store.attachCurrentCacheHit(ctx, list); err != nil {
 		return Site{}, err
 	}
 	return list[0], nil
@@ -484,6 +493,78 @@ func (store *siteStore) attachCurrentBandwidth(ctx context.Context, sites []Site
 		}
 		if idx, ok := indexByID[siteID]; ok && bandwidth.Valid {
 			sites[idx].CurrentBandwidth = bandwidth.Int64
+		}
+	}
+	return rows.Err()
+}
+
+// attachCurrentCacheHit fills live cache counters / ratio from the newest site_traffic_stats
+// bucket (summed across edges). Overwrites CacheRatio with the live Athens ratio (0–1).
+func (store *siteStore) attachCurrentCacheHit(ctx context.Context, sites []Site) error {
+	if len(sites) == 0 {
+		return nil
+	}
+
+	ids := make([]int64, len(sites))
+	indexByID := make(map[int64]int, len(sites))
+	for i := range sites {
+		ids[i] = sites[i].ID
+		indexByID[sites[i].ID] = i
+		sites[i].CacheHitCount = 0
+		sites[i].CacheMissCount = 0
+		sites[i].CacheBypassCount = 0
+	}
+
+	placeholders := make([]string, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, time.Now().Add(-15*time.Minute))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+
+	query := `
+		SELECT t.site_id,
+		       COALESCE(SUM(t.cache_hit_count), 0) AS cache_hit_count,
+		       COALESCE(SUM(t.cache_miss_count), 0) AS cache_miss_count,
+		       COALESCE(SUM(t.cache_bypass_count), 0) AS cache_bypass_count
+		FROM site_traffic_stats t
+		INNER JOIN (
+			SELECT site_id, MAX(bucket_ts) AS bucket_ts
+			FROM site_traffic_stats
+			WHERE bucket_ts >= ? AND site_id IN (` + strings.Join(placeholders, ",") + `)
+			GROUP BY site_id
+		) latest ON latest.site_id = t.site_id AND latest.bucket_ts = t.bucket_ts
+		GROUP BY t.site_id`
+
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		lower := strings.ToLower(err.Error())
+		if strings.Contains(lower, "doesn't exist") ||
+			strings.Contains(lower, "does not exist") ||
+			strings.Contains(lower, "unknown column") {
+			return nil
+		}
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var siteID int64
+		var hit, miss, bypass int64
+		if err := rows.Scan(&siteID, &hit, &miss, &bypass); err != nil {
+			return err
+		}
+		idx, ok := indexByID[siteID]
+		if !ok {
+			continue
+		}
+		sites[idx].CacheHitCount = hit
+		sites[idx].CacheMissCount = miss
+		sites[idx].CacheBypassCount = bypass
+		denom := hit + miss
+		if denom > 0 {
+			sites[idx].CacheRatio = float64(hit) / float64(denom)
 		}
 	}
 	return rows.Err()
