@@ -157,39 +157,50 @@ func googleOAuthCallbackHandler(cfg config.Config, users store.UserStore, auditL
 				Email:    profile.Email,
 				Password: password,
 				Role:     "User",
-				Status:   "Waiting",
+				Status:   "Active",
 			})
 			if createErr != nil {
 				log.Printf("[auth] google oauth create user failed: %v", createErr)
 				redirectOAuthError(w, r, frontend, "Could not create your account. Please try again.")
 				return
 			}
-			logLoginAttempt(r.Context(), auditLogs, r, created, false, http.StatusForbidden, "Google sign-in created waiting account")
-			redirectOAuthError(w, r, frontend, "Your account was created and is waiting for admin approval.")
-			return
-		}
+			user = created
+		} else {
+			if strings.EqualFold(user.Status, "Block") {
+				logLoginAttempt(r.Context(), auditLogs, r, user, false, http.StatusForbidden, "Blocked account Google login attempt")
+				redirectOAuthError(w, r, frontend, "Your account is blocked. Please contact an administrator.")
+				return
+			}
 
-		if strings.EqualFold(user.Status, "Block") {
-			logLoginAttempt(r.Context(), auditLogs, r, user, false, http.StatusForbidden, "Blocked account Google login attempt")
-			redirectOAuthError(w, r, frontend, "Your account is blocked. Please contact an administrator.")
-			return
-		}
-		if strings.EqualFold(user.Status, "Waiting") {
-			logLoginAttempt(r.Context(), auditLogs, r, user, false, http.StatusForbidden, "Waiting account Google login attempt")
-			redirectOAuthError(w, r, frontend, "Please wait while admin accept your login.")
-			return
-		}
-
-		if profile.Name != "" && strings.TrimSpace(user.Name) == "" {
-			_, _ = users.Update(r.Context(), user.ID, store.UserInput{
-				Name:      profile.Name,
-				Email:     user.Email,
-				Password:  user.Password,
-				Role:      user.Role,
-				Status:    user.Status,
-				ServerIDs: user.ServerIDs,
-			})
-			user.Name = profile.Name
+			// Google sign-in activates waiting accounts so new users can explore the CDN.
+			needsUpdate := false
+			name := user.Name
+			status := user.Status
+			if strings.EqualFold(user.Status, "Waiting") {
+				status = "Active"
+				needsUpdate = true
+			}
+			if profile.Name != "" && strings.TrimSpace(user.Name) == "" {
+				name = profile.Name
+				needsUpdate = true
+			}
+			if needsUpdate {
+				updated, updateErr := users.Update(r.Context(), user.ID, store.UserInput{
+					Name:      name,
+					Email:     user.Email,
+					Password:  user.Password,
+					Role:      user.Role,
+					Status:    status,
+					ServerIDs: user.ServerIDs,
+				})
+				if updateErr != nil {
+					log.Printf("[auth] google oauth activate user failed user=%d: %v", user.ID, updateErr)
+					redirectOAuthError(w, r, frontend, "Sign-in failed. Please try again.")
+					return
+				}
+				user = updated
+				user.ServerIDs = updated.ServerIDs
+			}
 		}
 
 		ttl := time.Duration(cfg.JWTTTLHours) * time.Hour
