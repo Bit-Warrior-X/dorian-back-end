@@ -45,6 +45,7 @@ type UserStore interface {
 	List(ctx context.Context) ([]User, error)
 	Count(ctx context.Context) (int64, error)
 	FindByID(ctx context.Context, id int64) (User, error)
+	FindByEmail(ctx context.Context, email string) (User, error)
 	FindByCredentials(ctx context.Context, email, password string) (User, error)
 	Create(ctx context.Context, input UserInput) (User, error)
 	Update(ctx context.Context, id int64, input UserInput) (User, error)
@@ -117,6 +118,33 @@ func (store *userStore) FindByID(ctx context.Context, id int64) (User, error) {
 		FROM users
 		WHERE id = ?
 		LIMIT 1`, id)
+	if err := row.Scan(&user.ID, &user.Name, &user.Email, &user.Password, &user.Role, &user.Status); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return User{}, errNotFound
+		}
+		return User{}, err
+	}
+	serverMap, err := store.userServers(ctx, []int64{user.ID})
+	if err != nil {
+		return User{}, err
+	}
+	ref := serverMap[user.ID]
+	user.ServerIDs = ref.ids
+	user.Servers = ref.names
+	return user, nil
+}
+
+func (store *userStore) FindByEmail(ctx context.Context, email string) (User, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return User{}, errNotFound
+	}
+	var user User
+	row := store.db.QueryRowContext(ctx, `
+		SELECT id, name, email, password, role, status
+		FROM users
+		WHERE email = ?
+		LIMIT 1`, email)
 	if err := row.Scan(&user.ID, &user.Name, &user.Email, &user.Password, &user.Role, &user.Status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, errNotFound
