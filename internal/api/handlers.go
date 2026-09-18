@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"vue-project-backend/internal/acme"
+	"vue-project-backend/internal/auth"
 	"vue-project-backend/internal/config"
 	"vue-project-backend/internal/remotesvc"
 	"vue-project-backend/internal/store"
@@ -267,6 +268,7 @@ func registerRoutes(
 	agentClient *AgentClient,
 	users store.UserStore,
 	auditLogs store.AuditLogStore,
+	apiTokens store.APITokenStore,
 	servers store.ServerStore,
 	l4 store.L4Store,
 	l4Whitelist store.L4WhitelistStore,
@@ -389,10 +391,16 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/analytics/l4/attacks/recent", l4AnalyticsRecentAttacksHandler(l4AttackStats, sites))
 	mux.HandleFunc("/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats, sites))
 	mux.HandleFunc("/api/v1/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats, sites))
-	mux.HandleFunc("/auth/login", loginHandler(users, auditLogs))
+	mux.HandleFunc("/auth/login", loginHandler(cfg, users, auditLogs))
+	mux.HandleFunc("/api/v1/auth/login", loginHandler(cfg, users, auditLogs))
 	mux.HandleFunc("/auth/logout", logoutHandler(auditLogs))
-	mux.HandleFunc("/audit-logs", auditLogsHandler(auditLogs))
-	mux.HandleFunc("/api/v1/audit-logs", auditLogsHandler(auditLogs))
+	mux.HandleFunc("/api/v1/auth/logout", logoutHandler(auditLogs))
+	mux.HandleFunc("/auth/api-tokens", apiTokensHandler(apiTokens))
+	mux.HandleFunc("/api/v1/auth/api-tokens", apiTokensHandler(apiTokens))
+	mux.HandleFunc("/auth/api-tokens/", apiTokenDetailHandler(apiTokens))
+	mux.HandleFunc("/api/v1/auth/api-tokens/", apiTokenDetailHandler(apiTokens))
+	mux.HandleFunc("/audit-logs", requireAdminOrOwnAuditLogs(auditLogsHandler(auditLogs)))
+	mux.HandleFunc("/api/v1/audit-logs", requireAdminOrOwnAuditLogs(auditLogsHandler(auditLogs)))
 	mux.HandleFunc("/api/get_blocklist_ips", getBlocklistIPsHandler(servers, l4Blacklist))
 	mux.HandleFunc("/api/v1/get_blocklist_ips", getBlocklistIPsHandler(servers, l4Blacklist))
 	mux.HandleFunc("/api/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
@@ -406,8 +414,10 @@ func registerRoutes(
 	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
 	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
 	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings))
-	mux.HandleFunc("/users", usersHandler(users))
-	mux.HandleFunc("/users/", userHandler(users))
+	mux.HandleFunc("/users", requireAdmin(usersHandler(users)))
+	mux.HandleFunc("/users/", requireAdminOrSelfUser(userHandler(users)))
+	mux.HandleFunc("/api/v1/users", requireAdmin(usersHandler(users)))
+	mux.HandleFunc("/api/v1/users/", requireAdminOrSelfUser(userHandler(users)))
 	l7Deps := siteL7Stores{
 		wafWhitelist:       wafWhitelist,
 		wafBlacklist:       wafBlacklist,
@@ -2237,7 +2247,7 @@ func parseTimeValue(value string) (time.Time, error) {
 	return time.Time{}, errors.New("invalid time format")
 }
 
-func loginHandler(users store.UserStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func loginHandler(cfg config.Config, users store.UserStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2289,10 +2299,23 @@ func loginHandler(users store.UserStore, auditLogs store.AuditLogStore) http.Han
 			return
 		}
 
+		ttl := time.Duration(cfg.JWTTTLHours) * time.Hour
+		token, err := auth.IssueUserToken(auth.UserIdentity{
+			ID:    user.ID,
+			Email: user.Email,
+			Name:  user.Name,
+			Role:  user.Role,
+		}, cfg.JWTSecret, ttl)
+		if err != nil {
+			log.Printf("[auth] failed to issue jwt for user=%d: %v", user.ID, err)
+			writeError(w, http.StatusInternalServerError, "failed to issue session token")
+			return
+		}
+
 		logLoginAttempt(r.Context(), auditLogs, r, user, true, http.StatusOK, "Successful login")
 
 		writeJSON(w, http.StatusOK, loginResponse{
-			Token: "mock-token",
+			Token: token,
 			User:  userShape{ID: user.ID, Email: user.Email, Role: user.Role, Name: user.Name},
 		})
 	}
@@ -5477,11 +5500,25 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := parseID(r.URL.Path, "/users/")
 		if !ok {
+			id, ok = parseID(r.URL.Path, "/api/v1/users/")
+		}
+		if !ok {
 			writeError(w, http.StatusNotFound, "not found")
 			return
 		}
 
 		switch r.Method {
+		case http.MethodGet:
+			item, err := users.FindByID(r.Context(), id)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "user not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load user")
+				return
+			}
+			writeJSON(w, http.StatusOK, item)
 		case http.MethodPut, http.MethodPatch:
 			var payload store.UserInput
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -5492,6 +5529,23 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 			if payload.Name == "" || payload.Email == "" {
 				writeError(w, http.StatusBadRequest, "name and email are required")
 				return
+			}
+			if principal, ok := AuthPrincipalFromContext(r.Context()); ok && !strings.EqualFold(principal.Role, "Admin") {
+				existing, err := users.FindByID(r.Context(), id)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "user not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load user")
+					return
+				}
+				payload.Role = existing.Role
+				payload.Status = existing.Status
+				payload.ServerIDs = existing.ServerIDs
+				if payload.Password == "" {
+					payload.Password = existing.Password
+				}
 			}
 			if !strings.EqualFold(payload.Role, "User") {
 				payload.ServerIDs = nil

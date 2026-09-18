@@ -37,6 +37,16 @@ type auditClassification struct {
 }
 
 func auditActorFromRequest(r *http.Request) auditActor {
+	if principal, ok := AuthPrincipalFromContext(r.Context()); ok && principal.UserID > 0 {
+		id := principal.UserID
+		return auditActor{
+			UserID: &id,
+			Name:   principal.Name,
+			Email:  principal.Email,
+			Role:   principal.Role,
+		}
+	}
+	// Fallback for public/unauthenticated paths only (e.g. failed login before token).
 	idRaw := strings.TrimSpace(r.Header.Get(auditHeaderActorID))
 	var userID *int64
 	if idRaw != "" {

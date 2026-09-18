@@ -1,7 +1,10 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -57,6 +60,12 @@ type Config struct {
 	AcmeRFC2136TSIGSecret       string
 	AcmeRFC2136TSIGAlgorithm    string
 	AcmeRFC2136Zone             string
+	JWTSecret                   string
+	JWTTTLHours                 int
+	FrontendURL                 string
+	GoogleClientID              string
+	GoogleClientSecret          string
+	GoogleRedirectURL           string
 }
 
 func Load() Config {
@@ -97,6 +106,7 @@ func Load() Config {
 		AcmeDNSPropagationSeconds:   120,
 		AcmeRenewIntervalHours:      12,
 		AcmeRFC2136TSIGAlgorithm:    "hmac-sha256",
+		JWTTTLHours:                 24,
 	}
 
 	configPath := strings.TrimSpace(os.Getenv("CONFIG_FILE"))
@@ -266,11 +276,48 @@ func Load() Config {
 		cfg.AllowAllCORS = false
 	}
 
+	if secret := strings.TrimSpace(os.Getenv("JWT_SECRET")); secret != "" {
+		cfg.JWTSecret = secret
+	}
+	if ttlRaw := strings.TrimSpace(os.Getenv("JWT_TTL_HOURS")); ttlRaw != "" {
+		if parsed, err := strconv.Atoi(ttlRaw); err == nil && parsed > 0 {
+			cfg.JWTTTLHours = parsed
+		}
+	}
+	if cfg.JWTTTLHours <= 0 {
+		cfg.JWTTTLHours = 24
+	}
+	if strings.TrimSpace(cfg.JWTSecret) == "" {
+		cfg.JWTSecret = generateDevJWTSecret()
+		log.Printf("[config] WARNING: JWT_SECRET is unset; using an ephemeral in-process secret. Set JWT_SECRET for production.")
+	}
+
+	if frontend := strings.TrimSpace(os.Getenv("FRONTEND_URL")); frontend != "" {
+		cfg.FrontendURL = strings.TrimRight(frontend, "/")
+	}
+	if clientID := strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID")); clientID != "" {
+		cfg.GoogleClientID = clientID
+	}
+	if clientSecret := strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_SECRET")); clientSecret != "" {
+		cfg.GoogleClientSecret = clientSecret
+	}
+	if redirectURL := strings.TrimSpace(os.Getenv("GOOGLE_REDIRECT_URL")); redirectURL != "" {
+		cfg.GoogleRedirectURL = redirectURL
+	}
+
 	if len(cfg.AllowedOrigins) == 0 && !cfg.AllowAllCORS {
 		cfg.AllowAllCORS = true
 	}
 
 	return cfg
+}
+
+func generateDevJWTSecret() string {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "dev-only-insecure-jwt-secret-change-me"
+	}
+	return hex.EncodeToString(buf)
 }
 
 func splitAndTrim(value string) []string {
