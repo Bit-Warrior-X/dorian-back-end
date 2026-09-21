@@ -66,6 +66,14 @@ type Config struct {
 	GoogleClientID              string
 	GoogleClientSecret          string
 	GoogleRedirectURL           string
+	GitHubClientID              string
+	GitHubClientSecret          string
+	GitHubRedirectURL           string
+	SSOOIDCIssuer               string
+	SSOOIDCClientID             string
+	SSOOIDCClientSecret         string
+	SSOOIDCRedirectURL          string
+	SSOOIDCScopes               string
 }
 
 func Load() Config {
@@ -303,6 +311,30 @@ func Load() Config {
 	}
 	if redirectURL := strings.TrimSpace(os.Getenv("GOOGLE_REDIRECT_URL")); redirectURL != "" {
 		cfg.GoogleRedirectURL = redirectURL
+	}
+	if clientID := strings.TrimSpace(os.Getenv("GITHUB_CLIENT_ID")); clientID != "" {
+		cfg.GitHubClientID = clientID
+	}
+	if clientSecret := strings.TrimSpace(os.Getenv("GITHUB_CLIENT_SECRET")); clientSecret != "" {
+		cfg.GitHubClientSecret = clientSecret
+	}
+	if redirectURL := strings.TrimSpace(os.Getenv("GITHUB_REDIRECT_URL")); redirectURL != "" {
+		cfg.GitHubRedirectURL = redirectURL
+	}
+	if issuer := strings.TrimSpace(os.Getenv("SSO_OIDC_ISSUER")); issuer != "" {
+		cfg.SSOOIDCIssuer = strings.TrimRight(issuer, "/")
+	}
+	if clientID := strings.TrimSpace(os.Getenv("SSO_OIDC_CLIENT_ID")); clientID != "" {
+		cfg.SSOOIDCClientID = clientID
+	}
+	if clientSecret := strings.TrimSpace(os.Getenv("SSO_OIDC_CLIENT_SECRET")); clientSecret != "" {
+		cfg.SSOOIDCClientSecret = clientSecret
+	}
+	if redirectURL := strings.TrimSpace(os.Getenv("SSO_OIDC_REDIRECT_URL")); redirectURL != "" {
+		cfg.SSOOIDCRedirectURL = redirectURL
+	}
+	if scopes := strings.TrimSpace(os.Getenv("SSO_OIDC_SCOPES")); scopes != "" {
+		cfg.SSOOIDCScopes = scopes
 	}
 
 	if len(cfg.AllowedOrigins) == 0 && !cfg.AllowAllCORS {

@@ -52,7 +52,11 @@ func isPublicAuthPath(method, path string) bool {
 	case "/auth/oauth/providers", "/api/v1/auth/oauth/providers":
 		return method == http.MethodGet || method == http.MethodHead
 	case "/auth/oauth/google/start", "/api/v1/auth/oauth/google/start",
-		"/auth/oauth/google/callback", "/api/v1/auth/oauth/google/callback":
+		"/auth/oauth/google/callback", "/api/v1/auth/oauth/google/callback",
+		"/auth/oauth/github/start", "/api/v1/auth/oauth/github/start",
+		"/auth/oauth/github/callback", "/api/v1/auth/oauth/github/callback",
+		"/auth/oauth/sso/start", "/api/v1/auth/oauth/sso/start",
+		"/auth/oauth/sso/callback", "/api/v1/auth/oauth/sso/callback":
 		return method == http.MethodGet
 	case "/report_xdp", "/api/report_xdp", "/api/v1/report_xdp":
 		return method == http.MethodPost
