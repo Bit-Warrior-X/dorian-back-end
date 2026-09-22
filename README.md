@@ -242,8 +242,188 @@ scripts/             # SQL migration scripts
 ## Build
 
 ```sh
+cd /home/dorian/dorian-back-end
 go build -o bin/server ./cmd/server
 ./bin/server
+```
+
+## Production deployment
+
+The API listens on `:8080`. nginx on `panel.dorian.center` proxies `/api/` and related paths to `http://127.0.0.1:8080`.
+
+Ensure production config is in place before starting:
+
+- `config.json` — DB, Redis, CORS, port (see [Configuration](#configuration))
+- `.env` — OAuth / SSO / JWT (`FRONTEND_URL`, `GOOGLE_*`, `GITHUB_*`, `SSO_OIDC_*`, `JWT_*`)
+
+### Deploy (update an existing production install)
+
+```sh
+cd /home/dorian/dorian-back-end
+
+# Build a new binary
+go build -o bin/server ./cmd/server
+
+# Stop the running API process, then start the new one from this directory
+# (cwd must be the project root so config.json and .env are loaded)
+pkill -f 'dorian-api-bin|bin/server' || true
+nohup ./bin/server > /tmp/dorian-api.log 2>&1 &
+```
+
+Or, if you already run a named binary (e.g. `/tmp/dorian-api-bin`):
+
+```sh
+cd /home/dorian/dorian-back-end
+go build -o /tmp/dorian-api-bin ./cmd/server
+# restart that process so it picks up the new binary
+```
+
+Verify:
+
+```sh
+curl -s http://127.0.0.1:8080/api/v1/health
+# or
+curl -s http://127.0.0.1:8080/health
+```
+
+nginx does **not** need a reload for back-end binary updates — only when `/etc/nginx/conf.d/panel.conf` itself changes.
+
+### With the front-end
+
+1. Deploy / restart the back-end (commands above).
+2. In `dorian-front-end/`: `npm run build` (serves from `dist/` immediately).
+
+### Production nginx config
+
+Installed at `/etc/nginx/conf.d/panel.conf`. Serves the Vue `dist/` and proxies API paths to this service on `:8080`:
+
+```nginx
+server {
+    listen 80;
+    listen [::]:80;
+
+    server_name panel.dorian.center;
+
+    # Redirect all HTTP to HTTPS
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+
+    server_name panel.dorian.center;
+
+    ssl_certificate /etc/letsencrypt/live/panel.dorian.center/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/panel.dorian.center/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    # Backend API (must be above the SPA catch-all)
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080/api/;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /servers {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    location /auth {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /audit-logs {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /users {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /sites {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /waf-rules {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /dashboard {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /analytics {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Frontend production build
+    root /home/dorian/dorian-front-end/dist;
+    index index.html;
+
+    location /assets/ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+```
+
+After editing this file on the server:
+
+```sh
+sudo nginx -t && sudo systemctl reload nginx
 ```
 
 ## License
