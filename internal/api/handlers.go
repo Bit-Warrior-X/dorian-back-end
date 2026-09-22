@@ -45,8 +45,35 @@ type userShape struct {
 }
 
 type errorResponse struct {
-	Error   string `json:"error"`
-	Message string `json:"message,omitempty"`
+	Error       string `json:"error"`
+	Message     string `json:"message,omitempty"`
+	Description string `json:"description,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	ScriptError string `json:"script_error,omitempty"`
+	Stderr      string `json:"stderr,omitempty"`
+	Stdout      string `json:"stdout,omitempty"`
+	ReqID       string `json:"req_id,omitempty"`
+	Hint        string `json:"hint,omitempty"`
+	Op          string `json:"op,omitempty"`
+}
+
+type httpAPIErr struct {
+	status  int
+	message string
+	detail  errorResponse
+}
+
+func (e *httpAPIErr) Error() string {
+	return e.message
+}
+
+func apiHTTPError(status int, message string) error {
+	return &httpAPIErr{status: status, message: message}
+}
+
+func apiHTTPErrorDetail(status int, message string, detail errorResponse) error {
+	detail.Message = firstNonEmptyTrimmed(detail.Message, message)
+	return &httpAPIErr{status: status, message: message, detail: detail}
 }
 
 var serverCreateSingleflight singleflight.Group
@@ -122,19 +149,6 @@ func rememberRecentServerCreate(dedupeKey string, serverID int64) {
 	pruneRecentServerCreatesUnlocked()
 }
 
-type httpAPIErr struct {
-	status  int
-	message string
-}
-
-func (e *httpAPIErr) Error() string {
-	return e.message
-}
-
-func apiHTTPError(status int, message string) error {
-	return &httpAPIErr{status: status, message: message}
-}
-
 // storeLicenseTypeFromDeployResponse maps deploy_license JSON license_type
 // (trial | l4 | l7 | unified) back to the dashboard / servers.license_type label
 // (Trial | L4 | L7 | Unified).
@@ -179,6 +193,10 @@ func performServerCreate(
 	deployResp, err := createDeployLicenseServer(deployCtx, cfg, payload, token)
 	if err != nil {
 		log.Printf("[api] POST /servers: deploy_license failed: %v", err)
+		var he *httpAPIErr
+		if errors.As(err, &he) {
+			return store.ServerView{}, he
+		}
 		// Prefer 422 over 502 so Cloudflare does not strip the error JSON body.
 		return store.ServerView{}, apiHTTPError(http.StatusUnprocessableEntity, err.Error())
 	}
@@ -191,13 +209,16 @@ func performServerCreate(
 	if deployToken == "" {
 		deployToken = token
 	}
-	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
+	runtimeStatuses := probeRemoteRuntimeStatuses(
 		opCtx,
 		strings.TrimSpace(payload.IP),
 		strings.TrimSpace(payload.SSHUser),
 		strings.TrimSpace(payload.SSHPassword),
 		strings.TrimSpace(payload.SSHPort),
 	)
+	deployServiceStatus := runtimeStatuses.Angelos
+	deployL4Status := runtimeStatuses.L4
+	deployL7Status := runtimeStatuses.L7
 	rowStatus := strings.TrimSpace(payload.Status)
 	if rowStatus == "" {
 		rowStatus = "Normal"
@@ -257,6 +278,7 @@ func performServerCreate(
 		log.Printf("[api] POST /servers: GetView serverID=%d failed: %v", created.ID, err)
 		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to load server")
 	}
+	view = applyRuntimeStatusesToView(view, runtimeStatuses)
 	log.Printf("[api] POST /servers: success serverID=%d name=%q ip=%q version=%q angelos=%q l4=%q l7=%q",
 		created.ID, view.Name, view.IP, view.Version, deployServiceStatus, deployL4Status, deployL7Status)
 	return view, nil
@@ -2411,7 +2433,7 @@ func serversHandler(cfg config.Config, servers store.ServerStore) http.HandlerFu
 			if execErr != nil {
 				var he *httpAPIErr
 				if errors.As(execErr, &he) {
-					writeError(w, he.status, he.message)
+					writeHTTPAPIError(w, he)
 					return
 				}
 				writeError(w, http.StatusInternalServerError, execErr.Error())
@@ -2619,12 +2641,16 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 		return deployCreateServerResponse{}, errors.New("deploy license base url is invalid")
 	}
 
+	sshPort := strings.TrimSpace(payload.SSHPort)
+	if sshPort == "" {
+		sshPort = "22"
+	}
 	reqPayload := deployCreateServerRequest{
 		Name:          strings.TrimSpace(payload.Name),
 		IP:            strings.TrimSpace(payload.IP),
 		User:          strings.TrimSpace(payload.SSHUser),
 		Pass:          strings.TrimSpace(payload.SSHPassword),
-		SSHPort:       strings.TrimSpace(payload.SSHPort),
+		SSHPort:       sshPort,
 		LicenseType:   deployLicenseServiceLicenseType(payload.LicenseType),
 		LicenseString: strings.TrimSpace(payload.LicenseFile),
 		Token:         token,
@@ -2645,51 +2671,77 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 	client := &http.Client{Timeout: time.Duration(timeout) * time.Second}
 
 	target := baseURL + "/create_server"
-	logDeployLicenseClientf("POST %s timeout=%ds jsonBytes=%d name=%q ip=%q sshUser=%q sshPort=%q license_type=%q license_string_len=%d token_prefix=%.6s…",
-		target, timeout, len(body),
-		reqPayload.Name, reqPayload.IP, reqPayload.User, reqPayload.SSHPort,
-		reqPayload.LicenseType, len(reqPayload.LicenseString), token)
+	t0 := time.Now()
+	logDeployLicenseEvent("create_server_request", map[string]any{
+		"target":             target,
+		"timeout_sec":        timeout,
+		"json_bytes":         len(body),
+		"name":               reqPayload.Name,
+		"ip":                 reqPayload.IP,
+		"ssh_user":           reqPayload.User,
+		"ssh_port":           reqPayload.SSHPort,
+		"license_type":       reqPayload.LicenseType,
+		"license_string_len": len(reqPayload.LicenseString),
+		"token_prefix":       tokenPrefix(token),
+	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
-		logDeployLicenseClientf("build request failed: %v", err)
+		logDeployLicenseEvent("create_server_build_error", map[string]any{"error": err.Error()})
 		return deployCreateServerResponse{}, fmt.Errorf("build deploy request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		logDeployLicenseClientf("HTTP Do error: %v", err)
+		logDeployLicenseEvent("create_server_http_error", map[string]any{
+			"error":       err.Error(),
+			"duration_ms": time.Since(t0).Milliseconds(),
+			"ip":          reqPayload.IP,
+		})
 		return deployCreateServerResponse{}, fmt.Errorf("deploy create_server call failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	limitedBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if readErr != nil {
-		logDeployLicenseClientf("read body error: %v status=%d", readErr, resp.StatusCode)
+		logDeployLicenseEvent("create_server_read_error", map[string]any{
+			"error":       readErr.Error(),
+			"status":      resp.StatusCode,
+			"duration_ms": time.Since(t0).Milliseconds(),
+		})
 		return deployCreateServerResponse{}, fmt.Errorf("read deploy response: %w", readErr)
 	}
 	bodyPreview := oneLineLogPreview(string(limitedBody), 480)
-	logDeployLicenseClientf("response status=%d bodyBytes=%d preview=%q",
-		resp.StatusCode, len(limitedBody), bodyPreview)
+	logDeployLicenseEvent("create_server_response", map[string]any{
+		"status":      resp.StatusCode,
+		"body_bytes":  len(limitedBody),
+		"preview":     bodyPreview,
+		"duration_ms": time.Since(t0).Milliseconds(),
+		"ip":          reqPayload.IP,
+	})
 	if resp.StatusCode != http.StatusOK {
 		return deployCreateServerResponse{}, formatDeployLicenseHTTPError("deploy create_server", resp.StatusCode, limitedBody)
 	}
 
 	var decoded deployCreateServerResponse
 	if err := json.Unmarshal(limitedBody, &decoded); err != nil {
-		logDeployLicenseClientf("JSON decode failed: %v preview=%q", err, bodyPreview)
+		logDeployLicenseEvent("create_server_decode_error", map[string]any{
+			"error":   err.Error(),
+			"preview": bodyPreview,
+		})
 		return deployCreateServerResponse{}, fmt.Errorf("decode deploy response: %w", err)
 	}
 	normalizeDeployLicenseCreateResponse(&decoded)
-	logDeployLicenseClientf("decoded OK description_len=%d root_license_type=%q root_version=%q root_server_status=%q root_l4_status=%q root_l7_status=%q",
-		len(decoded.Description),
-		strings.TrimSpace(decoded.LicenseType),
-		strings.TrimSpace(decoded.Version),
-		strings.TrimSpace(decoded.ServerStatus),
-		strings.TrimSpace(decoded.L4Status),
-		strings.TrimSpace(decoded.L7Status),
-	)
+	logDeployLicenseEvent("create_server_ok", map[string]any{
+		"duration_ms":     time.Since(t0).Milliseconds(),
+		"description_len": len(decoded.Description),
+		"license_type":    strings.TrimSpace(decoded.LicenseType),
+		"version":         strings.TrimSpace(decoded.Version),
+		"server_status":   strings.TrimSpace(decoded.ServerStatus),
+		"l4_status":       strings.TrimSpace(decoded.L4Status),
+		"l7_status":       strings.TrimSpace(decoded.L7Status),
+	})
 	return decoded, nil
 }
 
@@ -3003,7 +3055,7 @@ func handleServerRefreshRuntimeStatus(w http.ResponseWriter, r *http.Request, cf
 		writeError(w, http.StatusInternalServerError, "failed to load server")
 		return
 	}
-	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
+	runtimeStatuses := probeRemoteRuntimeStatuses(
 		r.Context(),
 		view.IP,
 		view.SSHUser,
@@ -3020,9 +3072,9 @@ func handleServerRefreshRuntimeStatus(w http.ResponseWriter, r *http.Request, cf
 		"",
 		"",
 		nil,
-		deployServiceStatus,
-		deployL4Status,
-		deployL7Status,
+		runtimeStatuses.Angelos,
+		runtimeStatuses.L4,
+		runtimeStatuses.L7,
 	); err != nil {
 		log.Printf("[api] POST /servers/%d/refresh-runtime-status: UpdateDeploymentData failed: %v", serverID, err)
 		writeError(w, http.StatusInternalServerError, "failed to persist runtime status")
@@ -3033,6 +3085,7 @@ func handleServerRefreshRuntimeStatus(w http.ResponseWriter, r *http.Request, cf
 		writeError(w, http.StatusInternalServerError, "failed to load server")
 		return
 	}
+	outView = applyRuntimeStatusesToView(outView, runtimeStatuses)
 	log.Printf("[api] POST /servers/%d/refresh-runtime-status: ssh_target=%s@%s:%s angelos=%q l4=%q l7=%q",
 		serverID,
 		strings.TrimSpace(view.SSHUser),
@@ -3078,6 +3131,11 @@ func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Conf
 	deployResp, err := deployLicenseUpgradeVersion(deployCtx, cfg, view, versionUUID)
 	if err != nil {
 		log.Printf("[api] POST /servers/%d/upgrade: deploy_license failed: %v", serverID, err)
+		var he *httpAPIErr
+		if errors.As(err, &he) {
+			writeHTTPAPIError(w, he)
+			return
+		}
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -3091,13 +3149,16 @@ func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Conf
 		writeError(w, http.StatusBadGateway, "deploy license returned invalid expire_date")
 		return
 	}
-	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
+	runtimeStatuses := probeRemoteRuntimeStatuses(
 		r.Context(),
 		view.IP,
 		view.SSHUser,
 		view.SSHPassword,
 		view.SSHPort,
 	)
+	deployServiceStatus := runtimeStatuses.Angelos
+	deployL4Status := runtimeStatuses.L4
+	deployL7Status := runtimeStatuses.L7
 	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
 	if deployVersion == "" {
 		deployVersion = strings.TrimSpace(deployResp.Version)
@@ -3115,6 +3176,7 @@ func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Conf
 		writeError(w, http.StatusInternalServerError, "failed to load server")
 		return
 	}
+	outView = applyRuntimeStatusesToView(outView, runtimeStatuses)
 	log.Printf("[api] POST /servers/%d/upgrade: success version=%q service_status=%q", serverID, outView.Version, outView.ServiceStatus)
 	writeJSON(w, http.StatusOK, outView)
 }
@@ -3158,6 +3220,11 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 	deployResp, err := deployLicenseUpgradeLicense(deployCtx, cfg, view, licenseType, billingPeriod)
 	if err != nil {
 		log.Printf("[api] POST /servers/%d/upgrade-license: deploy_license failed: %v", serverID, err)
+		var he *httpAPIErr
+		if errors.As(err, &he) {
+			writeHTTPAPIError(w, he)
+			return
+		}
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -3166,13 +3233,16 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 		expireRaw = strings.TrimSpace(deployResp.ExpireDate)
 	}
 	expiredAt := resolveDeployExpireDate(expireRaw, licenseType, billingPeriod, time.Now())
-	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
+	runtimeStatuses := probeRemoteRuntimeStatuses(
 		r.Context(),
 		view.IP,
 		view.SSHUser,
 		view.SSHPassword,
 		view.SSHPort,
 	)
+	deployServiceStatus := runtimeStatuses.Angelos
+	deployL4Status := runtimeStatuses.L4
+	deployL7Status := runtimeStatuses.L7
 	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
 	if deployVersion == "" {
 		deployVersion = strings.TrimSpace(deployResp.Version)
@@ -3189,6 +3259,7 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 		writeError(w, http.StatusInternalServerError, "failed to load server")
 		return
 	}
+	outView = applyRuntimeStatusesToView(outView, runtimeStatuses)
 	log.Printf("[api] POST /servers/%d/upgrade-license: success license=%q version=%q service_status=%q", serverID, outView.License, outView.Version, outView.ServiceStatus)
 	writeJSON(w, http.StatusOK, outView)
 }

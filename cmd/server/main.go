@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,6 +10,7 @@ import (
 
 	"vue-project-backend/internal/acme"
 	"vue-project-backend/internal/api"
+	"vue-project-backend/internal/applog"
 	"vue-project-backend/internal/config"
 	"vue-project-backend/internal/db"
 	"vue-project-backend/internal/store"
@@ -18,6 +18,7 @@ import (
 )
 
 func main() {
+	applog.Install("api")
 	cfg := config.Load()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -25,21 +26,23 @@ func main() {
 
 	connection, err := db.Open(cfg)
 	if err != nil {
-		log.Fatalf("database connection failed: %v", err)
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "database", "error": err.Error()})
+		os.Exit(1)
 	}
 	defer func() {
 		if closeErr := connection.Close(); closeErr != nil {
-			log.Printf("database close failed: %v", closeErr)
+			applog.Warnf("api", "shutdown_warning", map[string]any{"step": "database_close", "error": closeErr.Error()})
 		}
 	}()
 
 	redisClient, err := db.OpenRedis(cfg)
 	if err != nil {
-		log.Fatalf("redis connection failed: %v", err)
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "redis", "error": err.Error()})
+		os.Exit(1)
 	}
 	defer func() {
 		if closeErr := redisClient.Close(); closeErr != nil {
-			log.Printf("redis close failed: %v", closeErr)
+			applog.Warnf("api", "shutdown_warning", map[string]any{"step": "redis_close", "error": closeErr.Error()})
 		}
 	}()
 
@@ -89,9 +92,10 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("backend listening on %s", server.Addr)
+		applog.Infof("api", "listening", map[string]any{"addr": server.Addr})
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			applog.Errorf("api", "server_error", map[string]any{"error": err.Error()})
+			os.Exit(1)
 		}
 	}()
 
@@ -106,6 +110,8 @@ func main() {
 	defer shutdownCancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Printf("graceful shutdown failed: %v", err)
+		applog.Warnf("api", "shutdown_failed", map[string]any{"error": err.Error()})
+	} else {
+		applog.Infof("api", "shutdown_ok", nil)
 	}
 }

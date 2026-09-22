@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 )
 
@@ -16,6 +17,7 @@ type deployLicenseErrorBody struct {
 	Stderr      string `json:"stderr"`
 	Stdout      string `json:"stdout"`
 	Path        string `json:"path"`
+	ReqID       string `json:"req_id"`
 }
 
 func firstNonEmptyTrimmed(values ...string) string {
@@ -102,20 +104,48 @@ func humanizeDeployLicenseError(detail string) string {
 
 func formatDeployLicenseHTTPError(op string, status int, body []byte) error {
 	raw := strings.TrimSpace(string(body))
-	detail := humanizeDeployLicenseError(extractDeployLicenseErrorDetail(raw))
-	if detail == "" {
-		return fmt.Errorf(
+	var parsed deployLicenseErrorBody
+	_ = json.Unmarshal([]byte(raw), &parsed)
+
+	detailMsg := humanizeDeployLicenseError(extractDeployLicenseErrorDetail(raw))
+	if detailMsg == "" {
+		detailMsg = fmt.Sprintf(
 			"%s failed (HTTP %d). Check SSH reachability and license availability, then try another server if needed",
 			op,
 			status,
 		)
+	} else if status > 0 {
+		detailMsg = fmt.Sprintf("%s failed (HTTP %d): %s", op, status, detailMsg)
+	} else {
+		detailMsg = fmt.Sprintf("%s failed: %s", op, detailMsg)
 	}
-	// Keep message customer-facing; full raw body is already logged by the caller.
-	if status > 0 {
-		return fmt.Errorf("%s failed (HTTP %d): %s", op, status, detail)
-	}
-	return fmt.Errorf("%s failed: %s", op, detail)
+
+	return apiHTTPErrorDetail(http.StatusUnprocessableEntity, detailMsg, errorResponse{
+		Message:     detailMsg,
+		Description: firstNonEmptyTrimmed(parsed.Description, op+" failed"),
+		Detail:      firstNonEmptyTrimmed(parsed.Message, parsed.Error, parsed.ScriptError),
+		ScriptError: firstNonEmptyTrimmed(parsed.ScriptError, parsed.Stderr),
+		Stderr:      clipDeployLog(parsed.Stderr, 6000),
+		Stdout:      clipDeployLog(parsed.Stdout, 6000),
+		ReqID:       strings.TrimSpace(parsed.ReqID),
+		Hint:        "See script_error / stderr for the remote deploy or license step that failed.",
+		Op:          op,
+	})
 }
+
+func clipDeployLog(s string, max int) string {
+	s = strings.TrimSpace(s)
+	if s == "" || max <= 0 || len(s) <= max {
+		return s
+	}
+	head := max / 3
+	tail := max - head - 48
+	if tail < 32 {
+		tail = 32
+	}
+	return s[:head] + "\n…[truncated]…\n" + s[len(s)-tail:]
+}
+
 
 func formatProbeHostOSError(sshUser, ip string, err error) string {
 	detail := strings.TrimSpace(err.Error())

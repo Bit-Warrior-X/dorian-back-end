@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -14,7 +15,7 @@ func TestExtractDeployLicenseErrorDetail(t *testing.T) {
 }
 
 func TestFormatDeployLicenseHTTPErrorLicenseNotFound(t *testing.T) {
-	err := formatDeployLicenseHTTPError("deploy create_server", 404, []byte(`{"description":"license not found"}`))
+	err := formatDeployLicenseHTTPError("deploy create_server", 404, []byte(`{"description":"license not found","req_id":"abc-123"}`))
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -24,6 +25,16 @@ func TestFormatDeployLicenseHTTPErrorLicenseNotFound(t *testing.T) {
 	}
 	if strings.Contains(msg, "{") {
 		t.Fatalf("should not dump raw JSON: %q", msg)
+	}
+	var he *httpAPIErr
+	if !errors.As(err, &he) {
+		t.Fatalf("expected *httpAPIErr, got %T", err)
+	}
+	if he.detail.ReqID != "abc-123" {
+		t.Fatalf("expected req_id propagated, got %#v", he.detail)
+	}
+	if strings.TrimSpace(he.detail.Hint) == "" {
+		t.Fatal("expected hint on deploy error detail")
 	}
 }
 

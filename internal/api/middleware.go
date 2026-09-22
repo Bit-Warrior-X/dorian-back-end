@@ -3,12 +3,12 @@ package api
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"vue-project-backend/internal/applog"
 	"vue-project-backend/internal/config"
 )
 
@@ -103,9 +103,18 @@ func (s *statusRecorder) Flush() {
 func withRequestLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		reqID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+		if reqID == "" {
+			reqID = strings.TrimSpace(r.Header.Get("X-Request-ID"))
+		}
+		if reqID == "" {
+			reqID = fmt.Sprintf("%d-%d", start.UnixNano(), time.Now().UnixNano()%1_000_000)
+		}
+		w.Header().Set("X-Request-Id", reqID)
+
 		rec := &statusRecorder{ResponseWriter: w, status: 0}
 		next.ServeHTTP(rec, r)
-		duration := time.Since(start).Truncate(time.Millisecond)
+		duration := time.Since(start)
 		path := r.URL.Path
 		if strings.TrimSpace(path) == "" {
 			path = "/"
@@ -114,11 +123,26 @@ func withRequestLogging(next http.Handler) http.Handler {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		remote := strings.TrimSpace(r.RemoteAddr)
-		if remote != "" {
-			log.Printf("%s %s -> %d (%s) remote=%s", r.Method, path, status, duration, remote)
-			return
+		level := "info"
+		if status >= 500 {
+			level = "error"
+		} else if status >= 400 {
+			level = "warn"
 		}
-		log.Printf("%s %s -> %d (%s)", r.Method, path, status, duration)
+		fields := map[string]any{
+			"req_id":      reqID,
+			"method":      r.Method,
+			"path":        path,
+			"status":      status,
+			"duration_ms": duration.Milliseconds(),
+		}
+		if remote := strings.TrimSpace(r.RemoteAddr); remote != "" {
+			fields["remote"] = remote
+		}
+		if q := r.URL.RawQuery; q != "" {
+			fields["query"] = oneLineLogPreview(q, 200)
+		}
+		applog.Event(level, "api", "http_request", fields)
 	})
 }
+

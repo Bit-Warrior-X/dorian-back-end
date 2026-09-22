@@ -39,6 +39,9 @@ type ServerView struct {
 	ServiceStatus  string   `json:"serviceStatus,omitempty"`
 	L4Status       string   `json:"l4Status,omitempty"`
 	L7Status       string   `json:"l7Status,omitempty"`
+	ServiceStatusReason string `json:"serviceStatusReason,omitempty"`
+	L4StatusReason      string `json:"l4StatusReason,omitempty"`
+	L7StatusReason      string `json:"l7StatusReason,omitempty"`
 	StatusLabel    string   `json:"statusLabel"`
 	StatusClass    string   `json:"statusClass"`
 	License        string   `json:"license"`

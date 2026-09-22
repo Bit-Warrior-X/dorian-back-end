@@ -46,7 +46,7 @@ func persistRuntimeStatuses(
 	serverID int64,
 	view store.ServerView,
 ) (store.ServerView, error) {
-	deployServiceStatus, deployL4Status, deployL7Status := probeRemoteRuntimeStatuses(
+	statuses := probeRemoteRuntimeStatuses(
 		ctx,
 		view.IP,
 		view.SSHUser,
@@ -63,13 +63,17 @@ func persistRuntimeStatuses(
 		"",
 		"",
 		nil,
-		deployServiceStatus,
-		deployL4Status,
-		deployL7Status,
+		statuses.Angelos,
+		statuses.L4,
+		statuses.L7,
 	); err != nil {
 		return store.ServerView{}, err
 	}
-	return servers.GetView(ctx, serverID)
+	out, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return store.ServerView{}, err
+	}
+	return applyRuntimeStatusesToView(out, statuses), nil
 }
 
 func handleServerHostMetrics(w http.ResponseWriter, r *http.Request, servers store.ServerStore, serverID int64) {
