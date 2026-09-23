@@ -80,7 +80,21 @@ func extractBearerOrAPIKey(r *http.Request) string {
 	if key := strings.TrimSpace(r.Header.Get("X-API-Key")); key != "" {
 		return key
 	}
+	// Browser WebSocket cannot set Authorization headers. Allow token via query
+	// only on WebSocket upgrade requests (e.g. access-log stream).
+	if isWebSocketUpgrade(r) {
+		if q := strings.TrimSpace(r.URL.Query().Get("access_token")); q != "" {
+			return q
+		}
+		if q := strings.TrimSpace(r.URL.Query().Get("token")); q != "" {
+			return q
+		}
+	}
 	return ""
+}
+
+func isWebSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
 }
 
 func withAuth(cfg config.Config, apiTokens store.APITokenStore, next http.Handler) http.Handler {
