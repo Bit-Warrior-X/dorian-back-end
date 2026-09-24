@@ -92,6 +92,7 @@ type BlacklistStore interface {
 	GetPayload(ctx context.Context, entryID int64) (TemporaryBlacklistPayload, error)
 	Delete(ctx context.Context, entryID int64) error
 	DeleteAll(ctx context.Context, serverID int64) error
+	ReplaceForServer(ctx context.Context, serverID int64, payloads []TemporaryBlacklistPayload) error
 }
 
 type blacklistStore struct {
@@ -232,13 +233,61 @@ func (s *blacklistStore) DeleteAll(ctx context.Context, serverID int64) error {
 	if err != nil {
 		return err
 	}
-	if len(keys) > 0 {
-		if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
+	if serverID == 0 {
+		if len(keys) > 0 {
+			if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
+				return err
+			}
+		}
+		return s.rdb.Del(ctx, redisKeyBlacklistNext).Err()
+	}
+
+	var toDelete []string
+	for _, key := range keys {
+		raw, err := s.rdb.Get(ctx, key).Result()
+		if err != nil {
+			if err == redis.Nil {
+				continue
+			}
 			return err
 		}
+		var p TemporaryBlacklistPayload
+		if err := json.Unmarshal([]byte(raw), &p); err != nil {
+			continue
+		}
+		if p.ServerID == serverID {
+			toDelete = append(toDelete, key)
+		}
 	}
-	if err := s.rdb.Del(ctx, redisKeyBlacklistNext).Err(); err != nil {
+	if len(toDelete) == 0 {
+		return nil
+	}
+	return s.rdb.Del(ctx, toDelete...).Err()
+}
+
+func (s *blacklistStore) ReplaceForServer(ctx context.Context, serverID int64, payloads []TemporaryBlacklistPayload) error {
+	if serverID == 0 {
+		return errNotFound
+	}
+	if err := s.DeleteAll(ctx, serverID); err != nil {
 		return err
+	}
+	seen := make(map[string]struct{}, len(payloads))
+	for _, payload := range payloads {
+		ip := strings.TrimSpace(payload.IP)
+		if ip == "" {
+			continue
+		}
+		key := strings.ToLower(ip) + "|" + strconv.FormatInt(payload.SiteID, 10) + "|" + strings.TrimSpace(payload.URL)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		payload.ServerID = serverID
+		payload.IP = ip
+		if _, err := s.CreateFromPayload(ctx, payload); err != nil {
+			return err
+		}
 	}
 	return nil
 }

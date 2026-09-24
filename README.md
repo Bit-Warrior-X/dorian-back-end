@@ -221,20 +221,32 @@ Most routes are available both with and without the `/api/v1` prefix.
 | Blacklist | `GET/POST /servers/blacklist`, `DELETE /servers/blacklist/:id` |
 | Dashboard | `GET /dashboard/summary`, `/dashboard/security-events`, `/dashboard/bandwidth*` |
 | Analytics | `GET /analytics/summary`, `/analytics/series/*`, `/analytics/security/*`, `/analytics/l4/*` |
-| Agent reports | `POST /report_xdp`, `POST /api/temporary_blacklist_added` |
+| Agent reports | `POST /report_xdp`, `POST /api/temporary_blacklist_added`, `POST /api/report_edge_configure` |
 | Deploy | `GET /api/v1/deploy-versions` |
+| License plans | `GET /api/v1/license-plans` |
+
+### Back-end → Angelos (edge agent)
+
+Dorian pushes config to each edge’s Angelos agent at `http://{edge-ip}:5000` (L7 WAF/site/cache + L4 firewall).
+
+- **Human-readable contract:** [docs/ANGELOS_API.md](docs/ANGELOS_API.md)
+- **OpenAPI 3.0:** [angelos_api.yml](angelos_api.yml)
 
 ## Project Structure
 
 ```
 cmd/server/          # Application entry point
+docs/                # Operator docs (Angelos API contract, …)
+angelos_api.yml      # OpenAPI for back-end → Angelos
+api.yml              # OpenAPI for panel → back-end
+athens-metrics-api.yml
 internal/
-├── api/             # HTTP handlers, routing, middleware
+├── api/             # HTTP handlers, routing, middleware, Angelos client
 ├── config/          # Configuration loading (env + JSON)
 ├── db/              # MySQL and Redis connections
 ├── store/           # Database access layers
 ├── worker/          # Background jobs (metrics collection)
-├── remotesvc/       # Remote service probing
+├── remotesvc/       # Remote service probing (angelos/sparta/athens units)
 └── data/            # Static seed data
 scripts/             # SQL migration scripts
 ```

@@ -26,6 +26,7 @@ type L4WhitelistStore interface {
 	Create(ctx context.Context, serverID int64, input L4WhitelistInput) (L4WhitelistEntry, error)
 	Delete(ctx context.Context, serverID, entryID int64) error
 	DeleteAll(ctx context.Context, serverID int64) error
+	ReplaceByServer(ctx context.Context, serverID int64, entries []L4WhitelistInput) error
 }
 
 type l4WhitelistStore struct {
@@ -141,5 +142,45 @@ func (store *l4WhitelistStore) DeleteAll(ctx context.Context, serverID int64) er
 		serverID,
 	)
 	return err
+}
+
+func (store *l4WhitelistStore) ReplaceByServer(ctx context.Context, serverID int64, entries []L4WhitelistInput) error {
+	if serverID == 0 {
+		return errNotFound
+	}
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM l4_whitelist WHERE server_id = ?`, serverID); err != nil {
+		return err
+	}
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		ip := strings.TrimSpace(entry.IPAddress)
+		if ip == "" {
+			continue
+		}
+		key := strings.ToLower(ip)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO l4_whitelist (server_id, source_ip, reason)
+			VALUES (?, ?, ?)`,
+			serverID,
+			ip,
+			nullableServerString(entry.Reason),
+		); err != nil {
+			if isForeignKeyViolation(err) {
+				return errNotFound
+			}
+			return err
+		}
+	}
+	return tx.Commit()
 }
 

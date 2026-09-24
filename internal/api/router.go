@@ -38,12 +38,13 @@ func NewRouter(
 	siteListeningPorts store.SiteListeningPortStore,
 	auditLogs store.AuditLogStore,
 	apiTokens store.APITokenStore,
+	licensePlans store.LicensePlanStore,
 	certIssuer *acme.Issuer,
 ) http.Handler {
 	mux := http.NewServeMux()
 
 	agentClient := NewAgentClient(cfg)
-	registerRoutes(mux, cfg, agentClient, users, auditLogs, apiTokens, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, certIssuer)
+	registerRoutes(mux, cfg, agentClient, users, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, certIssuer)
 
 	handler := http.Handler(mux)
 	handler = withAuth(cfg, apiTokens, handler)

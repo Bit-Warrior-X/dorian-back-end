@@ -291,6 +291,7 @@ func registerRoutes(
 	users store.UserStore,
 	auditLogs store.AuditLogStore,
 	apiTokens store.APITokenStore,
+	licensePlans store.LicensePlanStore,
 	servers store.ServerStore,
 	l4 store.L4Store,
 	l4Whitelist store.L4WhitelistStore,
@@ -323,6 +324,9 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
 	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
+	mux.HandleFunc("/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts))
+	mux.HandleFunc("/api/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts))
+	mux.HandleFunc("/api/v1/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts))
 	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, l4LiveAttack, serverTrafficStats))
 	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, l4LiveAttack, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
@@ -442,6 +446,8 @@ func registerRoutes(
 	mux.HandleFunc("/api/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
 	mux.HandleFunc("/api/v1/get_whitelist_ips", getWhitelistIPsHandler(servers, l4Whitelist))
 	mux.HandleFunc("/api/v1/deploy-versions", deployLicenseVersionsHandler(cfg))
+	mux.HandleFunc("/api/v1/license-plans", licensePlansHandler(licensePlans))
+	mux.HandleFunc("/license-plans", licensePlansHandler(licensePlans))
 	mux.HandleFunc("/api/v1/servers/probe-host-versions", probeHostVersionsHandler(cfg))
 	mux.HandleFunc("/servers", serversHandler(cfg, servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, sites, blacklist))
@@ -2800,6 +2806,22 @@ func fetchDeployLicenseVersions(ctx context.Context, cfg config.Config) (deployL
 	}
 	logDeployLicenseClientf("get_versions OK count=%d", len(decoded.Versions))
 	return decoded, nil
+}
+
+func licensePlansHandler(plans store.LicensePlanStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		items, err := plans.ListActive(r.Context())
+		if err != nil {
+			log.Printf("[api] GET /license-plans: %v", err)
+			writeError(w, http.StatusInternalServerError, "failed to load license plans")
+			return
+		}
+		writeJSON(w, http.StatusOK, items)
+	}
 }
 
 func deployLicenseVersionsHandler(cfg config.Config) http.HandlerFunc {

@@ -28,6 +28,7 @@ type ListeningPortStore interface {
 	Update(ctx context.Context, serverID, portID int64, port ListeningPortInput) (ListeningPort, error)
 	Delete(ctx context.Context, serverID, portID int64) error
 	DeleteBatch(ctx context.Context, serverID int64, portIDs []int64) error
+	ReplaceByServer(ctx context.Context, serverID int64, ports []ListeningPortInput) ([]ListeningPort, error)
 }
 
 type listeningPortStore struct {
@@ -161,4 +162,84 @@ func (store *listeningPortStore) DeleteBatch(ctx context.Context, serverID int64
 	query := "DELETE FROM listening_ports WHERE id IN (" + strings.Join(placeholders, ",") + ") AND server_id = ?"
 	_, err := store.db.ExecContext(ctx, query, args...)
 	return err
+}
+
+func normalizeListeningProtocol(value string) string {
+	if strings.EqualFold(strings.TrimSpace(value), "HTTPS") {
+		return "HTTPS"
+	}
+	if strings.EqualFold(strings.TrimSpace(value), "HTTP") {
+		return "HTTP"
+	}
+	return strings.TrimSpace(value)
+}
+
+func (store *listeningPortStore) ReplaceByServer(ctx context.Context, serverID int64, ports []ListeningPortInput) ([]ListeningPort, error) {
+	if serverID == 0 {
+		return nil, errNotFound
+	}
+	existing, err := store.ListByServer(ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+
+	type key struct {
+		port     int
+		protocol string
+	}
+	existingByKey := make(map[key]ListeningPort, len(existing))
+	for _, port := range existing {
+		existingByKey[key{port: port.Port, protocol: strings.ToUpper(normalizeListeningProtocol(port.Protocol))}] = port
+	}
+
+	desiredKeys := make(map[key]struct{}, len(ports))
+	out := make([]ListeningPort, 0, len(ports))
+	for _, input := range ports {
+		if input.Port <= 0 || input.Port > 65535 {
+			continue
+		}
+		protocol := normalizeListeningProtocol(input.Protocol)
+		if protocol == "" {
+			protocol = "HTTP"
+		}
+		status := strings.TrimSpace(input.Status)
+		if status == "" {
+			status = "ENABLE"
+		}
+		k := key{port: input.Port, protocol: strings.ToUpper(protocol)}
+		if _, seen := desiredKeys[k]; seen {
+			continue
+		}
+		desiredKeys[k] = struct{}{}
+		normalized := ListeningPortInput{
+			Port:        input.Port,
+			Protocol:    protocol,
+			Description: strings.TrimSpace(input.Description),
+			Status:      status,
+		}
+		if current, ok := existingByKey[k]; ok {
+			updated, err := store.Update(ctx, serverID, current.ID, normalized)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, updated)
+			continue
+		}
+		created, err := store.Create(ctx, serverID, normalized)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, created)
+	}
+
+	var toDelete []int64
+	for k, port := range existingByKey {
+		if _, keep := desiredKeys[k]; !keep {
+			toDelete = append(toDelete, port.ID)
+		}
+	}
+	if err := store.DeleteBatch(ctx, serverID, toDelete); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
