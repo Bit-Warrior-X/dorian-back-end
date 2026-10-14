@@ -1875,6 +1875,10 @@ func siteDetailHandler(
 			}
 			preserveManagedCertificates(existing, &payload)
 			applySiteSslDefaults(&payload)
+			if err := resolveCustomCertificate(&existing, &payload); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			issueCert := shouldIssueLetsEncrypt(&existing, store.Site{
 				Domain:            payload.Domain,
 				SslType:           payload.SslType,

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -179,13 +178,11 @@ func postL7ToLoadedServer(ctx context.Context, server store.ServerView, apiPath 
 	if err != nil {
 		return err
 	}
-	url := "http://" + strings.TrimSpace(server.IP) + ":5000" + apiPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	req, err := newL7EdgeRequest(ctx, server, apiPath, body)
 	if err != nil {
 		return fmt.Errorf("build l7 request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := l7EdgeClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("l7 request failed: %w", err)
 	}

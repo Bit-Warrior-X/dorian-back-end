@@ -86,7 +86,7 @@ func humanizeDeployLicenseError(detail string) string {
 	case strings.Contains(lower, "permission denied"),
 		strings.Contains(lower, "authentication failed"),
 		strings.Contains(lower, "unable to authenticate"):
-		return d + " Verify the SSH username and password, or try a different server."
+		return d + " Verify the SSH username and password or key, or try a different server."
 	case strings.Contains(lower, "connection refused"),
 		strings.Contains(lower, "no route to host"),
 		strings.Contains(lower, "network is unreachable"),
@@ -180,7 +180,7 @@ func formatProbeHostOSError(sshUser, ip string, err error) string {
 		strings.Contains(lower, "handshake"),
 		strings.Contains(lower, "permission denied"):
 		return fmt.Sprintf(
-			"SSH authentication failed for %s: %s. Verify username/password, or try a different server.",
+			"SSH authentication failed for %s: %s. Verify the SSH username and password or key, or try a different server.",
 			target,
 			detail,
 		)

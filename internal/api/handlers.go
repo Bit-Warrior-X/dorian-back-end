@@ -182,6 +182,9 @@ func performServerCreate(
 	if strings.TrimSpace(payload.VersionUUID) == "" {
 		return store.ServerView{}, apiHTTPError(http.StatusBadRequest, "versionUuid is required")
 	}
+	if err := applySSHCredentials(payload.SSHAuthType, &payload.SSHPassword, &payload.SSHPrivateKey, &payload.SSHKeyPassphrase); err != nil {
+		return store.ServerView{}, apiHTTPError(http.StatusBadRequest, err.Error())
+	}
 	token, err := generateServerToken()
 	if err != nil {
 		log.Printf("[api] POST /servers: generate token failed: %v", err)
@@ -209,13 +212,14 @@ func performServerCreate(
 	if deployToken == "" {
 		deployToken = token
 	}
-	runtimeStatuses := probeRemoteRuntimeStatuses(
-		opCtx,
-		strings.TrimSpace(payload.IP),
-		strings.TrimSpace(payload.SSHUser),
-		strings.TrimSpace(payload.SSHPassword),
-		strings.TrimSpace(payload.SSHPort),
-	)
+	runtimeStatuses := probeRemoteRuntimeStatuses(opCtx, remotesvc.SSHTarget{
+		Host:          strings.TrimSpace(payload.IP),
+		User:          strings.TrimSpace(payload.SSHUser),
+		Password:      strings.TrimSpace(payload.SSHPassword),
+		Port:          strings.TrimSpace(payload.SSHPort),
+		PrivateKey:    strings.TrimSpace(payload.SSHPrivateKey),
+		KeyPassphrase: payload.SSHKeyPassphrase,
+	})
 	deployServiceStatus := runtimeStatuses.Angelos
 	deployL4Status := runtimeStatuses.L4
 	deployL7Status := runtimeStatuses.L7
@@ -233,21 +237,23 @@ func performServerCreate(
 	}
 	storedLicenseType := storeLicenseTypeFromDeployResponse(deployResp, payload.LicenseType)
 	created, err := servers.Create(opCtx, store.ServerInput{
-		Name:           strings.TrimSpace(payload.Name),
-		IP:             strings.TrimSpace(payload.IP),
-		Status:         rowStatus,
-		ServiceStatus:  deployServiceStatus,
-		L4Status:       deployL4Status,
-		L7Status:       deployL7Status,
-		LicenseType:    storedLicenseType,
-		LicenseFile:    strings.TrimSpace(payload.LicenseFile),
-		Version:        deployVersion,
-		OS:             deployOS,
-		SSHUser:        strings.TrimSpace(payload.SSHUser),
-		SSHPassword:    strings.TrimSpace(payload.SSHPassword),
-		SSHPort:        strings.TrimSpace(payload.SSHPort),
-		Token:          deployToken,
-		Expired:        expiredAt,
+		Name:             strings.TrimSpace(payload.Name),
+		IP:               strings.TrimSpace(payload.IP),
+		Status:           rowStatus,
+		ServiceStatus:    deployServiceStatus,
+		L4Status:         deployL4Status,
+		L7Status:         deployL7Status,
+		LicenseType:      storedLicenseType,
+		LicenseFile:      strings.TrimSpace(payload.LicenseFile),
+		Version:          deployVersion,
+		OS:               deployOS,
+		SSHUser:          strings.TrimSpace(payload.SSHUser),
+		SSHPassword:      strings.TrimSpace(payload.SSHPassword),
+		SSHPort:          strings.TrimSpace(payload.SSHPort),
+		SSHPrivateKey:    strings.TrimSpace(payload.SSHPrivateKey),
+		SSHKeyPassphrase: payload.SSHKeyPassphrase,
+		Token:            deployToken,
+		Expired:          expiredAt,
 	})
 	if err != nil {
 		log.Printf("[api] POST /servers: DB Create failed: %v", err)
@@ -289,6 +295,8 @@ func registerRoutes(
 	cfg config.Config,
 	agentClient *AgentClient,
 	users store.UserStore,
+	mfa store.MFAStore,
+	loginThrottle store.LoginThrottleStore,
 	auditLogs store.AuditLogStore,
 	apiTokens store.APITokenStore,
 	licensePlans store.LicensePlanStore,
@@ -417,24 +425,38 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/analytics/l4/attacks/recent", l4AnalyticsRecentAttacksHandler(l4AttackStats, sites))
 	mux.HandleFunc("/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats, sites))
 	mux.HandleFunc("/api/v1/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats, sites))
-	mux.HandleFunc("/auth/login", loginHandler(cfg, users, auditLogs))
-	mux.HandleFunc("/api/v1/auth/login", loginHandler(cfg, users, auditLogs))
+	mux.HandleFunc("/auth/login", loginHandler(cfg, users, mfa, loginThrottle, auditLogs))
+	mux.HandleFunc("/api/v1/auth/login", loginHandler(cfg, users, mfa, loginThrottle, auditLogs))
+	mux.HandleFunc("/auth/login/mfa", loginMFAHandler(cfg, users, mfa, loginThrottle, auditLogs))
+	mux.HandleFunc("/api/v1/auth/login/mfa", loginMFAHandler(cfg, users, mfa, loginThrottle, auditLogs))
+	mux.HandleFunc("/auth/mfa", mfaStatusHandler(mfa))
+	mux.HandleFunc("/api/v1/auth/mfa", mfaStatusHandler(mfa))
+	mux.HandleFunc("/auth/mfa/setup", mfaSetupHandler(mfa))
+	mux.HandleFunc("/api/v1/auth/mfa/setup", mfaSetupHandler(mfa))
+	mux.HandleFunc("/auth/mfa/enable", mfaEnableHandler(mfa))
+	mux.HandleFunc("/api/v1/auth/mfa/enable", mfaEnableHandler(mfa))
+	mux.HandleFunc("/auth/mfa/disable", mfaDisableHandler(mfa, loginThrottle))
+	mux.HandleFunc("/api/v1/auth/mfa/disable", mfaDisableHandler(mfa, loginThrottle))
+	mux.HandleFunc("/auth/mfa/recovery-codes", mfaRecoveryCodesHandler(mfa, loginThrottle))
+	mux.HandleFunc("/api/v1/auth/mfa/recovery-codes", mfaRecoveryCodesHandler(mfa, loginThrottle))
+	mux.HandleFunc("DELETE /users/{id}/mfa", requireAdmin(adminResetMFAHandler(mfa)))
+	mux.HandleFunc("DELETE /api/v1/users/{id}/mfa", requireAdmin(adminResetMFAHandler(mfa)))
 	mux.HandleFunc("/auth/logout", logoutHandler(auditLogs))
 	mux.HandleFunc("/api/v1/auth/logout", logoutHandler(auditLogs))
 	mux.HandleFunc("/auth/oauth/providers", oauthProvidersHandler(cfg))
 	mux.HandleFunc("/api/v1/auth/oauth/providers", oauthProvidersHandler(cfg))
 	mux.HandleFunc("/auth/oauth/google/start", googleOAuthStartHandler(cfg))
 	mux.HandleFunc("/api/v1/auth/oauth/google/start", googleOAuthStartHandler(cfg))
-	mux.HandleFunc("/auth/oauth/google/callback", googleOAuthCallbackHandler(cfg, users, auditLogs))
-	mux.HandleFunc("/api/v1/auth/oauth/google/callback", googleOAuthCallbackHandler(cfg, users, auditLogs))
+	mux.HandleFunc("/auth/oauth/google/callback", googleOAuthCallbackHandler(cfg, users, mfa, auditLogs))
+	mux.HandleFunc("/api/v1/auth/oauth/google/callback", googleOAuthCallbackHandler(cfg, users, mfa, auditLogs))
 	mux.HandleFunc("/auth/oauth/github/start", githubOAuthStartHandler(cfg))
 	mux.HandleFunc("/api/v1/auth/oauth/github/start", githubOAuthStartHandler(cfg))
-	mux.HandleFunc("/auth/oauth/github/callback", githubOAuthCallbackHandler(cfg, users, auditLogs))
-	mux.HandleFunc("/api/v1/auth/oauth/github/callback", githubOAuthCallbackHandler(cfg, users, auditLogs))
+	mux.HandleFunc("/auth/oauth/github/callback", githubOAuthCallbackHandler(cfg, users, mfa, auditLogs))
+	mux.HandleFunc("/api/v1/auth/oauth/github/callback", githubOAuthCallbackHandler(cfg, users, mfa, auditLogs))
 	mux.HandleFunc("/auth/oauth/sso/start", ssoOAuthStartHandler(cfg))
 	mux.HandleFunc("/api/v1/auth/oauth/sso/start", ssoOAuthStartHandler(cfg))
-	mux.HandleFunc("/auth/oauth/sso/callback", ssoOAuthCallbackHandler(cfg, users, auditLogs))
-	mux.HandleFunc("/api/v1/auth/oauth/sso/callback", ssoOAuthCallbackHandler(cfg, users, auditLogs))
+	mux.HandleFunc("/auth/oauth/sso/callback", ssoOAuthCallbackHandler(cfg, users, mfa, auditLogs))
+	mux.HandleFunc("/api/v1/auth/oauth/sso/callback", ssoOAuthCallbackHandler(cfg, users, mfa, auditLogs))
 	mux.HandleFunc("/auth/api-tokens", apiTokensHandler(apiTokens))
 	mux.HandleFunc("/api/v1/auth/api-tokens", apiTokensHandler(apiTokens))
 	mux.HandleFunc("/auth/api-tokens/", apiTokenDetailHandler(apiTokens))
@@ -455,10 +477,10 @@ func registerRoutes(
 	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
 	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
 	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
-	mux.HandleFunc("/servers/", serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings))
-	mux.HandleFunc("/users", requireAdmin(usersHandler(users)))
+	mux.HandleFunc("/servers/", restrictServerDetail(serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings)))
+	mux.HandleFunc("/users", requireAdmin(usersHandler(users, mfa)))
 	mux.HandleFunc("/users/", requireAdminOrSelfUser(userHandler(users)))
-	mux.HandleFunc("/api/v1/users", requireAdmin(usersHandler(users)))
+	mux.HandleFunc("/api/v1/users", requireAdmin(usersHandler(users, mfa)))
 	mux.HandleFunc("/api/v1/users/", requireAdminOrSelfUser(userHandler(users)))
 	l7Deps := siteL7Stores{
 		wafWhitelist:       wafWhitelist,
@@ -486,7 +508,7 @@ func registerRoutes(
 		})
 	}
 	mux.HandleFunc("/sites", sitesHandler(sites, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, certIssuer))
-	mux.HandleFunc("/sites/", siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, certIssuer))
+	mux.HandleFunc("/sites/", restrictSiteDetail(sites, siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, certIssuer)))
 	mux.HandleFunc("/waf-rules", wafRulesHandler(wafRules))
 	mux.HandleFunc("/waf-rules/", wafRuleDetailHandler(wafRules, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent))
 }
@@ -704,7 +726,7 @@ func reportXdpHandler(
 			}
 			title, description, ok := buildSecurityEvent(payload)
 			if ok {
-				if err := securityEvents.Create(r.Context(), title, description); err != nil {
+				if err := securityEvents.Create(r.Context(), server.ID, title, description); err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to store security event")
 					return
 				}
@@ -719,7 +741,7 @@ func reportXdpHandler(
 			return
 		}
 
-		if err := securityEvents.Create(r.Context(), title, description); err != nil {
+		if err := securityEvents.Create(r.Context(), server.ID, title, description); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to store security event")
 			return
 		}
@@ -814,40 +836,57 @@ func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, s
 			return
 		}
 
-		totalUsers, err := users.Count(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load users total")
-			return
-		}
+		ctx := r.Context()
+		viewer := viewerScopeFromContext(ctx)
+		trafficScope := store.TrafficScope{ServerIDs: viewer.serverIDs, Restricted: viewer.restricted}
 
-		totalServers, err := servers.Count(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load servers total")
-			return
-		}
-
-		activeServers, err := servers.CountActiveRuntime(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load active servers")
-			return
-		}
-
-		totalSites, err := sites.Count(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load sites total")
-			return
-		}
-
-		activeSites, err := sites.CountActive(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load active sites")
-			return
-		}
-
-		blockedIps, err := blacklist.Count(r.Context())
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load blocked ips")
-			return
+		var totalUsers, totalServers, activeServers, totalSites, activeSites, blockedIps int64
+		var err error
+		if viewer.restricted {
+			// Normal users only see their own edges; the user count is admin information.
+			if totalServers, activeServers, err = servers.CountScoped(ctx, viewer.serverIDs); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load servers total")
+				return
+			}
+			if totalSites, activeSites, err = sites.CountScoped(ctx, viewer.serverIDs); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load sites total")
+				return
+			}
+			entries, listErr := blacklist.List(ctx, 0, 0)
+			if listErr != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load blocked ips")
+				return
+			}
+			for _, entry := range entries {
+				if viewer.canSeeServer(entry.ServerID) {
+					blockedIps++
+				}
+			}
+		} else {
+			if totalUsers, err = users.Count(ctx); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load users total")
+				return
+			}
+			if totalServers, err = servers.Count(ctx); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load servers total")
+				return
+			}
+			if activeServers, err = servers.CountActiveRuntime(ctx); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load active servers")
+				return
+			}
+			if totalSites, err = sites.Count(ctx); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load sites total")
+				return
+			}
+			if activeSites, err = sites.CountActive(ctx); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load active sites")
+				return
+			}
+			if blockedIps, err = blacklist.Count(ctx); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load blocked ips")
+				return
+			}
 		}
 
 		now := time.Now()
@@ -855,25 +894,32 @@ func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, s
 		startOfNextMonth := startOfMonth.AddDate(0, 1, 0)
 		startOfPreviousMonth := startOfMonth.AddDate(0, -1, 0)
 
-		l4ThisMonth, err := l4LiveAttack.CountBetween(r.Context(), startOfMonth, startOfNextMonth)
+		countL4 := func(start, end time.Time) (int64, error) {
+			if viewer.restricted {
+				return l4LiveAttack.CountBetweenForServers(ctx, start, end, viewer.serverIDs)
+			}
+			return l4LiveAttack.CountBetween(ctx, start, end)
+		}
+
+		l4ThisMonth, err := countL4(startOfMonth, startOfNextMonth)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load l4 attacks this month")
 			return
 		}
 
-		l4PreviousMonth, err := l4LiveAttack.CountBetween(r.Context(), startOfPreviousMonth, startOfMonth)
+		l4PreviousMonth, err := countL4(startOfPreviousMonth, startOfMonth)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load l4 attacks previous month")
 			return
 		}
 
-		l7ThisMonth, err := trafficStats.SumBlockedRequests(r.Context(), startOfMonth, startOfNextMonth)
+		l7ThisMonth, err := trafficStats.SumBlockedRequests(ctx, startOfMonth, startOfNextMonth, trafficScope)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load l7 threats this month")
 			return
 		}
 
-		l7PreviousMonth, err := trafficStats.SumBlockedRequests(r.Context(), startOfPreviousMonth, startOfMonth)
+		l7PreviousMonth, err := trafficStats.SumBlockedRequests(ctx, startOfPreviousMonth, startOfMonth, trafficScope)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load l7 threats previous month")
 			return
@@ -908,7 +954,9 @@ func dashboardSecurityEventsHandler(securityEvents store.SecurityEventStore) htt
 			}
 		}
 
-		events, err := securityEvents.ListRecent(r.Context(), limit)
+		viewer := viewerScopeFromContext(r.Context())
+		events, err := securityEvents.ListRecent(r.Context(), limit,
+			store.TrafficScope{ServerIDs: viewer.serverIDs, Restricted: viewer.restricted})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load security events")
 			return
@@ -978,8 +1026,8 @@ func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, site
 		rangeValue := parseBandwidthRange(r.URL.Query().Get("range"))
 		scope, err := parseDashboardScope(r, sites)
 		if err != nil {
-			if err.Error() == "site not found" {
-				writeError(w, http.StatusNotFound, "site not found")
+			if isScopeNotFound(err) {
+				writeError(w, http.StatusNotFound, err.Error())
 				return
 			}
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -1031,8 +1079,8 @@ func dashboardRequestResponseHandler(stats store.ServerTrafficStatsStore, sites 
 		rangeValue := parseTrafficRange(r.URL.Query().Get("range"))
 		scope, err := parseDashboardScope(r, sites)
 		if err != nil {
-			if err.Error() == "site not found" {
-				writeError(w, http.StatusNotFound, "site not found")
+			if isScopeNotFound(err) {
+				writeError(w, http.StatusNotFound, err.Error())
 				return
 			}
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -1062,8 +1110,8 @@ func dashboardStatusCodesHandler(stats store.ServerTrafficStatsStore, sites stor
 		rangeValue := parseTrafficRange(r.URL.Query().Get("range"))
 		scope, err := parseDashboardScope(r, sites)
 		if err != nil {
-			if err.Error() == "site not found" {
-				writeError(w, http.StatusNotFound, "site not found")
+			if isScopeNotFound(err) {
+				writeError(w, http.StatusNotFound, err.Error())
 				return
 			}
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -1157,7 +1205,15 @@ func parseDashboardScope(r *http.Request, sites store.SiteStore) (store.TrafficS
 		return store.TrafficScope{}, err
 	}
 
-	scope := store.TrafficScope{ServerID: serverID}
+	viewer := viewerScopeFromContext(r.Context())
+	if serverID > 0 && !viewer.canSeeServer(serverID) {
+		return store.TrafficScope{}, errScopeServerNotFound
+	}
+
+	scope := store.TrafficScope{ServerID: serverID, Restricted: viewer.restricted}
+	if serverID == 0 && viewer.restricted {
+		scope.ServerIDs = viewer.serverIDs
+	}
 
 	rawSiteID := strings.TrimSpace(r.URL.Query().Get("siteId"))
 	if rawSiteID == "" || rawSiteID == "all" {
@@ -1172,15 +1228,18 @@ func parseDashboardScope(r *http.Request, sites store.SiteStore) (store.TrafficS
 	site, err := sites.Get(r.Context(), siteID)
 	if err != nil {
 		if store.IsNotFound(err) {
-			return store.TrafficScope{}, fmt.Errorf("site not found")
+			return store.TrafficScope{}, errScopeSiteNotFound
 		}
 		return store.TrafficScope{}, err
+	}
+	if !viewer.canSeeSite(site) {
+		return store.TrafficScope{}, errScopeSiteNotFound
 	}
 
 	scope.SiteID = siteID
 	scope.Domain = site.Domain
 	if scope.ServerID == 0 {
-		scope.ServerIDs = site.ServerIDs
+		scope.ServerIDs = viewer.visibleServerIDs(site.ServerIDs)
 	}
 
 	return scope, nil
@@ -1194,8 +1253,8 @@ func parseAnalyticsScope(w http.ResponseWriter, r *http.Request, sites store.Sit
 	}
 	scope, err := parseDashboardScope(r, sites)
 	if err != nil {
-		if err.Error() == "site not found" {
-			writeError(w, http.StatusNotFound, "site not found")
+		if isScopeNotFound(err) {
+			writeError(w, http.StatusNotFound, err.Error())
 			return store.TrafficScope{}, time.Time{}, time.Time{}, false
 		}
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -1993,8 +2052,8 @@ func securityAnalyticsTopReferersHandler(stats store.ServerTrafficStatsStore, si
 		}
 		scope, err := parseDashboardScope(r, sites)
 		if err != nil {
-			if err.Error() == "site not found" {
-				writeError(w, http.StatusNotFound, "site not found")
+			if isScopeNotFound(err) {
+				writeError(w, http.StatusNotFound, err.Error())
 				return
 			}
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -2033,8 +2092,8 @@ func securityAnalyticsTopUserAgentsHandler(stats store.ServerTrafficStatsStore, 
 		}
 		scope, err := parseDashboardScope(r, sites)
 		if err != nil {
-			if err.Error() == "site not found" {
-				writeError(w, http.StatusNotFound, "site not found")
+			if isScopeNotFound(err) {
+				writeError(w, http.StatusNotFound, err.Error())
 				return
 			}
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -2073,8 +2132,8 @@ func dashboardTopDomainsHandler(stats store.ServerTrafficStatsStore, sites store
 		}
 		scope, err := parseDashboardScope(r, sites)
 		if err != nil {
-			if err.Error() == "site not found" {
-				writeError(w, http.StatusNotFound, "site not found")
+			if isScopeNotFound(err) {
+				writeError(w, http.StatusNotFound, err.Error())
 				return
 			}
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -2289,7 +2348,7 @@ func parseTimeValue(value string) (time.Time, error) {
 	return time.Time{}, errors.New("invalid time format")
 }
 
-func loginHandler(cfg config.Config, users store.UserStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func loginHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, throttle store.LoginThrottleStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2309,9 +2368,17 @@ func loginHandler(cfg config.Config, users store.UserStore, auditLogs store.Audi
 			return
 		}
 
+		ip := clientIPFromRequest(r)
+		if wait := loginRetryAfter(r.Context(), throttle, ip, email); wait > 0 {
+			logLoginAttempt(r.Context(), auditLogs, r, store.User{Email: email}, false, http.StatusTooManyRequests, "Login attempt while locked out")
+			writeTooManyAttempts(w, wait)
+			return
+		}
+
 		user, err := users.FindByCredentials(r.Context(), email, password)
 		if err != nil {
 			if store.IsNotFound(err) {
+				recordLoginFailure(r.Context(), throttle, ip, email)
 				logLoginAttempt(r.Context(), auditLogs, r, store.User{Email: email}, false, http.StatusUnauthorized, "Invalid email or password")
 				writeJSON(w, http.StatusUnauthorized, errorResponse{
 					Error:   "unauthorized",
@@ -2341,25 +2408,27 @@ func loginHandler(cfg config.Config, users store.UserStore, auditLogs store.Audi
 			return
 		}
 
-		ttl := time.Duration(cfg.JWTTTLHours) * time.Hour
-		token, err := auth.IssueUserToken(auth.UserIdentity{
-			ID:    user.ID,
-			Email: user.Email,
-			Name:  user.Name,
-			Role:  user.Role,
-		}, cfg.JWTSecret, ttl)
+		needsMFA, err := mfaRequiredForUser(r.Context(), mfa, user.ID)
 		if err != nil {
-			log.Printf("[auth] failed to issue jwt for user=%d: %v", user.ID, err)
-			writeError(w, http.StatusInternalServerError, "failed to issue session token")
+			log.Printf("[auth] 2fa status lookup failed user=%d: %v", user.ID, err)
+			writeError(w, http.StatusInternalServerError, "failed to authenticate")
+			return
+		}
+		if needsMFA {
+			challenge, err := auth.IssueMFAChallengeToken(user.ID, cfg.JWTSecret, mfaChallengeTTL)
+			if err != nil {
+				log.Printf("[auth] failed to issue 2fa challenge for user=%d: %v", user.ID, err)
+				writeError(w, http.StatusInternalServerError, "failed to authenticate")
+				return
+			}
+			writeJSON(w, http.StatusOK, loginMFARequiredResponse{MFARequired: true, MFAToken: challenge})
 			return
 		}
 
-		logLoginAttempt(r.Context(), auditLogs, r, user, true, http.StatusOK, "Successful login")
-
-		writeJSON(w, http.StatusOK, loginResponse{
-			Token: token,
-			User:  userShape{ID: user.ID, Email: user.Email, Role: user.Role, Name: user.Name},
-		})
+		if issueSessionResponse(w, cfg, user) {
+			recordLoginSuccess(r.Context(), throttle, email)
+			logLoginAttempt(r.Context(), auditLogs, r, user, true, http.StatusOK, "Successful login")
+		}
 	}
 }
 
@@ -2372,7 +2441,7 @@ func serversHandler(cfg config.Config, servers store.ServerStore) http.HandlerFu
 				writeError(w, http.StatusInternalServerError, "failed to load servers")
 				return
 			}
-			writeJSON(w, http.StatusOK, list)
+			writeJSON(w, http.StatusOK, viewerScopeFromContext(r.Context()).filterServers(list))
 		case http.MethodPost:
 			var payload serverCreatePayload
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -2458,19 +2527,23 @@ type serverUsersPayload struct {
 }
 
 type serverCreatePayload struct {
-	Name           string  `json:"name"`
-	IP             string  `json:"ip"`
-	Status         string  `json:"status"`
-	LicenseType    string  `json:"licenseType"`
-	BillingPeriod  string  `json:"billingPeriod"`
-	LicenseFile    string  `json:"licenseFile"`
-	Version        string  `json:"version"`
-	VersionUUID    string  `json:"versionUuid"`
-	OS             string  `json:"os"`
-	SSHUser        string  `json:"sshUser"`
-	SSHPassword    string  `json:"sshPassword"`
-	SSHPort        string  `json:"sshPort"`
-	UserIDs        []int64 `json:"userIds"`
+	Name          string  `json:"name"`
+	IP            string  `json:"ip"`
+	Status        string  `json:"status"`
+	LicenseType   string  `json:"licenseType"`
+	BillingPeriod string  `json:"billingPeriod"`
+	LicenseFile   string  `json:"licenseFile"`
+	Version       string  `json:"version"`
+	VersionUUID   string  `json:"versionUuid"`
+	OS            string  `json:"os"`
+	SSHUser       string  `json:"sshUser"`
+	SSHPassword   string  `json:"sshPassword"`
+	SSHPort       string  `json:"sshPort"`
+	UserIDs       []int64 `json:"userIds"`
+	// SSHAuthType is "password" or "key"; only the chosen credential is stored.
+	SSHAuthType      string `json:"sshAuthType"`
+	SSHPrivateKey    string `json:"sshPrivateKey"`
+	SSHKeyPassphrase string `json:"sshKeyPassphrase"`
 }
 
 type deployCreateServerRequest struct {
@@ -2478,6 +2551,7 @@ type deployCreateServerRequest struct {
 	IP            string `json:"ip"`
 	User          string `json:"user"`
 	Pass          string `json:"pass"`
+	SSHKey        string `json:"ssh_key,omitempty"`
 	SSHPort       string `json:"ssh_port"`
 	LicenseType   string `json:"license_type"`
 	LicenseString string `json:"license_string,omitempty"`
@@ -2651,11 +2725,16 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 	if sshPort == "" {
 		sshPort = "22"
 	}
+	sshKey, err := remotesvc.UnencryptedPrivateKeyPEM(payload.SSHPrivateKey, payload.SSHKeyPassphrase)
+	if err != nil {
+		return deployCreateServerResponse{}, apiHTTPError(http.StatusBadRequest, err.Error())
+	}
 	reqPayload := deployCreateServerRequest{
 		Name:          strings.TrimSpace(payload.Name),
 		IP:            strings.TrimSpace(payload.IP),
 		User:          strings.TrimSpace(payload.SSHUser),
 		Pass:          strings.TrimSpace(payload.SSHPassword),
+		SSHKey:        sshKey,
 		SSHPort:       sshPort,
 		LicenseType:   deployLicenseServiceLicenseType(payload.LicenseType),
 		LicenseString: strings.TrimSpace(payload.LicenseFile),
@@ -2841,10 +2920,13 @@ func deployLicenseVersionsHandler(cfg config.Config) http.HandlerFunc {
 }
 
 type probeHostVersionsRequest struct {
-	IP          string `json:"ip"`
-	SSHUser     string `json:"sshUser"`
-	SSHPassword string `json:"sshPassword"`
-	SSHPort     string `json:"sshPort"`
+	IP               string `json:"ip"`
+	SSHUser          string `json:"sshUser"`
+	SSHPassword      string `json:"sshPassword"`
+	SSHPort          string `json:"sshPort"`
+	SSHAuthType      string `json:"sshAuthType"`
+	SSHPrivateKey    string `json:"sshPrivateKey"`
+	SSHKeyPassphrase string `json:"sshKeyPassphrase"`
 }
 
 type probeHostVersionsResponse struct {
@@ -2885,18 +2967,25 @@ func probeHostVersionsHandler(cfg config.Config) http.HandlerFunc {
 		sshUser := strings.TrimSpace(payload.SSHUser)
 		sshPass := strings.TrimSpace(payload.SSHPassword)
 		sshPort := strings.TrimSpace(payload.SSHPort)
-		if ip == "" || sshUser == "" || sshPass == "" {
-			writeError(w, http.StatusBadRequest, "ip, sshUser, and sshPassword are required")
+		if ip == "" || sshUser == "" {
+			writeError(w, http.StatusBadRequest, "ip and sshUser are required")
+			return
+		}
+		sshKey := payload.SSHPrivateKey
+		if err := applySSHCredentials(payload.SSHAuthType, &sshPass, &sshKey, &payload.SSHKeyPassphrase); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 
 		probeCtx, cancelProbe := context.WithTimeout(r.Context(), 45*time.Second)
 		defer cancelProbe()
 		hostOS, err := remotesvc.DetectHostOS(probeCtx, remotesvc.SSHTarget{
-			Host:     ip,
-			User:     sshUser,
-			Password: sshPass,
-			Port:     sshPort,
+			Host:          ip,
+			User:          sshUser,
+			Password:      sshPass,
+			Port:          sshPort,
+			PrivateKey:    sshKey,
+			KeyPassphrase: payload.SSHKeyPassphrase,
 		})
 		if err != nil {
 			log.Printf("[api] POST /api/v1/servers/probe-host-versions: detect os failed ip=%q sshUser=%q: %v",
@@ -2928,6 +3017,7 @@ type deployUpgradeVersionRequest struct {
 	IP          string `json:"ip"`
 	User        string `json:"user"`
 	Pass        string `json:"pass"`
+	SSHKey      string `json:"ssh_key,omitempty"`
 	SSHPort     string `json:"ssh_port"`
 	Token       string `json:"token"`
 	VersionUUID string `json:"version_uuid"`
@@ -2944,11 +3034,16 @@ func deployLicenseUpgradeVersion(ctx context.Context, cfg config.Config, view st
 		logDeployLicenseClientf("abort: invalid base URL (upgrade_version) err=%v", err)
 		return deployCreateServerResponse{}, errors.New("deploy license base url is invalid")
 	}
+	sshKey, err := remotesvc.UnencryptedPrivateKeyPEM(view.SSHPrivateKey, view.SSHKeyPassphrase)
+	if err != nil {
+		return deployCreateServerResponse{}, fmt.Errorf("stored %w", err)
+	}
 	reqPayload := deployUpgradeVersionRequest{
 		Name:        strings.TrimSpace(view.Name),
 		IP:          strings.TrimSpace(view.IP),
 		User:        strings.TrimSpace(view.SSHUser),
 		Pass:        strings.TrimSpace(view.SSHPassword),
+		SSHKey:      sshKey,
 		SSHPort:     strings.TrimSpace(view.SSHPort),
 		Token:       strings.TrimSpace(view.Token),
 		VersionUUID: strings.TrimSpace(versionUUID),
@@ -2997,6 +3092,7 @@ type deployUpgradeLicenseRequest struct {
 	IP            string `json:"ip"`
 	User          string `json:"user"`
 	Pass          string `json:"pass"`
+	SSHKey        string `json:"ssh_key,omitempty"`
 	SSHPort       string `json:"ssh_port"`
 	Token         string `json:"token"`
 	LicenseType   string `json:"license_type"`
@@ -3014,11 +3110,16 @@ func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view st
 		logDeployLicenseClientf("abort: invalid base URL (upgrade_license) err=%v", err)
 		return deployCreateServerResponse{}, errors.New("deploy license base url is invalid")
 	}
+	sshKey, err := remotesvc.UnencryptedPrivateKeyPEM(view.SSHPrivateKey, view.SSHKeyPassphrase)
+	if err != nil {
+		return deployCreateServerResponse{}, fmt.Errorf("stored %w", err)
+	}
 	reqPayload := deployUpgradeLicenseRequest{
 		Name:          strings.TrimSpace(view.Name),
 		IP:            strings.TrimSpace(view.IP),
 		User:          strings.TrimSpace(view.SSHUser),
 		Pass:          strings.TrimSpace(view.SSHPassword),
+		SSHKey:        sshKey,
 		SSHPort:       strings.TrimSpace(view.SSHPort),
 		Token:         strings.TrimSpace(view.Token),
 		LicenseType:   deployLicenseServiceLicenseType(licenseType),
@@ -3077,13 +3178,7 @@ func handleServerRefreshRuntimeStatus(w http.ResponseWriter, r *http.Request, cf
 		writeError(w, http.StatusInternalServerError, "failed to load server")
 		return
 	}
-	runtimeStatuses := probeRemoteRuntimeStatuses(
-		r.Context(),
-		view.IP,
-		view.SSHUser,
-		view.SSHPassword,
-		view.SSHPort,
-	)
+	runtimeStatuses := probeRemoteRuntimeStatuses(r.Context(), sshTargetFromView(view))
 	tok := strings.TrimSpace(view.Token)
 	if err := servers.UpdateDeploymentData(
 		r.Context(),
@@ -3171,13 +3266,7 @@ func handleServerUpgrade(w http.ResponseWriter, r *http.Request, cfg config.Conf
 		writeError(w, http.StatusBadGateway, "deploy license returned invalid expire_date")
 		return
 	}
-	runtimeStatuses := probeRemoteRuntimeStatuses(
-		r.Context(),
-		view.IP,
-		view.SSHUser,
-		view.SSHPassword,
-		view.SSHPort,
-	)
+	runtimeStatuses := probeRemoteRuntimeStatuses(r.Context(), sshTargetFromView(view))
 	deployServiceStatus := runtimeStatuses.Angelos
 	deployL4Status := runtimeStatuses.L4
 	deployL7Status := runtimeStatuses.L7
@@ -3255,13 +3344,7 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 		expireRaw = strings.TrimSpace(deployResp.ExpireDate)
 	}
 	expiredAt := resolveDeployExpireDate(expireRaw, licenseType, billingPeriod, time.Now())
-	runtimeStatuses := probeRemoteRuntimeStatuses(
-		r.Context(),
-		view.IP,
-		view.SSHUser,
-		view.SSHPassword,
-		view.SSHPort,
-	)
+	runtimeStatuses := probeRemoteRuntimeStatuses(r.Context(), sshTargetFromView(view))
 	deployServiceStatus := runtimeStatuses.Angelos
 	deployL4Status := runtimeStatuses.L4
 	deployL7Status := runtimeStatuses.L7
@@ -3316,6 +3399,13 @@ type serverUpdatePayload struct {
 	SSHUser     string `json:"sshUser"`
 	SSHPassword string `json:"sshPassword"`
 	SSHPort     string `json:"sshPort"`
+	// ResetSSHHostKey re-trusts whatever key the edge presents next (after a reinstall).
+	ResetSSHHostKey bool `json:"resetSshHostKey"`
+	// SSHAuthType "password" or "key" switches the edge's credential and deletes the
+	// other one; blank keeps the current type. Blank secrets keep the stored value.
+	SSHAuthType      string `json:"sshAuthType"`
+	SSHPrivateKey    string `json:"sshPrivateKey"`
+	SSHKeyPassphrase string `json:"sshKeyPassphrase"`
 }
 
 type wafWhitelistPayload struct {
@@ -3452,16 +3542,16 @@ type listeningPortBatchPayload struct {
 }
 
 type cacheRulePayload struct {
-	RuleName         string `json:"ruleName"`
-	RuleType         string `json:"ruleType"`
-	CachingTime      int    `json:"cachingTime"`
-	URL              string `json:"url"`
-	FileTypes        string `json:"fileTypes"`
-	Priority         int    `json:"priority"`
+	RuleName         string  `json:"ruleName"`
+	RuleType         string  `json:"ruleType"`
+	CachingTime      int     `json:"cachingTime"`
+	URL              string  `json:"url"`
+	FileTypes        string  `json:"fileTypes"`
+	Priority         int     `json:"priority"`
 	CacheSlice       float64 `json:"cacheSlice"`
-	WithoutParameter string `json:"withoutParameter"`
-	CacheMode        string `json:"cacheMode"`
-	Status           string `json:"status"`
+	WithoutParameter string  `json:"withoutParameter"`
+	CacheMode        string  `json:"cacheMode"`
+	Status           string  `json:"status"`
 }
 
 type cacheRuleBatchPayload struct {
@@ -3532,6 +3622,15 @@ func serverBlacklistHandler(servers store.ServerStore, sites store.SiteStore, bl
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to load blacklist entries")
 					return
+				}
+				if viewer := viewerScopeFromContext(r.Context()); viewer.restricted {
+					visible := make([]store.BlacklistEntry, 0, len(list))
+					for _, entry := range list {
+						if viewer.canSeeServer(entry.ServerID) {
+							visible = append(visible, entry)
+						}
+					}
+					list = visible
 				}
 				writeJSON(w, http.StatusOK, list)
 			case http.MethodPost:
@@ -3931,14 +4030,12 @@ func callL7UpdateTemporaryBlacklist(ctx context.Context, servers store.ServerSto
 		return fmt.Errorf("encode l7 temporary blacklist payload: %w", err)
 	}
 
-	l7TemporaryBlacklistUpdateURL := "http://" + strings.TrimSpace(server.IP) + ":5000/API/L7/l7_update_temporaryblacklist"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, l7TemporaryBlacklistUpdateURL, bytes.NewReader(body))
+	req, err := newL7EdgeRequest(ctx, server, "/API/L7/l7_update_temporaryblacklist", body)
 	if err != nil {
 		return fmt.Errorf("build l7_update_temporaryblacklist request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := l7EdgeClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("l7_update_temporaryblacklist request failed: %w", err)
 	}
@@ -4020,8 +4117,6 @@ type upstreamServerPayloadL7 struct {
 	Description string `json:"description"`
 }
 
-
-
 // callL7UpdateUpstreamServers loads all upstream servers for the given server
 // and sends them to api_parser via the l7_update_upstreamservers API using POST.
 
@@ -4050,8 +4145,6 @@ type listeningPortPayloadL7 struct {
 	Description string `json:"description"`
 	Status      string `json:"status"`
 }
-
-
 
 // callL7UpdateListeningPorts loads all listening ports for the given server
 // and sends them to api_parser via the l7_update_listeningports API using POST.
@@ -4085,8 +4178,6 @@ func compressSettingsToL7Payload(settings store.CompressSettings) compressPayloa
 	}
 }
 
-
-
 // l7CacheRulesUpdatePayload is sent to api_parser's
 // /API/L7/l7_update_cacherules endpoint when cache rules change.
 type l7CacheRulesUpdatePayload struct {
@@ -4097,28 +4188,24 @@ type l7CacheRulesUpdatePayload struct {
 
 // cacheRulePayloadL7 is the per-rule shape expected by api_parser.
 type cacheRulePayloadL7 struct {
-	ID               int64  `json:"id"`
-	ServerID         int64  `json:"serverId"`
-	RuleName         string `json:"rule_name"`
-	RuleType         string `json:"rule_type"`
-	CachingTime      int    `json:"caching_time"`
-	URL              string `json:"url"`
-	FileTypes        string `json:"file_types"`
-	Priority         int    `json:"priority"`
+	ID               int64   `json:"id"`
+	ServerID         int64   `json:"serverId"`
+	RuleName         string  `json:"rule_name"`
+	RuleType         string  `json:"rule_type"`
+	CachingTime      int     `json:"caching_time"`
+	URL              string  `json:"url"`
+	FileTypes        string  `json:"file_types"`
+	Priority         int     `json:"priority"`
 	CacheSlice       float64 `json:"cache_slice"`
-	WithoutParameter string `json:"without_parameter"`
-	CacheMode        string `json:"cache_mode"`
-	Status           string `json:"status"`
+	WithoutParameter string  `json:"without_parameter"`
+	CacheMode        string  `json:"cache_mode"`
+	Status           string  `json:"status"`
 }
-
-
-
 
 type l7CacheActionPayload struct {
 	ServerID int64 `json:"serverId"`
 	SiteID   int64 `json:"siteId"`
 }
-
 
 func normalizeClearUrlCacheMatchType(matchType string) (string, string) {
 	switch strings.ToLower(strings.TrimSpace(matchType)) {
@@ -4173,7 +4260,6 @@ func clearUrlCacheMatchTypeToL7(matchType string) (int, string) {
 		return 0, "match type must be prefix, exact, or advanced"
 	}
 }
-
 
 func cacheRulePayloadToInput(payload cacheRulePayload) (store.CacheRuleInput, string) {
 	ruleName := store.NormalizeCacheRuleName(payload.RuleName)
@@ -5126,16 +5212,34 @@ func serverDetailHandler(
 				writeError(w, http.StatusBadRequest, "invalid JSON body")
 				return
 			}
+			before, err := servers.GetView(r.Context(), serverID)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusNotFound, "server not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load server")
+				return
+			}
+			creds, err := resolveSSHCredentialUpdate(before, payload)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			if err := servers.Update(r.Context(), serverID, store.ServerInput{
-				Name:        strings.TrimSpace(payload.Name),
-				IP:          strings.TrimSpace(payload.IP),
-				Status:      strings.TrimSpace(payload.Status),
-				LicenseType: strings.TrimSpace(payload.LicenseType),
-				LicenseFile: strings.TrimSpace(payload.LicenseFile),
-				Version:     strings.TrimSpace(payload.Version),
-				SSHUser:     strings.TrimSpace(payload.SSHUser),
-				SSHPassword: strings.TrimSpace(payload.SSHPassword),
-				SSHPort:     strings.TrimSpace(payload.SSHPort),
+				Name:             strings.TrimSpace(payload.Name),
+				IP:               strings.TrimSpace(payload.IP),
+				Status:           strings.TrimSpace(payload.Status),
+				LicenseType:      strings.TrimSpace(payload.LicenseType),
+				LicenseFile:      strings.TrimSpace(payload.LicenseFile),
+				Version:          strings.TrimSpace(payload.Version),
+				SSHUser:          strings.TrimSpace(payload.SSHUser),
+				SSHPassword:      creds.password,
+				SSHPort:          strings.TrimSpace(payload.SSHPort),
+				SSHPrivateKey:    creds.privateKey,
+				SSHKeyPassphrase: creds.passphrase,
+				ClearSSHKey:      creds.clearKey,
+				ClearSSHPassword: creds.clearPassword,
 			}); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to update server")
 				return
@@ -5145,11 +5249,32 @@ func serverDetailHandler(
 				writeError(w, http.StatusInternalServerError, "failed to load server")
 				return
 			}
+			if payload.ResetSSHHostKey {
+				if err := remotesvc.ForgetHostKeys(r.Context(),
+					remotesvc.HostPort(before.IP, before.SSHPort),
+					remotesvc.HostPort(view.IP, view.SSHPort),
+				); err != nil {
+					log.Printf("[api] PUT /servers/%d: reset ssh host key failed: %v", serverID, err)
+					writeError(w, http.StatusInternalServerError, "server updated, but resetting the trusted SSH host key failed")
+					return
+				}
+			}
 			writeJSON(w, http.StatusOK, view)
 		case http.MethodDelete:
+			before, err := servers.GetView(r.Context(), serverID)
+			if err != nil && !store.IsNotFound(err) {
+				writeError(w, http.StatusInternalServerError, "failed to load server")
+				return
+			}
+			found := err == nil
 			if err := servers.Delete(r.Context(), serverID); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to delete server")
 				return
+			}
+			if found && before.IP != "" {
+				if err := remotesvc.ForgetHostKeys(r.Context(), remotesvc.HostPort(before.IP, before.SSHPort)); err != nil {
+					log.Printf("[api] DELETE /servers/%d: forget ssh host key failed: %v", serverID, err)
+				}
 			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -5558,7 +5683,7 @@ func parseUpstreamPath(path string) (siteID int64, upstreamID int64, isBatch boo
 	return 0, 0, false, false
 }
 
-func usersHandler(users store.UserStore) http.HandlerFunc {
+func usersHandler(users store.UserStore, mfa store.MFAStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -5566,6 +5691,14 @@ func usersHandler(users store.UserStore) http.HandlerFunc {
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to load users")
 				return
+			}
+			enabled, err := mfa.EnabledUserIDs(r.Context())
+			if err != nil && !store.IsMFAUnavailable(err) {
+				writeError(w, http.StatusInternalServerError, "failed to load users")
+				return
+			}
+			for i := range list {
+				list[i].MFAEnabled = enabled[list[i].ID]
 			}
 			writeJSON(w, http.StatusOK, list)
 		case http.MethodPost:
@@ -5586,6 +5719,10 @@ func usersHandler(users store.UserStore) http.HandlerFunc {
 			if err != nil {
 				if store.IsDuplicateEmail(err) {
 					writeError(w, http.StatusConflict, "email already exists")
+					return
+				}
+				if store.IsPasswordTooLong(err) {
+					writeError(w, http.StatusBadRequest, err.Error())
 					return
 				}
 				writeError(w, http.StatusInternalServerError, "failed to create user")
@@ -5637,7 +5774,8 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 				writeError(w, http.StatusBadRequest, "name and email are required")
 				return
 			}
-			if principal, ok := AuthPrincipalFromContext(r.Context()); ok && !strings.EqualFold(principal.Role, "Admin") {
+			principal, hasPrincipal := AuthPrincipalFromContext(r.Context())
+			if hasPrincipal && !strings.EqualFold(principal.Role, "Admin") {
 				existing, err := users.FindByID(r.Context(), id)
 				if err != nil {
 					if store.IsNotFound(err) {
@@ -5650,8 +5788,38 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 				payload.Role = existing.Role
 				payload.Status = existing.Status
 				payload.ServerIDs = existing.ServerIDs
-				if payload.Password == "" {
-					payload.Password = existing.Password
+			}
+			// Changing your own password requires the current one; admins resetting
+			// someone else's password do not, and neither do accounts that never had
+			// one (created through Google/GitHub/SSO).
+			if payload.Password != "" && hasPrincipal && principal.UserID == id {
+				self, err := users.FindByID(r.Context(), id)
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "user not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to load user")
+					return
+				}
+				matches := true
+				if self.HasPassword {
+					matches, err = users.VerifyPassword(r.Context(), id, payload.CurrentPassword)
+				}
+				if err != nil {
+					if store.IsNotFound(err) {
+						writeError(w, http.StatusNotFound, "user not found")
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to verify password")
+					return
+				}
+				if !matches {
+					writeJSON(w, http.StatusBadRequest, errorResponse{
+						Error:   "invalid_current_password",
+						Message: "Current password is incorrect.",
+					})
+					return
 				}
 			}
 			if !strings.EqualFold(payload.Role, "User") {
@@ -5667,6 +5835,10 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 					writeError(w, http.StatusConflict, "email already exists")
 					return
 				}
+				if store.IsPasswordTooLong(err) {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
 				writeError(w, http.StatusInternalServerError, "failed to update user")
 				return
 			}
@@ -5675,6 +5847,9 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 				return
 			}
 			updated.ServerIDs = payload.ServerIDs
+			if fresh, err := users.FindByID(r.Context(), id); err == nil {
+				updated = fresh
+			}
 			writeJSON(w, http.StatusOK, updated)
 		case http.MethodDelete:
 			if err := users.Delete(r.Context(), id); err != nil {
@@ -5733,7 +5908,7 @@ func sitesHandler(
 				writeError(w, http.StatusInternalServerError, "failed to load sites")
 				return
 			}
-			writeJSON(w, http.StatusOK, list)
+			writeJSON(w, http.StatusOK, viewerScopeFromContext(r.Context()).filterSites(list))
 		case http.MethodPost:
 			var payload store.SiteInput
 			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -5746,6 +5921,10 @@ func sitesHandler(
 				return
 			}
 			applySiteSslDefaults(&payload)
+			if err := resolveCustomCertificate(nil, &payload); err != nil {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 			if strings.EqualFold(payload.SslType, "letsencrypt") {
 				payload.CertificateStatus = "queued"
 			}

@@ -13,6 +13,8 @@ import (
 	"vue-project-backend/internal/applog"
 	"vue-project-backend/internal/config"
 	"vue-project-backend/internal/db"
+	"vue-project-backend/internal/remotesvc"
+	"vue-project-backend/internal/secretbox"
 	"vue-project-backend/internal/store"
 	"vue-project-backend/internal/worker"
 )
@@ -46,11 +48,36 @@ func main() {
 		}
 	}()
 
+	encryptionKey, err := secretbox.ParseKey(cfg.DataEncryptionKey)
+	if err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "data_encryption_key", "error": "DATA_ENCRYPTION_KEY is missing or invalid (32 bytes, base64 or hex; generate with `openssl rand -base64 32`): " + err.Error()})
+		os.Exit(1)
+	}
+	secrets, err := secretbox.New(encryptionKey)
+	if err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "data_encryption_key", "error": err.Error()})
+		os.Exit(1)
+	}
+
 	userStore := store.NewUserStore(connection)
+	if migrated, err := userStore.MigrateLegacyPasswords(ctx); err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "password_migration", "migrated": migrated, "error": err.Error()})
+		os.Exit(1)
+	} else if migrated > 0 {
+		applog.Infof("api", "password_migration", map[string]any{"hashed": migrated})
+	}
 	l4Store := store.NewL4Store(connection)
 	l4WhitelistStore := store.NewL4WhitelistStore(connection)
 	l4BlacklistStore := store.NewL4BlacklistStore(connection)
-	serverStore := store.NewServerStore(connection)
+	serverStore := store.NewServerStore(connection, secrets)
+	if sealed, err := serverStore.EncryptLegacySecrets(ctx); err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "ssh_password_encryption", "encrypted": sealed, "error": err.Error()})
+		os.Exit(1)
+	} else if sealed > 0 {
+		applog.Infof("api", "ssh_password_encryption", map[string]any{"encrypted": sealed})
+	}
+	sshKnownHostStore := store.NewSSHKnownHostStore(connection)
+	remotesvc.SetKnownHostStore(sshKnownHostStore)
 	l4LiveAttackStore := store.NewL4LiveAttackStore(connection)
 	l4AttackStatsStore := store.NewL4AttackStatsStore(connection)
 	securityEventStore := store.NewSecurityEventStore(connection)
@@ -69,14 +96,27 @@ func main() {
 	cacheRuleStore := store.NewCacheRuleStore(connection)
 	compressStore := store.NewCompressStore(connection)
 	blacklistStore := store.NewBlacklistStore(redisClient)
-	siteStore := store.NewSiteStore(connection)
+	siteStore := store.NewSiteStore(connection, secrets)
+	if sealed, err := siteStore.EncryptLegacySecrets(ctx); err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "tls_key_encryption", "encrypted": sealed, "error": err.Error()})
+		os.Exit(1)
+	} else if sealed > 0 {
+		applog.Infof("api", "tls_key_encryption", map[string]any{"encrypted": sealed})
+	}
 	wafRuleStore := store.NewWafRuleStore(connection)
 	siteListeningPortStore := store.NewSiteListeningPortStore(connection)
 	auditLogStore := store.NewAuditLogStore(connection)
 	apiTokenStore := store.NewAPITokenStore(connection)
 	licensePlanStore := store.NewLicensePlanStore(connection)
+	mfaStore := store.NewMFAStore(connection)
+	loginThrottleStore := store.NewLoginThrottleStore(redisClient, store.LoginThrottleConfig{
+		MaxAccountFailures: cfg.LoginMaxAccountFailures,
+		MaxIPFailures:      cfg.LoginMaxIPFailures,
+		Window:             time.Duration(cfg.LoginFailureWindowMinutes) * time.Minute,
+		Lockout:            time.Duration(cfg.LoginLockoutMinutes) * time.Minute,
+	})
 	certIssuer := acme.NewIssuer(cfg, siteStore)
-	handler := api.NewRouter(cfg, userStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore, apiTokenStore, licensePlanStore, certIssuer)
+	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore, apiTokenStore, licensePlanStore, certIssuer)
 
 	// Start background worker to periodically collect IP request statistics
 	// from each server and store them into the database.

@@ -5,76 +5,106 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"vue-project-backend/internal/secretbox"
 )
 
 type Server struct {
-	ID             int64
-	Name           string
-	IP             string
-	Status         string
-	ServiceStatus  string
-	L4Status       string
-	L7Status       string
-	LicenseType    string
-	LicenseFile    string
-	Version        string
-	OS             string
-	SSHUser        string
-	SSHPassword    string
-	SSHPort        string
-	Token          string
-	Created        sql.NullTime
-	Expired        sql.NullTime
+	ID               int64
+	Name             string
+	IP               string
+	Status           string
+	ServiceStatus    string
+	L4Status         string
+	L7Status         string
+	LicenseType      string
+	LicenseFile      string
+	Version          string
+	OS               string
+	SSHUser          string
+	SSHPassword      string
+	SSHPrivateKey    string
+	SSHKeyPassphrase string
+	SSHPort          string
+	Token            string
+	Created          sql.NullTime
+	Expired          sql.NullTime
 }
 
 type ServerView struct {
-	ID             int64    `json:"id"`
-	Name           string   `json:"name"`
-	IP             string   `json:"ip"`
-	Status         string   `json:"status"`
-	ServiceStatus  string   `json:"serviceStatus,omitempty"`
-	L4Status       string   `json:"l4Status,omitempty"`
-	L7Status       string   `json:"l7Status,omitempty"`
-	ServiceStatusReason string `json:"serviceStatusReason,omitempty"`
-	L4StatusReason      string `json:"l4StatusReason,omitempty"`
-	L7StatusReason      string `json:"l7StatusReason,omitempty"`
-	StatusLabel    string   `json:"statusLabel"`
-	StatusClass    string   `json:"statusClass"`
-	License        string   `json:"license"`
-	LicenseFile    string   `json:"licenseFile"`
-	Version        string   `json:"version"`
-	OS             string   `json:"os,omitempty"`
-	SSHUser        string   `json:"sshUser"`
-	SSHPassword    string   `json:"sshPassword"`
-	SSHPort        string   `json:"sshPort"`
-	ExpiredDate    string   `json:"expiredDate"`
-	Created        string   `json:"created"`
-	Users          int      `json:"users"`
-	ManagedUsers   []string `json:"managedUsers"`
-	ManagedUserIds []int64  `json:"managedUserIds"`
-	Token          string   `json:"-"`
+	ID                  int64    `json:"id"`
+	Name                string   `json:"name"`
+	IP                  string   `json:"ip"`
+	Status              string   `json:"status"`
+	ServiceStatus       string   `json:"serviceStatus,omitempty"`
+	L4Status            string   `json:"l4Status,omitempty"`
+	L7Status            string   `json:"l7Status,omitempty"`
+	ServiceStatusReason string   `json:"serviceStatusReason,omitempty"`
+	L4StatusReason      string   `json:"l4StatusReason,omitempty"`
+	L7StatusReason      string   `json:"l7StatusReason,omitempty"`
+	StatusLabel         string   `json:"statusLabel"`
+	StatusClass         string   `json:"statusClass"`
+	License             string   `json:"license"`
+	LicenseFile         string   `json:"licenseFile"`
+	Version             string   `json:"version"`
+	OS                  string   `json:"os,omitempty"`
+	SSHUser             string   `json:"sshUser"`
+	SSHPassword         string   `json:"-"`
+	HasSSHPassword      bool     `json:"hasSshPassword"`
+	SSHPrivateKey       string   `json:"-"`
+	SSHKeyPassphrase    string   `json:"-"`
+	HasSSHKey           bool     `json:"hasSshKey"`
+	SSHAuthType         string   `json:"sshAuthType"`
+	SSHPort             string   `json:"sshPort"`
+	ExpiredDate         string   `json:"expiredDate"`
+	Created             string   `json:"created"`
+	Users               int      `json:"users"`
+	ManagedUsers        []string `json:"managedUsers"`
+	ManagedUserIds      []int64  `json:"managedUserIds"`
+	Token               string   `json:"-"`
 }
 
 type ServerInput struct {
-	Name           string
-	IP             string
-	Status         string
-	ServiceStatus  string
-	L4Status       string
-	L7Status       string
-	LicenseType    string
-	LicenseFile    string
-	Version        string
-	OS             string
-	SSHUser        string
-	SSHPassword    string
-	SSHPort        string
-	Token          string
-	Expired        *time.Time
+	Name          string
+	IP            string
+	Status        string
+	ServiceStatus string
+	L4Status      string
+	L7Status      string
+	LicenseType   string
+	LicenseFile   string
+	Version       string
+	OS            string
+	SSHUser       string
+	SSHPassword   string
+	SSHPort       string
+	Token         string
+	Expired       *time.Time
+	// SSHPrivateKey / SSHKeyPassphrase: blank keeps the stored value on Update.
+	SSHPrivateKey    string
+	SSHKeyPassphrase string
+	// ClearSSHKey removes the stored private key and passphrase on Update.
+	ClearSSHKey bool
+	// ClearSSHPassword removes the stored SSH password on Update.
+	ClearSSHPassword bool
+}
+
+const (
+	SSHAuthPassword = "password"
+	SSHAuthKey      = "key"
+)
+
+// SSHAuthTypeOf reports how an edge authenticates: an edge with a private key uses it.
+func SSHAuthTypeOf(privateKey string) string {
+	if strings.TrimSpace(privateKey) != "" {
+		return SSHAuthKey
+	}
+	return SSHAuthPassword
 }
 
 type ServerStore interface {
@@ -82,6 +112,7 @@ type ServerStore interface {
 	Count(ctx context.Context) (int64, error)
 	CountByStatus(ctx context.Context, status string) (int64, error)
 	CountActiveRuntime(ctx context.Context) (int64, error)
+	CountScoped(ctx context.Context, serverIDs []int64) (total int64, active int64, err error)
 	UpdateServerUsers(ctx context.Context, serverID int64, userIDs []int64) error
 	Create(ctx context.Context, input ServerInput) (Server, error)
 	GetView(ctx context.Context, serverID int64) (ServerView, error)
@@ -89,14 +120,54 @@ type ServerStore interface {
 	UpdateDeploymentData(ctx context.Context, serverID int64, token, rowStatus, licenseType, version, os string, expired *time.Time, serviceStatus, l4Status, l7Status string) error
 	Update(ctx context.Context, serverID int64, input ServerInput) error
 	Delete(ctx context.Context, serverID int64) error
+	EncryptLegacySecrets(ctx context.Context) (int, error)
 }
 
 type serverStore struct {
-	db *sql.DB
+	db  *sql.DB
+	box *secretbox.Box
 }
 
-func NewServerStore(db *sql.DB) ServerStore {
-	return &serverStore{db: db}
+func NewServerStore(db *sql.DB, box *secretbox.Box) ServerStore {
+	return &serverStore{db: db, box: box}
+}
+
+func (store *serverStore) sealSSHPassword(value string) (sql.NullString, error) {
+	return store.sealSecret(strings.TrimSpace(value))
+}
+
+func (store *serverStore) sealSecret(value string) (sql.NullString, error) {
+	if value == "" {
+		return sql.NullString{}, nil
+	}
+	sealed, err := store.box.Seal(value)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: sealed, Valid: true}, nil
+}
+
+func (store *serverStore) openSSHPassword(serverID int64, value sql.NullString) string {
+	return store.openSecret(serverID, "ssh password", value)
+}
+
+// openSecret never fails the whole row load: a value that cannot be
+// decrypted is logged and treated as missing so SSH reports an auth error.
+func (store *serverStore) openSecret(serverID int64, label string, value sql.NullString) string {
+	if !value.Valid || value.String == "" {
+		return ""
+	}
+	plain, err := store.box.Open(value.String)
+	if err != nil {
+		log.Printf("[store] server %d: %s: %v", serverID, label, err)
+		return ""
+	}
+	return plain
+}
+
+// EncryptLegacySecrets seals ssh_password values still stored in plaintext.
+func (store *serverStore) EncryptLegacySecrets(ctx context.Context) (int, error) {
+	return sealLegacyColumn(ctx, store.db, store.box, "servers", "ssh_password")
 }
 
 type userRef struct {
@@ -144,7 +215,9 @@ func (store *serverStore) ListWithUsers(ctx context.Context) ([]ServerView, erro
 			Version:        server.Version,
 			OS:             server.OS,
 			SSHUser:        server.SSHUser,
-			SSHPassword:    server.SSHPassword,
+			HasSSHPassword: server.SSHPassword != "",
+			HasSSHKey:      server.SSHPrivateKey != "",
+			SSHAuthType:    SSHAuthTypeOf(server.SSHPrivateKey),
 			SSHPort:        server.SSHPort,
 			ExpiredDate:    formatDate(server.Expired),
 			Created:        formatDate(server.Created),
@@ -193,6 +266,23 @@ func (store *serverStore) CountActiveRuntime(ctx context.Context) (int64, error)
 	return total, nil
 }
 
+// CountScoped returns total and runtime-active edges among serverIDs.
+func (store *serverStore) CountScoped(ctx context.Context, serverIDs []int64) (int64, int64, error) {
+	query, args := appendIDAllowList(`
+		SELECT COUNT(*),
+			COALESCE(SUM(CASE
+				WHEN LOWER(TRIM(COALESCE(service_status, ''))) IN ('running', 'active', 'enable') THEN 1
+				WHEN TRIM(COALESCE(service_status, '')) = '' AND status = 'Normal' THEN 1
+				ELSE 0 END), 0)
+		FROM servers
+		WHERE 1 = 1`, nil, "id", serverIDs)
+	var total, active int64
+	if err := store.db.QueryRowContext(ctx, query, args...).Scan(&total, &active); err != nil {
+		return 0, 0, err
+	}
+	return total, active, nil
+}
+
 func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server, error) {
 	now := time.Now()
 	status := strings.TrimSpace(input.Status)
@@ -221,10 +311,22 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 	if input.Expired != nil {
 		expired = sql.NullTime{Time: *input.Expired, Valid: true}
 	}
+	sshPassword, err := store.sealSSHPassword(input.SSHPassword)
+	if err != nil {
+		return Server{}, err
+	}
+	sshKey, err := store.sealSecret(strings.TrimSpace(input.SSHPrivateKey))
+	if err != nil {
+		return Server{}, err
+	}
+	sshKeyPassphrase, err := store.sealSecret(input.SSHKeyPassphrase)
+	if err != nil {
+		return Server{}, err
+	}
 
 	result, err := store.db.ExecContext(ctx, `
-		INSERT INTO servers (name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, os, ssh_user, ssh_password, ssh_port, token, created, expired)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO servers (name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, os, ssh_user, ssh_password, ssh_private_key, ssh_key_passphrase, ssh_port, token, created, expired)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullableServerString(input.Name),
 		nullableServerString(input.IP),
 		status,
@@ -236,7 +338,9 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 		versionInsert,
 		osInsert,
 		nullableServerString(input.SSHUser),
-		nullableServerString(input.SSHPassword),
+		sshPassword,
+		sshKey,
+		sshKeyPassphrase,
 		nullableServerInt(input.SSHPort),
 		nullableServerString(input.Token),
 		now,
@@ -252,23 +356,25 @@ func (store *serverStore) Create(ctx context.Context, input ServerInput) (Server
 	}
 
 	return Server{
-		ID:             id,
-		Name:           input.Name,
-		IP:             input.IP,
-		Status:         status,
-		ServiceStatus:  serviceStatus,
-		L4Status:       l4Status,
-		L7Status:       l7Status,
-		LicenseType:    licenseType,
-		LicenseFile:    input.LicenseFile,
-		Version:        versionTrim,
-		OS:             osTrim,
-		SSHUser:        input.SSHUser,
-		SSHPassword:    input.SSHPassword,
-		SSHPort:        input.SSHPort,
-		Token:          input.Token,
-		Created:        sql.NullTime{Time: now, Valid: true},
-		Expired:        expired,
+		ID:               id,
+		Name:             input.Name,
+		IP:               input.IP,
+		Status:           status,
+		ServiceStatus:    serviceStatus,
+		L4Status:         l4Status,
+		L7Status:         l7Status,
+		LicenseType:      licenseType,
+		LicenseFile:      input.LicenseFile,
+		Version:          versionTrim,
+		OS:               osTrim,
+		SSHUser:          input.SSHUser,
+		SSHPassword:      input.SSHPassword,
+		SSHPrivateKey:    strings.TrimSpace(input.SSHPrivateKey),
+		SSHKeyPassphrase: input.SSHKeyPassphrase,
+		SSHPort:          input.SSHPort,
+		Token:            input.Token,
+		Created:          sql.NullTime{Time: now, Valid: true},
+		Expired:          expired,
 	}, nil
 }
 
@@ -307,10 +413,40 @@ func (store *serverStore) UpdateDeploymentData(ctx context.Context, serverID int
 func (store *serverStore) Update(ctx context.Context, serverID int64, input ServerInput) error {
 	status := strings.TrimSpace(input.Status)
 	licenseType := strings.TrimSpace(input.LicenseType)
+	sshPassword, err := store.sealSSHPassword(input.SSHPassword)
+	if err != nil {
+		return err
+	}
+	sshKey, err := store.sealSecret(strings.TrimSpace(input.SSHPrivateKey))
+	if err != nil {
+		return err
+	}
+	sshKeyPassphrase, err := store.sealSecret(input.SSHKeyPassphrase)
+	if err != nil {
+		return err
+	}
+	keyExpr, passphraseExpr := "COALESCE(?, ssh_private_key)", "COALESCE(?, ssh_key_passphrase)"
+	if input.ClearSSHKey {
+		keyExpr, passphraseExpr = "?", "?"
+		sshKey, sshKeyPassphrase = sql.NullString{}, sql.NullString{}
+	} else if sshKey.Valid {
+		// A new key replaces the old passphrase too (blank = unencrypted key).
+		passphraseExpr = "?"
+	}
+	passwordExpr := "COALESCE(?, ssh_password)"
+	if input.ClearSSHPassword {
+		passwordExpr = "?"
+		sshPassword = sql.NullString{}
+	}
 
-	_, err := store.db.ExecContext(ctx, `
+	// Blank fields keep the stored value: the edit form does not send license or
+	// version data, and the API never returns the SSH password to clients.
+	_, err = store.db.ExecContext(ctx, `
 		UPDATE servers
-		SET name = ?, ip = ?, status = ?, license_type = ?, license_file = ?, version = ?, ssh_user = ?, ssh_password = ?, ssh_port = ?
+		SET name = ?, ip = ?, status = COALESCE(?, status), license_type = COALESCE(?, license_type),
+			license_file = COALESCE(?, license_file), version = COALESCE(?, version),
+			ssh_user = ?, ssh_password = `+passwordExpr+`,
+			ssh_private_key = `+keyExpr+`, ssh_key_passphrase = `+passphraseExpr+`, ssh_port = ?
 		WHERE id = ?`,
 		nullableServerString(input.Name),
 		nullableServerString(input.IP),
@@ -319,7 +455,9 @@ func (store *serverStore) Update(ctx context.Context, serverID int64, input Serv
 		nullableServerString(input.LicenseFile),
 		nullableServerString(input.Version),
 		nullableServerString(input.SSHUser),
-		nullableServerString(input.SSHPassword),
+		sshPassword,
+		sshKey,
+		sshKeyPassphrase,
 		nullableServerInt(input.SSHPort),
 		serverID,
 	)
@@ -354,34 +492,39 @@ func (store *serverStore) GetView(ctx context.Context, serverID int64) (ServerVi
 	statusLabel, statusClass := normalizeStatus(pillSource)
 
 	return ServerView{
-		ID:             server.ID,
-		Name:           server.Name,
-		IP:             server.IP,
-		Status:         server.Status,
-		ServiceStatus:  server.ServiceStatus,
-		L4Status:       server.L4Status,
-		L7Status:       server.L7Status,
-		StatusLabel:    statusLabel,
-		StatusClass:    statusClass,
-		License:        server.LicenseType,
-		LicenseFile:    server.LicenseFile,
-		Version:        server.Version,
-		OS:             server.OS,
-		SSHUser:        server.SSHUser,
-		SSHPassword:    server.SSHPassword,
-		SSHPort:        server.SSHPort,
-		ExpiredDate:    formatDate(server.Expired),
-		Created:        formatDate(server.Created),
-		Users:          len(users),
-		ManagedUsers:   names,
-		ManagedUserIds: ids,
-		Token:          server.Token,
+		ID:               server.ID,
+		Name:             server.Name,
+		IP:               server.IP,
+		Status:           server.Status,
+		ServiceStatus:    server.ServiceStatus,
+		L4Status:         server.L4Status,
+		L7Status:         server.L7Status,
+		StatusLabel:      statusLabel,
+		StatusClass:      statusClass,
+		License:          server.LicenseType,
+		LicenseFile:      server.LicenseFile,
+		Version:          server.Version,
+		OS:               server.OS,
+		SSHUser:          server.SSHUser,
+		SSHPassword:      server.SSHPassword,
+		HasSSHPassword:   server.SSHPassword != "",
+		SSHPrivateKey:    server.SSHPrivateKey,
+		SSHKeyPassphrase: server.SSHKeyPassphrase,
+		HasSSHKey:        server.SSHPrivateKey != "",
+		SSHAuthType:      SSHAuthTypeOf(server.SSHPrivateKey),
+		SSHPort:          server.SSHPort,
+		ExpiredDate:      formatDate(server.Expired),
+		Created:          formatDate(server.Created),
+		Users:            len(users),
+		ManagedUsers:     names,
+		ManagedUserIds:   ids,
+		Token:            server.Token,
 	}, nil
 }
 
 func (store *serverStore) UpdateServerUsers(ctx context.Context, serverID int64, userIDs []int64) error {
 	uniqueIDs := uniqueInt64(userIDs)
-	filteredIDs, err := store.filterUserRoleIDs(ctx, uniqueIDs, "User")
+	filteredIDs, err := store.filterUserRoleIDs(ctx, uniqueIDs, "User", "Admin")
 	if err != nil {
 		return err
 	}
@@ -413,7 +556,7 @@ func (store *serverStore) UpdateServerUsers(ctx context.Context, serverID int64,
 
 func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, os, ssh_user, ssh_password, ssh_port, token, created, expired
+		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, os, ssh_user, ssh_password, ssh_private_key, ssh_key_passphrase, ssh_port, token, created, expired
 		FROM servers
 		ORDER BY id DESC`)
 	if err != nil {
@@ -436,6 +579,8 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		var osLabel sql.NullString
 		var sshUser sql.NullString
 		var sshPassword sql.NullString
+		var sshKey sql.NullString
+		var sshKeyPassphrase sql.NullString
 		var sshPort sql.NullInt64
 		var token sql.NullString
 		if err := rows.Scan(
@@ -452,6 +597,8 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 			&osLabel,
 			&sshUser,
 			&sshPassword,
+			&sshKey,
+			&sshKeyPassphrase,
 			&sshPort,
 			&token,
 			&item.Created,
@@ -471,6 +618,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 		item.OS = nullStringValue(osLabel)
 		item.SSHUser = nullStringValue(sshUser)
 		item.SSHPassword = nullStringValue(sshPassword)
+		item.SSHPrivateKey = nullStringValue(sshKey)
 		item.SSHPort = nullIntStringValue(sshPort)
 		item.Token = nullStringValue(token)
 		servers = append(servers, item)
@@ -483,7 +631,7 @@ func (store *serverStore) listServers(ctx context.Context) ([]Server, error) {
 
 func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, os, ssh_user, ssh_password, ssh_port, token, created, expired
+		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, os, ssh_user, ssh_password, ssh_private_key, ssh_key_passphrase, ssh_port, token, created, expired
 		FROM servers
 		WHERE id = ?`, serverID)
 
@@ -500,6 +648,8 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 	var osLabel sql.NullString
 	var sshUser sql.NullString
 	var sshPassword sql.NullString
+	var sshKey sql.NullString
+	var sshKeyPassphrase sql.NullString
 	var sshPort sql.NullInt64
 	var token sql.NullString
 	if err := row.Scan(
@@ -516,6 +666,8 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 		&osLabel,
 		&sshUser,
 		&sshPassword,
+		&sshKey,
+		&sshKeyPassphrase,
 		&sshPort,
 		&token,
 		&item.Created,
@@ -535,7 +687,9 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 	item.Version = nullStringValue(version)
 	item.OS = nullStringValue(osLabel)
 	item.SSHUser = nullStringValue(sshUser)
-	item.SSHPassword = nullStringValue(sshPassword)
+	item.SSHPassword = store.openSSHPassword(item.ID, sshPassword)
+	item.SSHPrivateKey = store.openSecret(item.ID, "ssh private key", sshKey)
+	item.SSHKeyPassphrase = store.openSecret(item.ID, "ssh key passphrase", sshKeyPassphrase)
 	item.SSHPort = nullIntStringValue(sshPort)
 	item.Token = nullStringValue(token)
 	return item, nil
@@ -543,7 +697,7 @@ func (store *serverStore) getServer(ctx context.Context, serverID int64) (Server
 
 func (store *serverStore) GetByToken(ctx context.Context, token string) (Server, error) {
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, ssh_user, ssh_password, ssh_port, token, created, expired
+		SELECT id, name, ip, status, service_status, l4_status, l7_status, license_type, license_file, version, ssh_user, ssh_password, ssh_private_key, ssh_key_passphrase, ssh_port, token, created, expired
 		FROM servers
 		WHERE token = ?`, token)
 
@@ -559,6 +713,8 @@ func (store *serverStore) GetByToken(ctx context.Context, token string) (Server,
 	var version sql.NullString
 	var sshUser sql.NullString
 	var sshPassword sql.NullString
+	var sshKey sql.NullString
+	var sshKeyPassphrase sql.NullString
 	var sshPort sql.NullInt64
 	var tokenValue sql.NullString
 	if err := row.Scan(
@@ -574,6 +730,8 @@ func (store *serverStore) GetByToken(ctx context.Context, token string) (Server,
 		&version,
 		&sshUser,
 		&sshPassword,
+		&sshKey,
+		&sshKeyPassphrase,
 		&sshPort,
 		&tokenValue,
 		&item.Created,
@@ -595,7 +753,9 @@ func (store *serverStore) GetByToken(ctx context.Context, token string) (Server,
 	item.LicenseFile = nullStringValue(licenseFile)
 	item.Version = nullStringValue(version)
 	item.SSHUser = nullStringValue(sshUser)
-	item.SSHPassword = nullStringValue(sshPassword)
+	item.SSHPassword = store.openSSHPassword(item.ID, sshPassword)
+	item.SSHPrivateKey = store.openSecret(item.ID, "ssh private key", sshKey)
+	item.SSHKeyPassphrase = store.openSecret(item.ID, "ssh key passphrase", sshKeyPassphrase)
 	item.SSHPort = nullIntStringValue(sshPort)
 	item.Token = nullStringValue(tokenValue)
 	return item, nil
@@ -613,7 +773,6 @@ func (store *serverStore) serverUsers(ctx context.Context) (map[int64][]userRef,
 		SELECT su.server_id, u.id, u.name
 		FROM server_users su
 		JOIN users u ON u.id = su.user_id
-		WHERE u.role = 'User'
 		ORDER BY u.name`)
 	if err != nil {
 		return nil, err
@@ -641,7 +800,7 @@ func (store *serverStore) serverUsersForServer(ctx context.Context, serverID int
 		SELECT u.id, u.name
 		FROM server_users su
 		JOIN users u ON u.id = su.user_id
-		WHERE su.server_id = ? AND u.role = 'User'
+		WHERE su.server_id = ?
 		ORDER BY u.name`, serverID)
 	if err != nil {
 		return nil, err
@@ -751,22 +910,27 @@ func uniqueInt64(values []int64) []int64 {
 	return result
 }
 
-func (store *serverStore) filterUserRoleIDs(ctx context.Context, ids []int64, role string) ([]int64, error) {
-	if len(ids) == 0 {
+func (store *serverStore) filterUserRoleIDs(ctx context.Context, ids []int64, roles ...string) ([]int64, error) {
+	if len(ids) == 0 || len(roles) == 0 {
 		return nil, nil
 	}
 
 	placeholders := make([]string, 0, len(ids))
-	args := make([]any, 0, len(ids)+1)
+	args := make([]any, 0, len(ids)+len(roles))
 	for _, id := range ids {
 		placeholders = append(placeholders, "?")
 		args = append(args, id)
 	}
-	args = append(args, role)
+	rolePlaceholders := make([]string, 0, len(roles))
+	for _, role := range roles {
+		rolePlaceholders = append(rolePlaceholders, "?")
+		args = append(args, role)
+	}
 
 	query := fmt.Sprintf(
-		`SELECT id FROM users WHERE id IN (%s) AND role = ?`,
+		`SELECT id FROM users WHERE id IN (%s) AND role IN (%s)`,
 		strings.Join(placeholders, ","),
+		strings.Join(rolePlaceholders, ","),
 	)
 
 	rows, err := store.db.QueryContext(ctx, query, args...)

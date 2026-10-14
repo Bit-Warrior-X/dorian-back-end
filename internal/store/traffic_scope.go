@@ -13,6 +13,9 @@ type TrafficScope struct {
 	ServerIDs []int64
 	SiteID    int64
 	Domain    string
+	// Restricted means ServerIDs is an allow-list: an empty list matches nothing
+	// instead of every server (non-admin users with no assigned edges).
+	Restricted bool
 }
 
 func appendServerScope(query string, args []any, scope TrafficScope) (string, []any) {
@@ -20,6 +23,9 @@ func appendServerScope(query string, args []any, scope TrafficScope) (string, []
 		return query + " AND server_id = ?", append(args, scope.ServerID)
 	}
 	if len(scope.ServerIDs) == 0 {
+		if scope.Restricted {
+			return query + " AND 1 = 0", args
+		}
 		return query, args
 	}
 	placeholders := make([]string, len(scope.ServerIDs))
@@ -28,6 +34,19 @@ func appendServerScope(query string, args []any, scope TrafficScope) (string, []
 		args = append(args, id)
 	}
 	return query + fmt.Sprintf(" AND server_id IN (%s)", strings.Join(placeholders, ",")), args
+}
+
+// appendIDAllowList adds "AND column IN (...)"; an empty list matches nothing.
+func appendIDAllowList(query string, args []any, column string, ids []int64) (string, []any) {
+	if len(ids) == 0 {
+		return query + " AND 1 = 0", args
+	}
+	placeholders := make([]string, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args = append(args, id)
+	}
+	return query + fmt.Sprintf(" AND %s IN (%s)", column, strings.Join(placeholders, ",")), args
 }
 
 // appendTrafficScope applies server filters and optional site_id for site-scoped tables.

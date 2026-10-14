@@ -11,6 +11,8 @@ import (
 func NewRouter(
 	cfg config.Config,
 	users store.UserStore,
+	mfa store.MFAStore,
+	loginThrottle store.LoginThrottleStore,
 	servers store.ServerStore,
 	l4 store.L4Store,
 	l4Whitelist store.L4WhitelistStore,
@@ -44,11 +46,15 @@ func NewRouter(
 	mux := http.NewServeMux()
 
 	agentClient := NewAgentClient(cfg)
-	registerRoutes(mux, cfg, agentClient, users, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, certIssuer)
+	configureL7Edge(cfg)
+	registerRoutes(mux, cfg, agentClient, users, mfa, loginThrottle, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, certIssuer)
+
+	auditResolver := &auditResolver{users: users, servers: servers, sites: sites, wafRules: wafRules}
 
 	handler := http.Handler(mux)
+	handler = withAuditLogging(auditLogs, auditResolver, handler)
+	handler = withViewerScope(users, handler)
 	handler = withAuth(cfg, apiTokens, handler)
-	handler = withAuditLogging(auditLogs, handler)
 	handler = withCORS(cfg, handler)
 	handler = withRequestLogging(handler)
 

@@ -16,12 +16,6 @@ type Server struct {
 	SSHPort     string `json:"sshPort"`
 }
 
-type userCredential struct {
-	Email    string
-	Password string
-	Role     string
-}
-
 var servers = []Server{
 	{
 		ID:          "edge-nyc-01",
@@ -160,32 +154,8 @@ var servers = []Server{
 	},
 }
 
-var users = []userCredential{
-	{Email: "superadmin@gmail.com", Password: "123456", Role: "Admin"},
-	{Email: "user@gmail.com", Password: "123456", Role: "User"},
-}
-
 func ServerList() []Server {
 	copied := make([]Server, len(servers))
 	copy(copied, servers)
 	return copied
-}
-
-func IsValidUser(email, password string) bool {
-	for _, user := range users {
-		if user.Email == email && user.Password == password {
-			return true
-		}
-	}
-	return false
-}
-
-func FindUserByCredentials(email, password string) *userCredential {
-	for _, user := range users {
-		if user.Email == email && user.Password == password {
-			matched := user
-			return &matched
-		}
-	}
-	return nil
 }

@@ -169,7 +169,7 @@ type ServerTrafficStatsStore interface {
 	LatestNicTxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error)
 	LatestL7RxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error)
 	LatestL7TxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error)
-	SumBlockedRequests(ctx context.Context, start, end time.Time) (int64, error)
+	SumBlockedRequests(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, error)
 	ListTopIPs(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]TopIPRow, error)
 	ListTopIsps(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]TopIspRow, error)
 	ListTopReferers(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]TopRefererRow, error)
@@ -556,16 +556,13 @@ func (store *serverTrafficStatsStore) ListStatusCodes(ctx context.Context, start
 	return points, nil
 }
 
-func (store *serverTrafficStatsStore) SumBlockedRequests(ctx context.Context, start, end time.Time) (int64, error) {
+func (store *serverTrafficStatsStore) SumBlockedRequests(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, error) {
 	var total int64
-	row := store.db.QueryRowContext(ctx, `
+	query, args := appendServerScope(`
 		SELECT COALESCE(SUM(blocked_request_count), 0)
 		FROM server_traffic_stats
-		WHERE bucket_ts >= ? AND bucket_ts < ?`,
-		start,
-		end,
-	)
-	if err := row.Scan(&total); err != nil {
+		WHERE bucket_ts >= ? AND bucket_ts < ?`, []any{start, end}, scope)
+	if err := store.db.QueryRowContext(ctx, query, args...).Scan(&total); err != nil {
 		return 0, err
 	}
 	return total, nil

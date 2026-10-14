@@ -1,8 +1,6 @@
 package api
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"log"
 	"net/http"
 	"net/url"
@@ -189,9 +187,9 @@ func oauthStartHandler(
 	}
 }
 
-func googleOAuthCallbackHandler(cfg config.Config, users store.UserStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func googleOAuthCallbackHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		handleOAuthCallback(w, r, cfg, users, auditLogs, "google", func() (oauthIdentity, error) {
+		handleOAuthCallback(w, r, cfg, users, mfa, auditLogs, "google", func() (oauthIdentity, error) {
 			profile, err := auth.ExchangeGoogleCode(r.Context(), googleOAuthConfig(cfg, r), strings.TrimSpace(r.URL.Query().Get("code")))
 			if err != nil {
 				return oauthIdentity{}, err
@@ -201,9 +199,9 @@ func googleOAuthCallbackHandler(cfg config.Config, users store.UserStore, auditL
 	}
 }
 
-func githubOAuthCallbackHandler(cfg config.Config, users store.UserStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func githubOAuthCallbackHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		handleOAuthCallback(w, r, cfg, users, auditLogs, "github", func() (oauthIdentity, error) {
+		handleOAuthCallback(w, r, cfg, users, mfa, auditLogs, "github", func() (oauthIdentity, error) {
 			profile, err := auth.ExchangeGitHubCode(r.Context(), githubOAuthConfig(cfg, r), strings.TrimSpace(r.URL.Query().Get("code")))
 			if err != nil {
 				return oauthIdentity{}, err
@@ -213,9 +211,9 @@ func githubOAuthCallbackHandler(cfg config.Config, users store.UserStore, auditL
 	}
 }
 
-func ssoOAuthCallbackHandler(cfg config.Config, users store.UserStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func ssoOAuthCallbackHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		handleOAuthCallback(w, r, cfg, users, auditLogs, "sso", func() (oauthIdentity, error) {
+		handleOAuthCallback(w, r, cfg, users, mfa, auditLogs, "sso", func() (oauthIdentity, error) {
 			profile, err := auth.ExchangeOIDCCode(r.Context(), ssoOAuthConfig(cfg, r), strings.TrimSpace(r.URL.Query().Get("code")))
 			if err != nil {
 				return oauthIdentity{}, err
@@ -230,6 +228,7 @@ func handleOAuthCallback(
 	r *http.Request,
 	cfg config.Config,
 	users store.UserStore,
+	mfa store.MFAStore,
 	auditLogs store.AuditLogStore,
 	provider string,
 	exchange func() (oauthIdentity, error),
@@ -274,6 +273,29 @@ func handleOAuthCallback(
 	user, err := resolveOAuthUser(r, users, auditLogs, identity, label)
 	if err != nil {
 		redirectOAuthError(w, r, frontend, err.Error())
+		return
+	}
+
+	needsMFA, err := mfaRequiredForUser(r.Context(), mfa, user.ID)
+	if err != nil {
+		log.Printf("[auth] %s oauth 2fa lookup failed user=%d: %v", provider, user.ID, err)
+		redirectOAuthError(w, r, frontend, "Sign-in failed. Please try again.")
+		return
+	}
+	if needsMFA {
+		challenge, err := auth.IssueMFAChallengeToken(user.ID, cfg.JWTSecret, mfaChallengeTTL)
+		if err != nil {
+			log.Printf("[auth] %s oauth 2fa challenge failed user=%d: %v", provider, user.ID, err)
+			redirectOAuthError(w, r, frontend, "Sign-in failed. Please try again.")
+			return
+		}
+		params := url.Values{}
+		params.Set("mfa_token", challenge)
+		params.Set("redirect", state.Redirect)
+		if state.Remember {
+			params.Set("remember", "1")
+		}
+		http.Redirect(w, r, frontend+"/login/oauth/callback#"+params.Encode(), http.StatusFound)
 		return
 	}
 
@@ -324,16 +346,12 @@ func resolveOAuthUser(
 		if name == "" {
 			name = strings.Split(email, "@")[0]
 		}
-		password, genErr := randomOAuthPassword()
-		if genErr != nil {
-			return store.User{}, errOAuthMessage("Sign-in failed. Please try again.")
-		}
+		// No password: the user signs in with the provider until they set one on their profile.
 		created, createErr := users.Create(r.Context(), store.UserInput{
-			Name:     name,
-			Email:    email,
-			Password: password,
-			Role:     "User",
-			Status:   "Active",
+			Name:   name,
+			Email:  email,
+			Role:   "User",
+			Status: "Active",
 		})
 		if createErr != nil {
 			log.Printf("[auth] %s oauth create user failed: %v", strings.ToLower(label), createErr)
@@ -365,7 +383,6 @@ func resolveOAuthUser(
 	updated, updateErr := users.Update(r.Context(), user.ID, store.UserInput{
 		Name:      nextName,
 		Email:     user.Email,
-		Password:  user.Password,
 		Role:      user.Role,
 		Status:    nextStatus,
 		ServerIDs: user.ServerIDs,
@@ -392,12 +409,4 @@ func redirectOAuthError(w http.ResponseWriter, r *http.Request, frontend, messag
 	params := url.Values{}
 	params.Set("oauth_error", message)
 	http.Redirect(w, r, frontend+"/login?"+params.Encode(), http.StatusFound)
-}
-
-func randomOAuthPassword() (string, error) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return "oauth:" + hex.EncodeToString(buf), nil
 }

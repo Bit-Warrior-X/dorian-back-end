@@ -53,8 +53,36 @@ Source of truth in code:
 
 | Layer | Behavior |
 |-------|----------|
-| **L7** | No agent token in current L7 push helpers — JSON body only. |
+| **L7** | Signed with the edge's `servers.token` (headers below). The token itself is never sent. |
 | **L4** | Body field `token` = edge `servers.token` (falls back to `AGENT_TOKEN`). Optional header `Authorization: Bearer {AGENT_TOKEN}` when configured. |
+
+#### L7 request signature (Angelos must enforce)
+
+Every `POST /API/L7/*` from Dorian carries:
+
+| Header | Value |
+|--------|-------|
+| `X-Dorian-Timestamp` | Unix seconds when the request was built. |
+| `X-Dorian-Signature` | `v1=` + hex(HMAC-SHA256(key = edge token, message)) |
+
+`message` is four lines joined with `\n` (no trailing newline):
+
+```
+POST
+/API/L7/l7_update_site          <- request path, no query string
+1791383339                      <- the X-Dorian-Timestamp value
+<hex SHA-256 of the raw request body>
+```
+
+Angelos should reject with `401` when either header is missing, the timestamp is more
+than 5 minutes from its clock, or the constant-time comparison of the signature fails.
+Reference implementation and test vectors: `verifyEdgeSignature` in
+`internal/api/edge_l7.go` / `edge_l7_test.go`.
+
+L7 pushes use `AGENT_SCHEME` / `AGENT_PORT` (default `http` / `5000`), like L4. The
+signature stops forged and replayed pushes but does not hide the payload. Site
+pushes include customer TLS private keys, so switch to `AGENT_SCHEME=https` once
+Angelos serves TLS on that port.
 
 ---
 

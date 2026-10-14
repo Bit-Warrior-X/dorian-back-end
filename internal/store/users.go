@@ -11,33 +11,41 @@ import (
 )
 
 type User struct {
-	ID        int64    `json:"id"`
-	Name      string   `json:"name"`
-	Email     string   `json:"email"`
-	Password  string   `json:"password"`
-	Role      string   `json:"role"`
-	Status    string   `json:"status"`
-	ServerIDs []int64  `json:"serverIds"`
-	Servers   []string `json:"servers"`
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	// Password holds the bcrypt hash and must never be serialized.
+	Password string `json:"-"`
+	// HasPassword is false for accounts created through Google/GitHub/SSO that
+	// have not set a password yet.
+	HasPassword bool     `json:"hasPassword"`
+	Role        string   `json:"role"`
+	Status      string   `json:"status"`
+	ServerIDs   []int64  `json:"serverIds"`
+	Servers     []string `json:"servers"`
+	MFAEnabled  bool     `json:"mfaEnabled"`
 }
 
 type UserInput struct {
-	Name      string  `json:"name"`
-	Email     string  `json:"email"`
-	Password  string  `json:"password"`
-	Role      string  `json:"role"`
-	Status    string  `json:"status"`
-	ServerIDs []int64 `json:"serverIds"`
+	Name  string `json:"name"`
+	Email string `json:"email"`
+	// Password is plaintext from the client; empty means "keep the current password" on update.
+	Password        string  `json:"password"`
+	CurrentPassword string  `json:"currentPassword"`
+	Role            string  `json:"role"`
+	Status          string  `json:"status"`
+	ServerIDs       []int64 `json:"serverIds"`
 }
 
 func (input UserInput) Normalize() UserInput {
 	return UserInput{
-		Name:      strings.TrimSpace(input.Name),
-		Email:     strings.ToLower(strings.TrimSpace(input.Email)),
-		Password:  strings.TrimSpace(input.Password),
-		Role:      strings.TrimSpace(input.Role),
-		Status:    strings.TrimSpace(input.Status),
-		ServerIDs: uniqueInt64(input.ServerIDs),
+		Name:            strings.TrimSpace(input.Name),
+		Email:           strings.ToLower(strings.TrimSpace(input.Email)),
+		Password:        strings.TrimSpace(input.Password),
+		CurrentPassword: strings.TrimSpace(input.CurrentPassword),
+		Role:            strings.TrimSpace(input.Role),
+		Status:          strings.TrimSpace(input.Status),
+		ServerIDs:       uniqueInt64(input.ServerIDs),
 	}
 }
 
@@ -47,10 +55,12 @@ type UserStore interface {
 	FindByID(ctx context.Context, id int64) (User, error)
 	FindByEmail(ctx context.Context, email string) (User, error)
 	FindByCredentials(ctx context.Context, email, password string) (User, error)
+	VerifyPassword(ctx context.Context, id int64, password string) (bool, error)
 	Create(ctx context.Context, input UserInput) (User, error)
 	Update(ctx context.Context, id int64, input UserInput) (User, error)
 	Delete(ctx context.Context, id int64) error
 	UpdateUserServers(ctx context.Context, userID int64, serverIDs []int64) error
+	MigrateLegacyPasswords(ctx context.Context) (int, error)
 }
 
 type userStore struct {
@@ -63,7 +73,7 @@ func NewUserStore(db *sql.DB) UserStore {
 
 func (store *userStore) List(ctx context.Context) ([]User, error) {
 	rows, err := store.db.QueryContext(ctx, `
-		SELECT id, name, email, password, role, status
+		SELECT id, name, email, COALESCE(password, ''), role, status
 		FROM users
 		ORDER BY id DESC`)
 	if err != nil {
@@ -78,6 +88,7 @@ func (store *userStore) List(ctx context.Context) ([]User, error) {
 		if err := rows.Scan(&item.ID, &item.Name, &item.Email, &item.Password, &item.Role, &item.Status); err != nil {
 			return nil, err
 		}
+		item.HasPassword = item.Password != ""
 		userIDs = append(userIDs, item.ID)
 		users = append(users, item)
 	}
@@ -114,7 +125,7 @@ func (store *userStore) Count(ctx context.Context) (int64, error) {
 func (store *userStore) FindByID(ctx context.Context, id int64) (User, error) {
 	var user User
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, email, password, role, status
+		SELECT id, name, email, COALESCE(password, ''), role, status
 		FROM users
 		WHERE id = ?
 		LIMIT 1`, id)
@@ -124,6 +135,7 @@ func (store *userStore) FindByID(ctx context.Context, id int64) (User, error) {
 		}
 		return User{}, err
 	}
+	user.HasPassword = user.Password != ""
 	serverMap, err := store.userServers(ctx, []int64{user.ID})
 	if err != nil {
 		return User{}, err
@@ -141,7 +153,7 @@ func (store *userStore) FindByEmail(ctx context.Context, email string) (User, er
 	}
 	var user User
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, email, password, role, status
+		SELECT id, name, email, COALESCE(password, ''), role, status
 		FROM users
 		WHERE email = ?
 		LIMIT 1`, email)
@@ -151,6 +163,7 @@ func (store *userStore) FindByEmail(ctx context.Context, email string) (User, er
 		}
 		return User{}, err
 	}
+	user.HasPassword = user.Password != ""
 	serverMap, err := store.userServers(ctx, []int64{user.ID})
 	if err != nil {
 		return User{}, err
@@ -163,25 +176,116 @@ func (store *userStore) FindByEmail(ctx context.Context, email string) (User, er
 
 func (store *userStore) FindByCredentials(ctx context.Context, email, password string) (User, error) {
 	var user User
+	var stored sql.NullString
 	row := store.db.QueryRowContext(ctx, `
-		SELECT id, name, email, password, role, status
+		SELECT id, name, email, COALESCE(password, ''), role, status
 		FROM users
-		WHERE email = ? AND password = ?
+		WHERE email = ?
 		LIMIT 1`,
 		email,
-		password,
 	)
-	if err := row.Scan(&user.ID, &user.Name, &user.Email, &user.Password, &user.Role, &user.Status); err != nil {
+	if err := row.Scan(&user.ID, &user.Name, &user.Email, &stored, &user.Role, &user.Status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			burnPasswordCheck(password)
 			return User{}, errNotFound
 		}
 		return User{}, err
 	}
+	if !passwordMatches(stored.String, password) {
+		return User{}, errNotFound
+	}
+	user.Password = stored.String
 	return user, nil
 }
 
+func (store *userStore) VerifyPassword(ctx context.Context, id int64, password string) (bool, error) {
+	var stored sql.NullString
+	row := store.db.QueryRowContext(ctx, `SELECT password FROM users WHERE id = ? LIMIT 1`, id)
+	if err := row.Scan(&stored); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, errNotFound
+		}
+		return false, err
+	}
+	return passwordMatches(stored.String, password), nil
+}
+
+// MigrateLegacyPasswords hashes any password still stored in plaintext.
+func (store *userStore) MigrateLegacyPasswords(ctx context.Context) (int, error) {
+	rows, err := store.db.QueryContext(ctx, `SELECT id, password FROM users WHERE password IS NOT NULL AND password <> ''`)
+	if err != nil {
+		return 0, err
+	}
+	type legacyRow struct {
+		id       int64
+		password string
+	}
+	var pending []legacyRow
+	for rows.Next() {
+		var item legacyRow
+		if err := rows.Scan(&item.id, &item.password); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !isBcryptHash(item.password) {
+			pending = append(pending, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	migrated := 0
+	for _, item := range pending {
+		if strings.HasPrefix(item.password, oauthPlaceholderPrefix) {
+			// Random placeholder from older Google/GitHub/SSO sign-ups: nobody knows
+			// it, so clear it and let the user set a real password.
+			if _, err := store.db.ExecContext(ctx,
+				`UPDATE users SET password = NULL WHERE id = ? AND password = ?`,
+				item.id, item.password,
+			); err != nil {
+				return migrated, fmt.Errorf("user %d: %w", item.id, err)
+			}
+			migrated++
+			continue
+		}
+		if len(item.password) > MaxPasswordBytes {
+			return migrated, fmt.Errorf("user %d: %w", item.id, ErrPasswordTooLong)
+		}
+		hash, err := HashPassword(item.password)
+		if err != nil {
+			return migrated, fmt.Errorf("user %d: %w", item.id, err)
+		}
+		// Guard on the old value so a concurrent password change is not overwritten.
+		if _, err := store.db.ExecContext(ctx,
+			`UPDATE users SET password = ? WHERE id = ? AND password = ?`,
+			hash, item.id, item.password,
+		); err != nil {
+			return migrated, fmt.Errorf("user %d: %w", item.id, err)
+		}
+		migrated++
+	}
+	return migrated, nil
+}
+
+func hashedPasswordValue(password string) (sql.NullString, error) {
+	if strings.TrimSpace(password) == "" {
+		return sql.NullString{Valid: false}, nil
+	}
+	hash, err := HashPassword(strings.TrimSpace(password))
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: hash, Valid: true}, nil
+}
+
 func (store *userStore) Create(ctx context.Context, input UserInput) (User, error) {
-	password := nullableString(input.Password)
+	password, err := hashedPasswordValue(input.Password)
+	if err != nil {
+		return User{}, err
+	}
 	result, err := store.db.ExecContext(ctx, `
 		INSERT INTO users (name, email, password, role, status)
 		VALUES (?, ?, ?, ?, ?)`,
@@ -204,17 +308,21 @@ func (store *userStore) Create(ctx context.Context, input UserInput) (User, erro
 		ID:       id,
 		Name:     input.Name,
 		Email:    input.Email,
-		Password: input.Password,
+		Password: password.String,
 		Role:     coalesce(input.Role, "User"),
 		Status:   coalesce(input.Status, "Waiting"),
 	}, nil
 }
 
 func (store *userStore) Update(ctx context.Context, id int64, input UserInput) (User, error) {
-	password := nullableString(input.Password)
+	password, err := hashedPasswordValue(input.Password)
+	if err != nil {
+		return User{}, err
+	}
+	// A NULL parameter keeps the stored password (empty input = unchanged).
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE users
-		SET name = ?, email = ?, password = ?, role = ?, status = ?
+		SET name = ?, email = ?, password = COALESCE(?, password), role = ?, status = ?
 		WHERE id = ?`,
 		input.Name,
 		input.Email,
@@ -241,12 +349,11 @@ func (store *userStore) Update(ctx context.Context, id int64, input UserInput) (
 	}
 
 	return User{
-		ID:       id,
-		Name:     input.Name,
-		Email:    input.Email,
-		Password: input.Password,
-		Role:     coalesce(input.Role, "User"),
-		Status:   coalesce(input.Status, "Waiting"),
+		ID:     id,
+		Name:   input.Name,
+		Email:  input.Email,
+		Role:   coalesce(input.Role, "User"),
+		Status: coalesce(input.Status, "Waiting"),
 	}, nil
 }
 

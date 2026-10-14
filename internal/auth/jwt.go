@@ -10,7 +10,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const TokenTypeUser = "user"
+const (
+	TokenTypeUser         = "user"
+	TokenTypeMFAChallenge = "mfa_challenge"
+)
 
 var (
 	ErrInvalidToken = errors.New("invalid token")
@@ -66,6 +69,59 @@ func IssueUserToken(user UserIdentity, secret string, ttl time.Duration) (string
 		return "", fmt.Errorf("sign jwt: %w", err)
 	}
 	return signed, nil
+}
+
+// IssueMFAChallengeToken proves the password step succeeded for userID. It is
+// typed so ParseUserToken rejects it as a session token.
+func IssueMFAChallengeToken(userID int64, secret string, ttl time.Duration) (string, error) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return "", errors.New("jwt secret is required")
+	}
+	if userID <= 0 {
+		return "", errors.New("user id is required")
+	}
+	now := time.Now()
+	claims := UserClaims{
+		UserID: userID,
+		Typ:    TokenTypeMFAChallenge,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   strconv.FormatInt(userID, 10),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+		},
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
+	if err != nil {
+		return "", fmt.Errorf("sign jwt: %w", err)
+	}
+	return signed, nil
+}
+
+func ParseMFAChallengeToken(tokenString, secret string) (int64, error) {
+	tokenString = strings.TrimSpace(tokenString)
+	secret = strings.TrimSpace(secret)
+	if tokenString == "" || secret == "" {
+		return 0, ErrInvalidToken
+	}
+	parsed, err := jwt.ParseWithClaims(tokenString, &UserClaims{}, func(token *jwt.Token) (interface{}, error) {
+		if token.Method != jwt.SigningMethodHS256 {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(secret), nil
+	})
+	if err != nil {
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			return 0, ErrExpiredToken
+		}
+		return 0, ErrInvalidToken
+	}
+	claims, ok := parsed.Claims.(*UserClaims)
+	if !ok || !parsed.Valid || claims.Typ != TokenTypeMFAChallenge || claims.UserID <= 0 {
+		return 0, ErrInvalidToken
+	}
+	return claims.UserID, nil
 }
 
 func ParseUserToken(tokenString, secret string) (UserClaims, error) {

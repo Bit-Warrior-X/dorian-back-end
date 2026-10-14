@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"strings"
 )
 
@@ -224,18 +223,4 @@ func trimAuditUserAgent(value string) string {
 		return value
 	}
 	return value[:512]
-}
-
-func FormatAuditResourceLabel(category string, resourceID int64, suffix string) string {
-	label := strings.TrimSpace(category)
-	if resourceID > 0 {
-		label = fmt.Sprintf("%s #%d", label, resourceID)
-	}
-	if suffix = strings.TrimSpace(suffix); suffix != "" {
-		if label != "" {
-			return label + " · " + suffix
-		}
-		return suffix
-	}
-	return label
 }

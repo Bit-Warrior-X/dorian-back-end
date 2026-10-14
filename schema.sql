@@ -1,52 +1,984 @@
--- --------------------------------------------------------
--- Host:                         192.168.147.3
--- Server version:               8.0.45-0ubuntu0.24.04.1 - (Ubuntu)
--- Server OS:                    Linux
--- HeidiSQL Version:             12.11.0.7065
--- --------------------------------------------------------
+-- Dorian CDN panel database schema (cdnproxy).
+-- Includes every migration in scripts/; existing databases are upgraded with those
+-- scripts, fresh installs load this file.
+--
+-- Load:  mysql < schema.sql
+-- Safe on an existing database: nothing is dropped except routines/triggers, which are
+-- recreated with identical definitions; tables use CREATE TABLE IF NOT EXISTS.
 
-/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
-/*!40101 SET NAMES utf8 */;
-/*!50503 SET NAMES utf8mb4 */;
-/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
-/*!40103 SET TIME_ZONE='+00:00' */;
-/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
-/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
-/*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
-
-
--- Dumping database structure for cdnproxy
-DROP DATABASE IF EXISTS `cdnproxy`;
 CREATE DATABASE IF NOT EXISTS `cdnproxy` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE `cdnproxy`;
 
--- Dumping structure for table cdnproxy.blacklist
-DROP TABLE IF EXISTS `blacklist`;
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
+/*!40101 SET NAMES utf8mb4 */;
+/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
+/*!40103 SET TIME_ZONE='+00:00' */;
+/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;
+/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
+/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+/*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `api_tokens` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) NOT NULL,
+  `name` varchar(128) NOT NULL,
+  `token_prefix` varchar(32) NOT NULL,
+  `token_hash` char(64) NOT NULL,
+  `scopes` longtext CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL CHECK (json_valid(`scopes`)),
+  `expires_at` datetime(6) DEFAULT NULL,
+  `last_used_at` datetime(6) DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT current_timestamp(6),
+  `revoked_at` datetime(6) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_api_tokens_hash` (`token_hash`),
+  KEY `idx_api_tokens_user` (`user_id`),
+  CONSTRAINT `fk_api_tokens_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `audit_logs` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `action` varchar(64) NOT NULL,
+  `category` varchar(64) NOT NULL,
+  `resource_type` varchar(64) DEFAULT NULL,
+  `resource_id` bigint(20) DEFAULT NULL,
+  `resource_name` varchar(255) DEFAULT NULL,
+  `actor_user_id` bigint(20) DEFAULT NULL,
+  `actor_name` varchar(255) DEFAULT NULL,
+  `actor_email` varchar(255) DEFAULT NULL,
+  `actor_role` varchar(32) DEFAULT NULL,
+  `ip_address` varchar(64) DEFAULT NULL,
+  `user_agent` varchar(512) DEFAULT NULL,
+  `http_method` varchar(16) DEFAULT NULL,
+  `path` varchar(512) DEFAULT NULL,
+  `status_code` int(11) DEFAULT NULL,
+  `details` text DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_audit_logs_created_at` (`created_at`),
+  KEY `idx_audit_logs_category` (`category`),
+  KEY `idx_audit_logs_action` (`action`),
+  KEY `idx_audit_logs_actor_user_id` (`actor_user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
 CREATE TABLE IF NOT EXISTS `blacklist` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
-  `site_id` bigint DEFAULT NULL,
-  `ip_address` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `url` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `geolocation` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `reason` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `server` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `ttl` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `trigger_rule` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `created_at` timestamp NULL DEFAULT (now()),
-  `expire_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()),
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) DEFAULT NULL,
+  `ip_address` varchar(255) NOT NULL,
+  `url` varchar(255) DEFAULT NULL,
+  `geolocation` varchar(500) NOT NULL,
+  `reason` varchar(255) NOT NULL,
+  `server` text DEFAULT NULL,
+  `ttl` text DEFAULT NULL,
+  `trigger_rule` text DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `expire_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp(),
   PRIMARY KEY (`id`) USING BTREE,
   KEY `server_id` (`server_id`) USING BTREE,
   KEY `site_id` (`site_id`) USING BTREE,
   CONSTRAINT `blacklist_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1011 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for procedure cdnproxy.clone_ddos_settings
-DROP PROCEDURE IF EXISTS `clone_ddos_settings`;
-DELIMITER //
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `cache_rules` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `site_id` bigint(20) NOT NULL,
+  `rule_name` varchar(255) NOT NULL,
+  `rule_type` varchar(64) NOT NULL DEFAULT 'file',
+  `caching_time` int(11) NOT NULL DEFAULT 3600,
+  `url` varchar(1024) NOT NULL DEFAULT '',
+  `file_types` varchar(1024) NOT NULL DEFAULT '',
+  `priority` int(11) NOT NULL DEFAULT 1000,
+  `cache_slice` double NOT NULL DEFAULT 100,
+  `without_parameter` varchar(16) NOT NULL DEFAULT 'yes',
+  `cache_mode` varchar(64) NOT NULL DEFAULT 'origin',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `site_id` (`site_id`) USING BTREE,
+  CONSTRAINT `cache_rules_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `compress_settings` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `site_id` bigint(20) NOT NULL,
+  `css` tinyint(1) NOT NULL DEFAULT 1,
+  `html` tinyint(1) NOT NULL DEFAULT 1,
+  `js` tinyint(1) NOT NULL DEFAULT 1,
+  `audio` tinyint(1) NOT NULL DEFAULT 0,
+  `font` tinyint(1) NOT NULL DEFAULT 0,
+  `applications` tinyint(1) NOT NULL DEFAULT 0,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `site_id` (`site_id`) USING BTREE,
+  CONSTRAINT `compress_settings_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `country_request_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL DEFAULT 0,
+  `bucket_ts` datetime NOT NULL,
+  `country_code` char(2) NOT NULL,
+  `request_count` int(10) unsigned NOT NULL DEFAULT 0,
+  `blocked_request_count` int(10) unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`country_code`),
+  KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
+  CONSTRAINT `country_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `domain_request_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL,
+  `bucket_ts` datetime NOT NULL,
+  `domain_hash` binary(16) NOT NULL,
+  `request_domain` varchar(255) NOT NULL,
+  `request_count` int(10) unsigned NOT NULL DEFAULT 1,
+  `traffic_l7_rx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `traffic_l7_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `bandwidth_l7_rx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `bandwidth_l7_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`domain_hash`),
+  KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
+  CONSTRAINT `domain_request_stats_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `ip_request_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL DEFAULT 0,
+  `bucket_ts` datetime NOT NULL,
+  `ip` varbinary(16) NOT NULL,
+  `request_count` int(10) unsigned NOT NULL DEFAULT 1,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`ip`),
+  KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_ip` (`ip`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
+  CONSTRAINT `ip_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `isp_request_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL DEFAULT 0,
+  `bucket_ts` datetime NOT NULL,
+  `isp_hash` binary(16) NOT NULL,
+  `request_isp` text NOT NULL,
+  `request_count` int(10) unsigned NOT NULL DEFAULT 1,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`isp_hash`) USING BTREE,
+  KEY `idx_bucket` (`bucket_ts`) USING BTREE,
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`) USING BTREE,
+  CONSTRAINT `isp_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `l4_attack_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `bucket_ts` datetime NOT NULL,
+  `total_traffic` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `allowed_traffic` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `blocked_traffic` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `tcp` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `udp` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `icmp` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `gre` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `other` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `tcp_syn` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `tcp_ack` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `tcp_rst` bigint(20) unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`server_id`,`bucket_ts`),
+  KEY `idx_bucket` (`bucket_ts`),
+  CONSTRAINT `l4_attack_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `l4_blacklist` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `server_id` bigint(20) NOT NULL,
+  `source_ip` varchar(255) NOT NULL,
+  `reason` varchar(255) NOT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `server_id` (`server_id`) USING BTREE,
+  CONSTRAINT `l4_blacklist_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `l4_ddos_defense` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `dev` varchar(50) DEFAULT 'eth2',
+  `protection_mode` enum('Always On','Monitor') DEFAULT 'Always On',
+  `sensitivity` enum('Low','Medium','High') DEFAULT 'Medium',
+  `attach_mode` enum('skb','native','drv','hw') DEFAULT 'native',
+  `black_ip_duration` int(11) DEFAULT 3600,
+  `syn_valid` tinyint(1) DEFAULT 1,
+  `syn_threshold` int(11) DEFAULT 200000,
+  `syn_burst_pkt` int(11) DEFAULT 20,
+  `syn_burst_count_per_sec` int(11) DEFAULT 10,
+  `syn_fixed_threshold` int(11) DEFAULT 2000,
+  `syn_fixed_check_duration` int(11) DEFAULT 15,
+  `challenge_timeout` int(11) DEFAULT 3,
+  `syn_protection_duration` int(11) DEFAULT 60,
+  `ack_valid` tinyint(1) DEFAULT 1,
+  `ack_threshold` int(11) DEFAULT 200000,
+  `ack_burst_pkt` int(11) DEFAULT 200,
+  `ack_burst_count_per_sec` int(11) DEFAULT 100,
+  `ack_fixed_threshold` int(11) DEFAULT 2000,
+  `ack_fixed_check_duration` int(11) DEFAULT 15,
+  `ack_protection_duration` int(11) DEFAULT 60,
+  `rst_valid` tinyint(1) DEFAULT 1,
+  `rst_threshold` int(11) DEFAULT 200000,
+  `rst_burst_pkt` int(11) DEFAULT 20,
+  `rst_burst_count_per_sec` int(11) DEFAULT 10,
+  `rst_fixed_threshold` int(11) DEFAULT 2000,
+  `rst_fixed_check_duration` int(11) DEFAULT 15,
+  `rst_protection_duration` int(11) DEFAULT 60,
+  `icmp_valid` tinyint(1) DEFAULT 1,
+  `icmp_threshold` int(11) DEFAULT 200000,
+  `icmp_burst_pkt` int(11) DEFAULT 20,
+  `icmp_burst_count_per_sec` int(11) DEFAULT 10,
+  `icmp_fixed_threshold` int(11) DEFAULT 2000,
+  `icmp_fixed_check_duration` int(11) DEFAULT 15,
+  `icmp_protection_duration` int(11) DEFAULT 60,
+  `udp_valid` tinyint(1) DEFAULT 1,
+  `udp_threshold` int(11) DEFAULT 200000,
+  `udp_burst_pkt` int(11) DEFAULT 20,
+  `udp_burst_count_per_sec` int(11) DEFAULT 10,
+  `udp_fixed_threshold` int(11) DEFAULT 2000,
+  `udp_fixed_check_duration` int(11) DEFAULT 15,
+  `udp_protection_duration` int(11) DEFAULT 60,
+  `gre_valid` tinyint(1) DEFAULT 1,
+  `gre_threshold` int(11) DEFAULT 200000,
+  `gre_burst_pkt` int(11) DEFAULT 20,
+  `gre_burst_count_per_sec` int(11) DEFAULT 10,
+  `gre_fixed_threshold` int(11) DEFAULT 2000,
+  `gre_fixed_check_duration` int(11) DEFAULT 15,
+  `gre_protection_duration` int(11) DEFAULT 60,
+  `tcp_seg_check` tinyint(1) DEFAULT 0,
+  `geo_check` tinyint(1) DEFAULT 0,
+  `geo_db_ipv4_path` varchar(255) DEFAULT 'geodb/ipv4.csv',
+  `geo_db_location_path` varchar(255) DEFAULT 'geodb/location.csv',
+  `geo_allow_countries` varchar(255) DEFAULT NULL,
+  `geo_countries_block_mode` tinyint(1) NOT NULL DEFAULT 0,
+  `tcp_connection_limit_check` tinyint(1) DEFAULT 1,
+  `tcp_connection_limit_cnt` int(11) DEFAULT 50,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `l4_live_attack` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `server_id` bigint(20) NOT NULL,
+  `source_ip` varchar(500) NOT NULL,
+  `attack_type` varchar(64) NOT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `server_id` (`server_id`) USING BTREE,
+  CONSTRAINT `l4_live_attack_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `l4_whitelist` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `server_id` bigint(20) NOT NULL,
+  `source_ip` varchar(255) NOT NULL,
+  `reason` varchar(255) NOT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `server_id` (`server_id`) USING BTREE,
+  CONSTRAINT `l4_whitelist_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `license_plans` (
+  `id` varchar(32) NOT NULL,
+  `title` varchar(64) NOT NULL,
+  `tagline` varchar(128) DEFAULT NULL,
+  `badge` varchar(64) DEFAULT NULL,
+  `accent` varchar(32) NOT NULL DEFAULT 'trial',
+  `monthly_price` decimal(12,2) NOT NULL DEFAULT 0.00,
+  `annual_price` decimal(12,2) NOT NULL DEFAULT 0.00,
+  `sort_order` int(11) NOT NULL DEFAULT 0,
+  `active` tinyint(1) NOT NULL DEFAULT 1,
+  `updated_at` timestamp NOT NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `listening_ports` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `server_id` bigint(20) NOT NULL,
+  `port` int(11) NOT NULL,
+  `protocol` enum('HTTP','HTTPS') DEFAULT 'HTTP',
+  `description` varchar(500) NOT NULL DEFAULT '',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `server_id` (`server_id`) USING BTREE,
+  CONSTRAINT `listening_ports_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `referer_request_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL DEFAULT 0,
+  `bucket_ts` datetime NOT NULL,
+  `referer_hash` binary(16) NOT NULL,
+  `request_referer` text NOT NULL,
+  `request_count` int(10) unsigned NOT NULL DEFAULT 1,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`referer_hash`) USING BTREE,
+  KEY `idx_bucket` (`bucket_ts`) USING BTREE,
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`) USING BTREE,
+  CONSTRAINT `referer_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `security_events` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `server_id` bigint(20) DEFAULT NULL,
+  `title` varchar(255) NOT NULL,
+  `description` varchar(255) NOT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `idx_security_events_server_created` (`server_id`,`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `server_traffic_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `bucket_ts` datetime NOT NULL,
+  `traffic_nic_rx` float unsigned NOT NULL DEFAULT 0,
+  `traffic_nic_tx` float unsigned NOT NULL DEFAULT 0,
+  `traffic_l7_rx` float unsigned NOT NULL DEFAULT 0,
+  `traffic_l7_tx` float unsigned NOT NULL DEFAULT 0,
+  `bandwidth_nic_rx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `bandwidth_nic_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `bandwidth_l7_rx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `bandwidth_l7_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `request_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `response_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `blocked_request_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `ip_count` int(10) unsigned NOT NULL DEFAULT 0,
+  `blocked_ip_count` int(10) unsigned NOT NULL DEFAULT 0,
+  `code200` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code206` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code301` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code302` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code400` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code403` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code404` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code444` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code499` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code500` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code502` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code503` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code504` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code904` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code929` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code978` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `get_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `post_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `delete_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `put_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `head_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `patch_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `options_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `others_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `http1_0_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `http1_1_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `http2_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `http3_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`server_id`,`bucket_ts`),
+  KEY `idx_bucket` (`bucket_ts`),
+  CONSTRAINT `server_traffic_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `server_users` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `server_id` bigint(20) NOT NULL,
+  `user_id` bigint(20) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `unique_membership` (`server_id`,`user_id`),
+  KEY `user_id` (`user_id`),
+  CONSTRAINT `server_users_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `server_users_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `servers` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) DEFAULT NULL,
+  `ip` varchar(255) DEFAULT NULL,
+  `status` enum('Normal','Pause','Expired') DEFAULT 'Normal',
+  `service_status` varchar(32) DEFAULT NULL,
+  `l4_status` varchar(32) DEFAULT NULL,
+  `l7_status` varchar(32) DEFAULT NULL,
+  `license_type` enum('Trial','L4','L7','Unified') DEFAULT 'Trial',
+  `license_file` varchar(1024) DEFAULT NULL,
+  `version` varchar(50) DEFAULT NULL,
+  `os` varchar(64) DEFAULT NULL,
+  `created` datetime DEFAULT NULL,
+  `expired` datetime DEFAULT NULL,
+  `ssh_user` varchar(64) DEFAULT NULL,
+  `ssh_password` varchar(512) DEFAULT NULL,
+  `ssh_private_key` text DEFAULT NULL,
+  `ssh_key_passphrase` varchar(1024) DEFAULT NULL,
+  `ssh_port` int(11) DEFAULT 22,
+  `l4_id` int(11) DEFAULT NULL,
+  `token` varchar(255) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `id` (`id`),
+  KEY `idx_servers_l4_id` (`l4_id`),
+  CONSTRAINT `fk_server_l4_defense` FOREIGN KEY (`l4_id`) REFERENCES `l4_ddos_defense` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
+/*!50032 DROP TRIGGER IF EXISTS trg_create_l4_defense_on_server_insert */;
+DELIMITER ;;
+/*!50003 CREATE*/ /*!50003 TRIGGER `trg_create_l4_defense_on_server_insert` BEFORE INSERT ON `servers` FOR EACH ROW BEGIN
+    DECLARE new_l4_id INT;
+    
+    IF NEW.l4_id IS NULL THEN
+        
+        INSERT INTO l4_ddos_defense () VALUES ();
+        
+        SET new_l4_id = LAST_INSERT_ID();
+        SET NEW.l4_id = new_l4_id;
+    END IF;
+END */;;
+DELIMITER ;
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
+/*!50032 DROP TRIGGER IF EXISTS trg_prevent_l4_id_update */;
+DELIMITER ;;
+/*!50003 CREATE*/ /*!50003 TRIGGER `trg_prevent_l4_id_update` BEFORE UPDATE ON `servers` FOR EACH ROW BEGIN
+    
+    IF NEW.l4_id != OLD.l4_id AND OLD.l4_id IS NOT NULL THEN
+        DELETE FROM l4_ddos_defense WHERE id = OLD.l4_id;
+    END IF;
+END */;;
+DELIMITER ;
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
+/*!50032 DROP TRIGGER IF EXISTS trg_delete_l4_defense_on_server_delete */;
+DELIMITER ;;
+/*!50003 CREATE*/ /*!50003 TRIGGER `trg_delete_l4_defense_on_server_delete` AFTER DELETE ON `servers` FOR EACH ROW BEGIN
+    IF OLD.l4_id IS NOT NULL THEN
+        DELETE FROM l4_ddos_defense WHERE id = OLD.l4_id;
+    END IF;
+END */;;
+DELIMITER ;
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `site_listening_ports` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `site_id` bigint(20) NOT NULL,
+  `listening_port_id` bigint(20) NOT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `site_listening_port_unique` (`site_id`,`listening_port_id`) USING BTREE,
+  KEY `site_id` (`site_id`) USING BTREE,
+  KEY `listening_port_id` (`listening_port_id`) USING BTREE,
+  CONSTRAINT `site_listening_ports_port_fk` FOREIGN KEY (`listening_port_id`) REFERENCES `listening_ports` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `site_listening_ports_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `site_servers` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `site_id` bigint(20) NOT NULL,
+  `server_id` bigint(20) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `unique_site_server` (`site_id`,`server_id`),
+  KEY `server_id` (`server_id`),
+  CONSTRAINT `site_servers_ibfk_1` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `site_servers_ibfk_2` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `site_traffic_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL,
+  `bucket_ts` datetime NOT NULL,
+  `traffic_l7_rx` float unsigned NOT NULL DEFAULT 0,
+  `traffic_l7_tx` float unsigned NOT NULL DEFAULT 0,
+  `bandwidth_l7_rx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `bandwidth_l7_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `request_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `response_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `blocked_request_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `ip_count` int(10) unsigned NOT NULL DEFAULT 0,
+  `blocked_ip_count` int(10) unsigned NOT NULL DEFAULT 0,
+  `code200` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code206` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code301` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code302` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code400` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code403` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code404` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code444` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code499` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code500` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code501` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code502` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code503` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code504` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code904` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code929` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `code978` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `get_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `post_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `delete_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `put_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `head_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `patch_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `options_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `others_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `http1_0_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `http1_1_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `http2_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `http3_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `cache_hit_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `cache_miss_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `cache_bypass_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `cache_hit_ratio` double NOT NULL DEFAULT 0,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`),
+  KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
+  CONSTRAINT `site_traffic_stats_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `sites` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `domain` varchar(255) NOT NULL,
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `waf_id` bigint(20) DEFAULT NULL,
+  `certificate_status` varchar(64) NOT NULL DEFAULT 'none',
+  `certificate_expiry` datetime DEFAULT NULL,
+  `certificate_error` text DEFAULT NULL,
+  `cache_ratio` double NOT NULL DEFAULT 0,
+  `bandwidth` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `ssl_type` varchar(64) NOT NULL DEFAULT 'none',
+  `ssl_cert` text DEFAULT NULL,
+  `ssl_cert_key` text DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `unique_site_domain` (`domain`) USING BTREE,
+  KEY `waf_id` (`waf_id`) USING BTREE,
+  CONSTRAINT `sites_waf_rule_fk` FOREIGN KEY (`waf_id`) REFERENCES `waf_rule` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `ssh_known_hosts` (
+  `host_port` varchar(300) NOT NULL,
+  `public_key` text NOT NULL,
+  `fingerprint` varchar(128) NOT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`host_port`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `upstream_servers` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `site_id` bigint(20) NOT NULL,
+  `ip_port` varchar(500) NOT NULL,
+  `protocol` enum('HTTP','HTTPS') NOT NULL DEFAULT 'HTTP',
+  `description` varchar(500) NOT NULL DEFAULT '0',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `site_id` (`site_id`) USING BTREE,
+  CONSTRAINT `upstream_servers_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `url_request_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL DEFAULT 0,
+  `bucket_ts` datetime NOT NULL,
+  `url_hash` binary(16) NOT NULL,
+  `request_url` text NOT NULL,
+  `request_count` int(10) unsigned NOT NULL DEFAULT 1,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`url_hash`),
+  KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
+  CONSTRAINT `url_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `user_recovery_codes` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) NOT NULL,
+  `code_hash` char(64) NOT NULL,
+  `used_at` datetime DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_user_recovery_code` (`user_id`,`code_hash`),
+  CONSTRAINT `fk_user_recovery_codes_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `useragent_request_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL DEFAULT 0,
+  `bucket_ts` datetime NOT NULL,
+  `useragent_hash` binary(16) NOT NULL,
+  `request_useragent` text NOT NULL,
+  `request_count` int(10) unsigned NOT NULL DEFAULT 1,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`useragent_hash`) USING BTREE,
+  KEY `idx_bucket` (`bucket_ts`) USING BTREE,
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`) USING BTREE,
+  CONSTRAINT `useragent_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `users` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) NOT NULL,
+  `email` varchar(255) NOT NULL,
+  `password` varchar(255) DEFAULT NULL,
+  `totp_secret` varchar(64) DEFAULT NULL,
+  `totp_pending_secret` varchar(64) DEFAULT NULL,
+  `totp_enabled_at` datetime DEFAULT NULL,
+  `totp_last_step` bigint(20) NOT NULL DEFAULT 0,
+  `role` enum('Admin','User') NOT NULL,
+  `status` enum('Waiting','Active','Block') NOT NULL,
+  `created` datetime DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `email` (`email`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_anticc` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `waf_rule_id` bigint(20) NOT NULL,
+  `url` varchar(500) NOT NULL,
+  `method` varchar(255) NOT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  `threshold` int(11) DEFAULT NULL,
+  `window` int(11) DEFAULT NULL,
+  `action` enum('5-Second Shield','Challenge','Return Code') DEFAULT NULL,
+  `behavior` enum('Deny','Drop','Drop+Block') NOT NULL DEFAULT 'Drop',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_anticc_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_antiheader` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `waf_rule_id` bigint(20) NOT NULL,
+  `url` varchar(500) NOT NULL,
+  `header` varchar(64) NOT NULL,
+  `value` varchar(128) NOT NULL,
+  `block_mode` enum('If match','If not match') DEFAULT NULL,
+  `behavior` enum('Deny','Drop','Drop+Block') NOT NULL DEFAULT 'Drop',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_antiheader_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_blacklist` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `waf_rule_id` bigint(20) NOT NULL,
+  `black_ip_list` varchar(255) NOT NULL,
+  `url` varchar(500) NOT NULL,
+  `method` varchar(255) NOT NULL,
+  `behavior` enum('Deny','Drop','Drop+Block') NOT NULL DEFAULT 'Drop',
+  `description` text DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_blacklist_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_geolocation` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `waf_rule_id` bigint(20) NOT NULL,
+  `country` varchar(255) NOT NULL,
+  `url` varchar(500) NOT NULL,
+  `behavior` enum('Deny','Drop','Drop+Block') NOT NULL DEFAULT 'Drop',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `operation` enum('BLACK','WHITE') DEFAULT 'BLACK',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_geolocation_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_intervalfreqlimit` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `waf_rule_id` bigint(20) NOT NULL,
+  `url` varchar(500) NOT NULL,
+  `time` int(11) NOT NULL DEFAULT 0,
+  `request_count` int(11) NOT NULL DEFAULT 0,
+  `behavior` enum('Deny','Drop','Drop+Block') NOT NULL DEFAULT 'Drop',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_intervalfreqlimit_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_responsefreq` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `waf_rule_id` bigint(20) NOT NULL,
+  `url` varchar(500) NOT NULL,
+  `response_code` varchar(100) NOT NULL DEFAULT '0',
+  `time` int(11) NOT NULL DEFAULT 0,
+  `response_count` int(11) DEFAULT NULL,
+  `behavior` enum('Deny','Drop','Drop+Block') NOT NULL DEFAULT 'Drop',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_responsefreq_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_rule` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `name` varchar(255) NOT NULL,
+  `role` enum('predefined','custom') NOT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_secondfreqlimit` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `waf_rule_id` bigint(20) NOT NULL,
+  `url` varchar(500) NOT NULL,
+  `request_count` int(11) NOT NULL DEFAULT 0,
+  `burst` int(11) NOT NULL DEFAULT 0,
+  `behavior` enum('Deny','Drop','Drop+Block') NOT NULL DEFAULT 'Drop',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_secondfreqlimit_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_useragent` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `waf_rule_id` bigint(20) NOT NULL,
+  `url` varchar(500) NOT NULL,
+  `user_agent` varchar(500) NOT NULL DEFAULT '0',
+  `match` enum('Equals','Contains','Regex') NOT NULL DEFAULT 'Equals',
+  `behavior` enum('Deny','Drop','Drop+Block') NOT NULL DEFAULT 'Drop',
+  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`) USING BTREE,
+  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
+  CONSTRAINT `waf_useragent_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `waf_whitelist` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `waf_rule_id` bigint(20) NOT NULL,
+  `white_ip_list` varchar(255) NOT NULL,
+  `url` varchar(500) NOT NULL,
+  `method` varchar(255) NOT NULL,
+  `description` text DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `waf_rule_id` (`waf_rule_id`),
+  CONSTRAINT `waf_whitelist_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP FUNCTION IF EXISTS `get_server_with_defense`;;
+CREATE FUNCTION `get_server_with_defense`(p_server_id INT) RETURNS longtext CHARSET utf8mb4 COLLATE utf8mb4_bin
+    READS SQL DATA
+    DETERMINISTIC
+BEGIN
+    DECLARE result JSON;
+    
+    SELECT JSON_OBJECT(
+        'server', JSON_OBJECT(
+            'id', s.id,
+            'name', s.name,
+            'ip', s.ip,
+            'l4_id', s.l4_id
+        ),
+        'ddos_defense', JSON_OBJECT(
+            'id', d.id,
+            'global', JSON_OBJECT(
+                'dev', d.dev,
+                'attach_mode', d.attach_mode,
+                'black_ip_duration', d.black_ip_duration
+            ),
+            'syn_protection', JSON_OBJECT(
+                'valid', d.syn_valid,
+                'threshold', d.syn_threshold,
+                'burst_pkt', d.syn_burst_pkt,
+                'burst_count_per_sec', d.syn_burst_count_per_sec,
+                'fixed_threshold', d.syn_fixed_threshold,
+                'fixed_check_duration', d.syn_fixed_check_duration,
+                'challenge_timeout', d.challenge_timeout,
+                'protection_duration', d.syn_protection_duration
+            ),
+            'ack_protection', JSON_OBJECT(
+                'valid', d.ack_valid,
+                'threshold', d.ack_threshold,
+                'burst_pkt', d.ack_burst_pkt,
+                'burst_count_per_sec', d.ack_burst_count_per_sec,
+                'fixed_threshold', d.ack_fixed_threshold,
+                'fixed_check_duration', d.ack_fixed_check_duration,
+                'protection_duration', d.ack_protection_duration
+            )
+            
+        )
+    ) INTO result
+    FROM servers s
+    LEFT JOIN l4_ddos_defense d ON s.l4_id = d.id
+    WHERE s.id = p_server_id;
+    
+    RETURN result;
+END ;;
+DELIMITER ;
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `clone_ddos_settings`;;
 CREATE PROCEDURE `clone_ddos_settings`(
     IN source_server_id INT,
     IN target_server_id INT
@@ -55,7 +987,7 @@ BEGIN
     DECLARE source_l4_id INT;
     DECLARE new_l4_id INT;
     
-    -- Get source server's l4_id
+    
     SELECT l4_id INTO source_l4_id
     FROM servers WHERE id = source_server_id;
     
@@ -64,7 +996,7 @@ BEGIN
         SET MESSAGE_TEXT = 'Source server does not have DDoS settings';
     END IF;
     
-    -- Clone the settings
+    
     INSERT INTO l4_ddos_defense (
         dev, attach_mode, black_ip_duration,
         syn_valid, syn_threshold, syn_burst_pkt, syn_burst_count_per_sec,
@@ -107,40 +1039,32 @@ BEGIN
     
     SET new_l4_id = LAST_INSERT_ID();
     
-    -- Update target server
+    
     UPDATE servers 
     SET l4_id = new_l4_id 
     WHERE id = target_server_id;
     
-    -- Delete old settings if target server had them
+    
     DELETE FROM l4_ddos_defense 
     WHERE id = (SELECT l4_id FROM (SELECT l4_id FROM servers WHERE id = target_server_id) AS old);
     
     SELECT new_l4_id AS cloned_settings_id;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for table cdnproxy.country_request_stats
-DROP TABLE IF EXISTS `country_request_stats`;
-CREATE TABLE IF NOT EXISTS `country_request_stats` (
-  `server_id` bigint NOT NULL,
-  `site_id` bigint NOT NULL DEFAULT 0,
-  `bucket_ts` datetime NOT NULL,
-  `country_code` char(2) NOT NULL,
-  `request_count` int unsigned NOT NULL DEFAULT '0',
-  `blocked_request_count` int unsigned NOT NULL DEFAULT '0',
-  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`country_code`),
-  KEY `idx_bucket` (`bucket_ts`),
-  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
-  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
-  CONSTRAINT `country_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for procedure cdnproxy.GenerateCountrySampleStats
-DROP PROCEDURE IF EXISTS `GenerateCountrySampleStats`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `GenerateCountrySampleStats`;;
 CREATE PROCEDURE `GenerateCountrySampleStats`()
 BEGIN
     DECLARE v_server_id BIGINT;
@@ -152,7 +1076,7 @@ BEGIN
     DECLARE v_country_count INT;
     DECLARE v_done INT DEFAULT FALSE;
     
-    -- Country codes with realistic traffic patterns and blocking rates
+    
     DECLARE country_data TEXT DEFAULT 
         'US:2500:0.02,CN:1800:0.05,IN:1200:0.01,GB:900:0.01,DE:800:0.01,FR:750:0.01,JP:700:0.02,BR:600:0.03,RU:550:0.10,CA:500:0.01,AU:450:0.01,KR:400:0.02,MX:350:0.03,IT:300:0.01,ES:280:0.01,NL:250:0.01,SE:220:0.01,SG:200:0.01,AE:180:0.02,ZA:150:0.04,TR:120:0.03,PL:110:0.01,ID:100:0.02,TH:90:0.01,VN:80:0.01,PH:70:0.02,EG:60:0.05,SA:50:0.03,NG:40:0.04,KE:30:0.03';
     
@@ -163,11 +1087,11 @@ BEGIN
     DECLARE v_request_count INT;
     DECLARE v_blocked_count INT;
     
-    -- Cursor for servers
+    
     DECLARE v_server_cursor CURSOR FOR SELECT id FROM servers LIMIT 5;
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
     
-    -- Calculate country count
+    
     SET v_country_count = (LENGTH(country_data) - LENGTH(REPLACE(country_data, ',', '')) + 1);
     
     OPEN v_server_cursor;
@@ -178,58 +1102,58 @@ BEGIN
             LEAVE server_loop;
         END IF;
         
-        -- Reset interval for each server
+        
         SET v_interval_minutes = 145;
         SET v_time_counter = 0;
         
-        -- Generate data for 30 time buckets (5-minute intervals)
+        
         WHILE v_time_counter < 30 DO
-            -- Calculate bucket time (going backwards)
+            
             SET v_bucket_ts = NOW() - INTERVAL v_interval_minutes MINUTE;
-            -- Round to nearest 5-minute bucket
+            
             SET v_bucket_ts = FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(v_bucket_ts) / 300) * 300);
             
-            -- Insert 4-10 different countries per time bucket
+            
             SET v_country_counter = 0;
             SET v_country_index = FLOOR(RAND() * (v_country_count - 8)) + 1;
             
             WHILE v_country_counter < FLOOR(RAND() * 7) + 4 DO
-                -- Extract country data from comma-separated list
+                
                 SET @country_item = SUBSTRING_INDEX(
                     SUBSTRING_INDEX(country_data, ',', v_country_index), 
                     ',', 
                     -1
                 );
                 
-                -- Parse country code, base traffic, and block rate
+                
                 SET current_country_code = SUBSTRING_INDEX(@country_item, ':', 1);
                 SET current_base_traffic = CAST(SUBSTRING_INDEX(SUBSTRING_INDEX(@country_item, ':', 2), ':', -1) AS UNSIGNED);
                 SET current_block_rate = CAST(SUBSTRING_INDEX(@country_item, ':', -1) AS DECIMAL(3,2));
                 
-                -- Generate traffic with some randomness (±30%) and server-specific multiplier
+                
                 SET v_request_count = FLOOR(
                     current_base_traffic * 
-                    (0.7 + (RAND() * 0.6)) *  -- 70-130% of base traffic
-                    (0.8 + (MOD(v_server_id, 4) * 0.1))  -- Server-specific variation
+                    (0.7 + (RAND() * 0.6)) *  
+                    (0.8 + (MOD(v_server_id, 4) * 0.1))  
                 );
                 
-                -- Generate blocked requests with some randomness
+                
                 SET v_blocked_count = FLOOR(
                     v_request_count * 
                     current_block_rate * 
-                    (0.8 + (RAND() * 0.4))  -- 80-120% of expected block rate
+                    (0.8 + (RAND() * 0.4))  
                 );
                 
-                -- Ensure blocked count doesn't exceed request count
+                
                 IF v_blocked_count > v_request_count THEN
                     SET v_blocked_count = FLOOR(v_request_count * 0.9);
                 END IF;
                 
-                -- Ensure minimum values
+                
                 SET v_request_count = GREATEST(1, v_request_count);
                 SET v_blocked_count = LEAST(v_request_count, v_blocked_count);
                 
-                -- Insert record
+                
                 INSERT INTO `country_request_stats` (
                     `server_id`, 
                     `bucket_ts`, 
@@ -249,7 +1173,7 @@ BEGIN
                 SET v_country_counter = v_country_counter + 1;
                 SET v_country_index = v_country_index + 1;
                 
-                -- Wrap around if we exceed the country list
+                
                 IF v_country_index > v_country_count THEN
                     SET v_country_index = 1;
                 END IF;
@@ -262,17 +1186,27 @@ BEGIN
     
     CLOSE v_server_cursor;
     
-    -- Return summary
+    
     SELECT 
         CONCAT('Generated country request data for ', 
                (SELECT COUNT(DISTINCT server_id) FROM country_request_stats WHERE bucket_ts >= NOW() - INTERVAL 150 MINUTE),
                ' servers') AS result;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for procedure cdnproxy.GenerateISPRequestStats
-DROP PROCEDURE IF EXISTS `GenerateISPRequestStats`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `GenerateISPRequestStats`;;
 CREATE PROCEDURE `GenerateISPRequestStats`()
 BEGIN
     DECLARE v_server_id BIGINT;
@@ -287,12 +1221,12 @@ BEGIN
     DECLARE current_isp TEXT;
     DECLARE isp_hash BINARY(16);
     
-    -- Cursor must be declared after all variables
+    
     DECLARE v_server_cursor CURSOR FOR SELECT id FROM servers LIMIT 10;
-    -- Handler must be declared after cursor
+    
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
     
-    -- Calculate ISP count
+    
     SET v_isp_count = (LENGTH(isp_names) - LENGTH(REPLACE(isp_names, ',', '')) + 1);
     
     OPEN v_server_cursor;
@@ -303,27 +1237,27 @@ BEGIN
             LEAVE server_loop;
         END IF;
         
-        -- Reset interval for each server
+        
         SET v_interval_minutes = 145;
         SET v_time_counter = 0;
         
-        -- Generate data for 30 time buckets (5-minute intervals)
+        
         WHILE v_time_counter < 30 DO
             SET v_bucket_ts = NOW() - INTERVAL v_interval_minutes MINUTE;
             
-            -- Insert 3-8 different ISPs per time bucket
+            
             SET v_isp_counter = 0;
             SET v_isp_index = FLOOR(RAND() * (v_isp_count - 3)) + 1;
             
             WHILE v_isp_counter < FLOOR(RAND() * 6) + 3 DO
-                -- Extract ISP name from comma-separated list
+                
                 SET current_isp = SUBSTRING_INDEX(
                     SUBSTRING_INDEX(isp_names, ',', v_isp_index), 
                     ',', 
                     -1
                 );
                 
-                -- Generate deterministic hash for this ISP
+                
                 SET isp_hash = UNHEX(MD5(CONCAT(v_server_id, v_bucket_ts, current_isp)));
                 
                 INSERT INTO `isp_request_stats` (
@@ -344,7 +1278,7 @@ BEGIN
                 SET v_isp_counter = v_isp_counter + 1;
                 SET v_isp_index = v_isp_index + 1;
                 
-                -- Wrap around if we exceed the ISP list
+                
                 IF v_isp_index > v_isp_count THEN
                     SET v_isp_index = 1;
                 END IF;
@@ -356,12 +1290,22 @@ BEGIN
     END LOOP;
     
     CLOSE v_server_cursor;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for procedure cdnproxy.Generatel4AttackSample
-DROP PROCEDURE IF EXISTS `Generatel4AttackSample`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `Generatel4AttackSample`;;
 CREATE PROCEDURE `Generatel4AttackSample`()
 BEGIN
     DECLARE v_server_id BIGINT;
@@ -369,10 +1313,10 @@ BEGIN
     DECLARE v_max_attacks INT DEFAULT 100;
     DECLARE v_done INT DEFAULT FALSE;
     
-    -- Common attack types for L4/Layer 4 attacks
+    
     DECLARE attack_types TEXT DEFAULT 'SYN Flood,UDP Flood,ICMP Flood,HTTP Flood,Slowloris,SSH Brute Force,RDP Brute Force,DNS Amplification,NTP Amplification,Memcached Amplification,Ping of Death,Teardrop,Smurf Attack,Fragmentation Attack,ACK Flood,Random Flag Flood,Christmas Tree Attack,Land Attack,Null Scan,Xmas Scan,FIN Scan';
     
-    -- Common source IP ranges (some malicious, some random)
+    
     DECLARE ip_ranges TEXT DEFAULT 
         '185.122.204.,194.87.148.,91.243.119.,5.188.210.,103.143.174.,45.142.212.,80.82.64.,198.51.100.,203.0.113.,192.0.2.,10.,172.16.,192.168.,'
         '223.255.255.,119.28.112.,47.244.175.,106.12.134.,123.206.89.,139.199.125.,101.132.145.,'
@@ -387,17 +1331,17 @@ BEGIN
     DECLARE v_attack_index INT;
     DECLARE v_ip_range_index INT;
     
-    -- Cursor for servers
+    
     DECLARE v_server_cursor CURSOR FOR SELECT id FROM servers LIMIT 5;
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
     
-    -- Calculate counts
+    
     SET v_attack_type_count = (LENGTH(attack_types) - LENGTH(REPLACE(attack_types, ',', '')) + 1);
     SET v_ip_range_count = (LENGTH(ip_ranges) - LENGTH(REPLACE(ip_ranges, ',', '')) + 1);
     
     OPEN v_server_cursor;
     
-    -- Start with some initial attacks
+    
     SET v_attack_counter = 0;
     
     server_loop: LOOP
@@ -406,12 +1350,12 @@ BEGIN
             LEAVE server_loop;
         END IF;
         
-        -- Generate 5-15 attacks per server
+        
         SET @attacks_per_server = FLOOR(RAND() * 11) + 5;
         SET @attack_num = 0;
         
         WHILE @attack_num < @attacks_per_server AND v_attack_counter < v_max_attacks DO
-            -- Select random attack type
+            
             SET v_attack_index = FLOOR(RAND() * v_attack_type_count) + 1;
             SET current_attack_type = SUBSTRING_INDEX(
                 SUBSTRING_INDEX(attack_types, ',', v_attack_index), 
@@ -419,7 +1363,7 @@ BEGIN
                 -1
             );
             
-            -- Select random IP range
+            
             SET v_ip_range_index = FLOOR(RAND() * v_ip_range_count) + 1;
             SET current_source_ip = SUBSTRING_INDEX(
                 SUBSTRING_INDEX(ip_ranges, ',', v_ip_range_index), 
@@ -427,26 +1371,26 @@ BEGIN
                 -1
             );
             
-            -- Add random suffix (0-255) unless it's a private range
+            
             IF current_source_ip NOT IN ('10.', '172.16.', '192.168.') THEN
                 SET v_ip_suffix = FLOOR(RAND() * 256);
                 SET current_source_ip = CONCAT(current_source_ip, v_ip_suffix);
             ELSE
-                -- For private IPs, add appropriate suffixes
+                
                 IF current_source_ip = '10.' THEN
                     SET current_source_ip = CONCAT('10.', FLOOR(RAND() * 256), '.', FLOOR(RAND() * 256), '.', FLOOR(RAND() * 256));
                 ELSEIF current_source_ip = '172.16.' THEN
                     SET current_source_ip = CONCAT('172.16.', FLOOR(RAND() * 16), '.', FLOOR(RAND() * 256));
-                ELSE -- 192.168.
+                ELSE 
                     SET current_source_ip = CONCAT('192.168.', FLOOR(RAND() * 256), '.', FLOOR(RAND() * 256));
                 END IF;
             END IF;
             
-            -- Sometimes add multiple IPs (botnet simulation)
+            
             IF RAND() < 0.2 THEN
                 SET current_source_ip = CONCAT(current_source_ip, ',');
                 
-                -- Add 1-3 more IPs
+                
                 SET @extra_ips = FLOOR(RAND() * 3) + 1;
                 SET @ip_num = 0;
                 
@@ -472,7 +1416,7 @@ BEGIN
                 END WHILE;
             END IF;
             
-            -- Insert attack record with recent timestamp
+            
             INSERT INTO `l4_live_attack` (
                 `server_id`, 
                 `source_ip`, 
@@ -483,14 +1427,14 @@ BEGIN
                 v_server_id,
                 current_source_ip,
                 current_attack_type,
-                DATE_SUB(NOW(), INTERVAL FLOOR(RAND() * 1440) MINUTE),  -- Random time in last 24 hours
+                DATE_SUB(NOW(), INTERVAL FLOOR(RAND() * 1440) MINUTE),  
                 NOW()
             );
             
             SET v_attack_counter = v_attack_counter + 1;
             SET @attack_num = @attack_num + 1;
             
-            -- Simulate some attacks being updated recently
+            
             IF RAND() < 0.3 AND v_attack_counter > 10 THEN
                 UPDATE `l4_live_attack` 
                 SET `updated_at` = DATE_SUB(NOW(), INTERVAL FLOOR(RAND() * 60) MINUTE)
@@ -501,17 +1445,27 @@ BEGIN
     
     CLOSE v_server_cursor;
     
-    -- Return summary
+    
     SELECT 
         CONCAT('Generated ', v_attack_counter, ' live attack records') AS result,
         (SELECT COUNT(DISTINCT server_id) FROM l4_live_attack) AS servers_affected,
         (SELECT COUNT(DISTINCT attack_type) FROM l4_live_attack) AS attack_types_logged;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for procedure cdnproxy.GenerateL4AttackStats
-DROP PROCEDURE IF EXISTS `GenerateL4AttackStats`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `GenerateL4AttackStats`;;
 CREATE PROCEDURE `GenerateL4AttackStats`()
 BEGIN
     DECLARE v_server_id BIGINT;
@@ -520,24 +1474,24 @@ BEGIN
     DECLARE v_time_counter INT;
     DECLARE v_done INT DEFAULT FALSE;
     
-    -- Traffic patterns for different times
+    
     DECLARE v_base_traffic BIGINT UNSIGNED;
     DECLARE v_attack_factor DECIMAL(3,2);
     DECLARE v_block_rate DECIMAL(3,2);
     
-    -- Protocol distributions
+    
     DECLARE v_tcp_ratio DECIMAL(3,2);
     DECLARE v_udp_ratio DECIMAL(3,2);
     DECLARE v_icmp_ratio DECIMAL(3,2);
     DECLARE v_gre_ratio DECIMAL(3,2);
     DECLARE v_other_ratio DECIMAL(3,2);
     
-    -- TCP flag distributions
+    
     DECLARE v_tcp_syn_ratio DECIMAL(3,2);
     DECLARE v_tcp_ack_ratio DECIMAL(3,2);
     DECLARE v_tcp_rst_ratio DECIMAL(3,2);
     
-    -- Calculated values
+    
     DECLARE v_total_traffic BIGINT UNSIGNED;
     DECLARE v_allowed_traffic BIGINT UNSIGNED;
     DECLARE v_blocked_traffic BIGINT UNSIGNED;
@@ -550,7 +1504,7 @@ BEGIN
     DECLARE v_tcp_ack_traffic BIGINT UNSIGNED;
     DECLARE v_tcp_rst_traffic BIGINT UNSIGNED;
     
-    -- Cursor for servers
+    
     DECLARE v_server_cursor CURSOR FOR SELECT id FROM servers LIMIT 5;
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
     
@@ -562,75 +1516,75 @@ BEGIN
             LEAVE server_loop;
         END IF;
         
-        -- Reset interval for each server
+        
         SET v_interval_minutes = 145;
         SET v_time_counter = 0;
         
-        -- Generate data for 30 time buckets (5-minute intervals over ~2.5 hours)
+        
         WHILE v_time_counter < 30 DO
-            -- Calculate bucket time (going backwards)
+            
             SET v_bucket_ts = NOW() - INTERVAL v_interval_minutes MINUTE;
             SET v_bucket_ts = FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(v_bucket_ts) / 300) * 300);
             
-            -- Determine traffic patterns based on time and server
+            
             SET @hour = HOUR(v_bucket_ts);
             SET @minute = MINUTE(v_bucket_ts);
             SET @server_mod = MOD(v_server_id, 3);
             
-            -- Base traffic varies by time of day (in Gbps converted to bytes)
+            
             SET v_base_traffic = CASE 
-                WHEN @hour BETWEEN 0 AND 5 THEN 5000000000    -- Low traffic overnight (5GB)
-                WHEN @hour BETWEEN 6 AND 9 THEN 15000000000   -- Morning rush (15GB)
-                WHEN @hour BETWEEN 10 AND 17 THEN 20000000000 -- Daytime peak (20GB)
-                WHEN @hour BETWEEN 18 AND 21 THEN 25000000000 -- Evening peak (25GB)
-                ELSE 10000000000                              -- Late night (10GB)
+                WHEN @hour BETWEEN 0 AND 5 THEN 5000000000    
+                WHEN @hour BETWEEN 6 AND 9 THEN 15000000000   
+                WHEN @hour BETWEEN 10 AND 17 THEN 20000000000 
+                WHEN @hour BETWEEN 18 AND 21 THEN 25000000000 
+                ELSE 10000000000                              
             END;
             
-            -- Attack factor (0.1 to 3.0) - higher during certain times
+            
             SET v_attack_factor = CASE 
-                WHEN @hour BETWEEN 2 AND 4 THEN 0.5 + (RAND() * 1.0)   -- Low attack period
-                WHEN @hour BETWEEN 9 AND 11 THEN 1.5 + (RAND() * 1.5)  -- Morning attacks
-                WHEN @hour BETWEEN 14 AND 16 THEN 2.0 + (RAND() * 1.0) -- Afternoon DDoS
-                WHEN @hour BETWEEN 19 AND 21 THEN 1.8 + (RAND() * 1.2) -- Evening attacks
-                ELSE 0.8 + (RAND() * 0.7)                             -- Normal periods
+                WHEN @hour BETWEEN 2 AND 4 THEN 0.5 + (RAND() * 1.0)   
+                WHEN @hour BETWEEN 9 AND 11 THEN 1.5 + (RAND() * 1.5)  
+                WHEN @hour BETWEEN 14 AND 16 THEN 2.0 + (RAND() * 1.0) 
+                WHEN @hour BETWEEN 19 AND 21 THEN 1.8 + (RAND() * 1.2) 
+                ELSE 0.8 + (RAND() * 0.7)                             
             END;
             
-            -- Block rate varies by server and time (0.01 to 0.30)
+            
             SET v_block_rate = 0.05 + (@server_mod * 0.08) + (RAND() * 0.12);
             
-            -- Protocol distribution (sums to 1.0)
-            SET v_tcp_ratio = 0.65 + (RAND() * 0.20);   -- 65-85% TCP
-            SET v_udp_ratio = 0.10 + (RAND() * 0.15);   -- 10-25% UDP
-            SET v_icmp_ratio = 0.02 + (RAND() * 0.03);  -- 2-5% ICMP
-            SET v_gre_ratio = 0.01 + (RAND() * 0.02);   -- 1-3% GRE
+            
+            SET v_tcp_ratio = 0.65 + (RAND() * 0.20);   
+            SET v_udp_ratio = 0.10 + (RAND() * 0.15);   
+            SET v_icmp_ratio = 0.02 + (RAND() * 0.03);  
+            SET v_gre_ratio = 0.01 + (RAND() * 0.02);   
             SET v_other_ratio = 1.0 - (v_tcp_ratio + v_udp_ratio + v_icmp_ratio + v_gre_ratio);
             
-            -- TCP flag distribution (within TCP traffic)
-            SET v_tcp_syn_ratio = 0.40 + (RAND() * 0.30);  -- 40-70% SYN (including SYN floods)
-            SET v_tcp_ack_ratio = 0.20 + (RAND() * 0.20);  -- 20-40% ACK
-            SET v_tcp_rst_ratio = 0.05 + (RAND() * 0.10);  -- 5-15% RST
-            -- Remaining TCP is FIN, PSH, URG, etc.
             
-            -- Calculate total traffic with attack factor
+            SET v_tcp_syn_ratio = 0.40 + (RAND() * 0.30);  
+            SET v_tcp_ack_ratio = 0.20 + (RAND() * 0.20);  
+            SET v_tcp_rst_ratio = 0.05 + (RAND() * 0.10);  
+            
+            
+            
             SET v_total_traffic = FLOOR(v_base_traffic * v_attack_factor * (0.9 + RAND() * 0.2));
             
-            -- Calculate blocked traffic
+            
             SET v_blocked_traffic = FLOOR(v_total_traffic * v_block_rate * (0.8 + RAND() * 0.4));
             SET v_allowed_traffic = v_total_traffic - v_blocked_traffic;
             
-            -- Calculate protocol-specific traffic
+            
             SET v_tcp_traffic = FLOOR(v_total_traffic * v_tcp_ratio);
             SET v_udp_traffic = FLOOR(v_total_traffic * v_udp_ratio);
             SET v_icmp_traffic = FLOOR(v_total_traffic * v_icmp_ratio);
             SET v_gre_traffic = FLOOR(v_total_traffic * v_gre_ratio);
             SET v_other_traffic = v_total_traffic - (v_tcp_traffic + v_udp_traffic + v_icmp_traffic + v_gre_traffic);
             
-            -- Calculate TCP flag traffic (within TCP traffic)
+            
             SET v_tcp_syn_traffic = FLOOR(v_tcp_traffic * v_tcp_syn_ratio);
             SET v_tcp_ack_traffic = FLOOR(v_tcp_traffic * v_tcp_ack_ratio);
             SET v_tcp_rst_traffic = FLOOR(v_tcp_traffic * v_tcp_rst_ratio);
             
-            -- Insert record
+            
             INSERT INTO `l4_attack_stats` (
                 `server_id`, 
                 `bucket_ts`, 
@@ -679,17 +1633,27 @@ BEGIN
     
     CLOSE v_server_cursor;
     
-    -- Return summary
+    
     SELECT 
         CONCAT('Generated L4 attack stats for ', 
                (SELECT COUNT(DISTINCT server_id) FROM l4_attack_stats WHERE bucket_ts >= NOW() - INTERVAL 150 MINUTE),
                ' servers') AS RESULT;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for procedure cdnproxy.GenerateRefererRequestStats
-DROP PROCEDURE IF EXISTS `GenerateRefererRequestStats`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `GenerateRefererRequestStats`;;
 CREATE PROCEDURE `GenerateRefererRequestStats`()
 BEGIN
     DECLARE v_server_id BIGINT;
@@ -703,10 +1667,10 @@ BEGIN
     DECLARE total_referers INT;
     DECLARE referer_hash BINARY(16);
     
-    -- Get a random server ID from the servers table
+    
     SELECT id INTO v_server_id FROM servers ORDER BY RAND() LIMIT 1;
     
-    -- If no servers exist, use a default value
+    
     IF v_server_id IS NULL THEN
         SET v_server_id = 31;
     END IF;
@@ -714,14 +1678,14 @@ BEGIN
     SET referer_array = referer_list;
     SET total_referers = (LENGTH(referer_array) - LENGTH(REPLACE(referer_array, ',', '')) + 1);
     
-    -- Generate 30 time buckets (5-minute intervals)
+    
     WHILE v_time_counter < 30 DO
         SET v_bucket_ts = DATE_FORMAT(NOW() - INTERVAL v_interval_minutes MINUTE, '%Y-%m-%d %H:%i:00');
         
-        -- Insert 3-8 different referers per time bucket
+        
         SET v_referer_counter = 1;
         WHILE v_referer_counter <= FLOOR(RAND() * 6) + 3 DO
-            -- Get referer (cycling through the list with some randomness)
+            
             SET current_referer = SUBSTRING_INDEX(
                 SUBSTRING_INDEX(referer_array, ',', 
                     ((v_time_counter * 3 + v_referer_counter + FLOOR(RAND() * 5)) % total_referers) + 1
@@ -730,7 +1694,7 @@ BEGIN
                 -1
             );
             
-            -- Generate deterministic hash for this referer
+            
             SET referer_hash = UNHEX(MD5(CONCAT(v_server_id, v_bucket_ts, current_referer)));
             
             INSERT INTO `referer_request_stats` (
@@ -744,7 +1708,7 @@ BEGIN
                 v_bucket_ts,
                 referer_hash,
                 current_referer,
-                FLOOR(RAND() * 500) + 50  -- 50-550 requests per referer
+                FLOOR(RAND() * 500) + 50  
             ) ON DUPLICATE KEY UPDATE 
                 request_count = request_count + VALUES(request_count);
             
@@ -758,12 +1722,22 @@ BEGIN
     SELECT CONCAT('Generated referer stats for server_id: ', v_server_id, ' - ', 
                   (SELECT COUNT(*) FROM referer_request_stats WHERE server_id = v_server_id), 
                   ' records created') AS result;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for procedure cdnproxy.GenerateRefererStatsForAllServers
-DROP PROCEDURE IF EXISTS `GenerateRefererStatsForAllServers`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `GenerateRefererStatsForAllServers`;;
 CREATE PROCEDURE `GenerateRefererStatsForAllServers`()
 BEGIN
     DECLARE v_server_id BIGINT;
@@ -775,7 +1749,7 @@ BEGIN
     DECLARE v_total_servers INT;
     DECLARE v_done INT DEFAULT FALSE;
     
-    -- Popular referers categorized
+    
     DECLARE search_engines TEXT DEFAULT 'https://www.google.com/,https://www.bing.com/,https://www.yahoo.com/,https://duckduckgo.com/,https://www.baidu.com/,https://www.yandex.ru/';
     DECLARE social_media TEXT DEFAULT 'https://www.facebook.com/,https://twitter.com/,https://www.linkedin.com/,https://www.reddit.com/,https://www.instagram.com/,https://www.pinterest.com/,https://www.tiktok.com/';
     DECLARE tech_sites TEXT DEFAULT 'https://github.com/,https://stackoverflow.com/,https://medium.com/,https://dev.to/,https://news.ycombinator.com/,https://gitlab.com/,https://bitbucket.org/';
@@ -784,11 +1758,11 @@ BEGIN
     DECLARE current_referer TEXT;
     DECLARE referer_hash BINARY(16);
     
-    -- Get all server IDs
+    
     DECLARE server_cursor CURSOR FOR SELECT id FROM servers;
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
     
-    -- Get total servers
+    
     SELECT COUNT(*) INTO v_total_servers FROM servers;
     
     OPEN server_cursor;
@@ -803,14 +1777,14 @@ BEGIN
         SET v_time_counter = 0;
         SET v_interval_minutes = 145;
         
-        -- Generate data for 30 time buckets per server
+        
         WHILE v_time_counter < 30 DO
             SET v_bucket_ts = DATE_FORMAT(NOW() - INTERVAL v_interval_minutes MINUTE, '%Y-%m-%d %H:%i:00');
             
-            -- Determine number of referers for this time bucket (varies by server/time)
+            
             SET v_referer_counter = 0;
             
-            -- Add search engines (usually 1-3 per bucket)
+            
             WHILE v_referer_counter < FLOOR(RAND() * 3) + 1 DO
                 SET current_referer = SUBSTRING_INDEX(
                     SUBSTRING_INDEX(search_engines, ',', 
@@ -826,13 +1800,13 @@ BEGIN
                     `server_id`, `bucket_ts`, `referer_hash`, `request_referer`, `request_count`
                 ) VALUES (
                     v_server_id, v_bucket_ts, referer_hash, current_referer, 
-                    FLOOR(RAND() * 400) + 100  -- 100-500 requests
+                    FLOOR(RAND() * 400) + 100  
                 ) ON DUPLICATE KEY UPDATE request_count = request_count + VALUES(request_count);
                 
                 SET v_referer_counter = v_referer_counter + 1;
             END WHILE;
             
-            -- Add social media (0-2 per bucket)
+            
             SET v_referer_counter = 0;
             WHILE v_referer_counter < FLOOR(RAND() * 3) DO
                 SET current_referer = SUBSTRING_INDEX(
@@ -849,13 +1823,13 @@ BEGIN
                     `server_id`, `bucket_ts`, `referer_hash`, `request_referer`, `request_count`
                 ) VALUES (
                     v_server_id, v_bucket_ts, referer_hash, current_referer, 
-                    FLOOR(RAND() * 300) + 50  -- 50-350 requests
+                    FLOOR(RAND() * 300) + 50  
                 ) ON DUPLICATE KEY UPDATE request_count = request_count + VALUES(request_count);
                 
                 SET v_referer_counter = v_referer_counter + 1;
             END WHILE;
             
-            -- Add tech sites (more likely during business hours)
+            
             IF HOUR(v_bucket_ts) BETWEEN 9 AND 17 THEN
                 SET v_referer_counter = 0;
                 WHILE v_referer_counter < FLOOR(RAND() * 2) + 1 DO
@@ -873,20 +1847,20 @@ BEGIN
                         `server_id`, `bucket_ts`, `referer_hash`, `request_referer`, `request_count`
                     ) VALUES (
                         v_server_id, v_bucket_ts, referer_hash, current_referer, 
-                        FLOOR(RAND() * 200) + 30  -- 30-230 requests
+                        FLOOR(RAND() * 200) + 30  
                     ) ON DUPLICATE KEY UPDATE request_count = request_count + VALUES(request_count);
                     
                     SET v_referer_counter = v_referer_counter + 1;
                 END WHILE;
             END IF;
             
-            -- Add misc referers including direct/unknown
+            
             SET current_referer = CASE 
                 WHEN RAND() < 0.3 THEN 'direct'
                 WHEN RAND() < 0.5 THEN 'unknown'
                 ELSE SUBSTRING_INDEX(
                     SUBSTRING_INDEX(misc, ',', 
-                        (FLOOR(RAND() * 8) + 3)  -- Skip first two (direct, unknown)
+                        (FLOOR(RAND() * 8) + 3)  
                     ), 
                     ',', 
                     -1
@@ -895,20 +1869,20 @@ BEGIN
             
             SET referer_hash = UNHEX(MD5(CONCAT(v_server_id, v_bucket_ts, current_referer)));
             
-            -- Direct/unknown tend to have more requests
+            
             IF current_referer IN ('direct', 'unknown') THEN
                 INSERT INTO `referer_request_stats` (
                     `server_id`, `bucket_ts`, `referer_hash`, `request_referer`, `request_count`
                 ) VALUES (
                     v_server_id, v_bucket_ts, referer_hash, current_referer, 
-                    FLOOR(RAND() * 800) + 200  -- 200-1000 requests
+                    FLOOR(RAND() * 800) + 200  
                 ) ON DUPLICATE KEY UPDATE request_count = request_count + VALUES(request_count);
             ELSE
                 INSERT INTO `referer_request_stats` (
                     `server_id`, `bucket_ts`, `referer_hash`, `request_referer`, `request_count`
                 ) VALUES (
                     v_server_id, v_bucket_ts, referer_hash, current_referer, 
-                    FLOOR(RAND() * 150) + 20  -- 20-170 requests
+                    FLOOR(RAND() * 150) + 20  
                 ) ON DUPLICATE KEY UPDATE request_count = request_count + VALUES(request_count);
             END IF;
             
@@ -916,7 +1890,7 @@ BEGIN
             SET v_interval_minutes = v_interval_minutes - 5;
         END WHILE;
         
-        -- Progress update every 5 servers
+        
         IF v_server_counter % 5 = 0 THEN
             SELECT CONCAT('Processed ', v_server_counter, ' of ', v_total_servers, ' servers') AS progress;
         END IF;
@@ -926,38 +1900,48 @@ BEGIN
     
     SELECT CONCAT('Generated referer stats for ', v_server_counter, ' servers. Total records: ',
                   (SELECT COUNT(*) FROM referer_request_stats)) AS final_result;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for procedure cdnproxy.GenerateSafeSampleData
-DROP PROCEDURE IF EXISTS `GenerateSafeSampleData`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `GenerateSafeSampleData`;;
 CREATE PROCEDURE `GenerateSafeSampleData`()
 BEGIN
     DECLARE counter INT DEFAULT 0;
     DECLARE v_server_id BIGINT;
     
-    -- Create temporary table of valid server IDs
+    
     DROP TEMPORARY TABLE IF EXISTS temp_valid_servers;
     CREATE TEMPORARY TABLE temp_valid_servers (server_id BIGINT PRIMARY KEY);
     
     INSERT INTO temp_valid_servers (server_id) 
     SELECT id FROM servers;
     
-    -- If no servers, insert some defaults
+    
     IF (SELECT COUNT(*) FROM temp_valid_servers) = 0 THEN
         INSERT INTO servers (id, name) VALUES (1, 'Test Server'), (2, 'Backup Server');
         INSERT INTO temp_valid_servers (server_id) VALUES (1), (2);
     END IF;
     
     WHILE counter < 100 DO
-        -- Get random valid server ID
+        
         SELECT server_id INTO v_server_id 
         FROM temp_valid_servers 
         ORDER BY RAND() 
         LIMIT 1;
         
-        -- Insert sample record (simplified)
+        
         INSERT INTO ip_request_stats (server_id, bucket_ts, ip, request_count)
         VALUES (
             v_server_id,
@@ -972,12 +1956,22 @@ BEGIN
     
     DROP TEMPORARY TABLE temp_valid_servers;
     SELECT CONCAT('Inserted ', counter, ' records') AS result;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for procedure cdnproxy.GenerateTestTrafficStats
-DROP PROCEDURE IF EXISTS `GenerateTestTrafficStats`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `GenerateTestTrafficStats`;;
 CREATE PROCEDURE `GenerateTestTrafficStats`()
 BEGIN
     DECLARE i INT DEFAULT 0;
@@ -1037,12 +2031,22 @@ BEGIN
         SET i = i + 1;
         SET interval_minutes = interval_minutes - 5;
     END WHILE;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for procedure cdnproxy.GenerateUrlRequestStats
-DROP PROCEDURE IF EXISTS `GenerateUrlRequestStats`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `GenerateUrlRequestStats`;;
 CREATE PROCEDURE `GenerateUrlRequestStats`()
 BEGIN
     DECLARE v_server_id BIGINT;
@@ -1054,13 +2058,13 @@ BEGIN
     DECLARE v_url_count INT;
     DECLARE v_done INT DEFAULT FALSE;
     
-    -- Common URL paths for a CDN/proxy service
+    
     DECLARE url_paths TEXT DEFAULT '/,/index.html,/api/v1/users,/api/v1/products,/api/v1/orders,/static/css/style.css,/static/js/app.js,/images/logo.png,/images/banner.jpg,/videos/intro.mp4,/downloads/software.zip,/blog,/blog/post-1,/blog/post-2,/contact,/about,/privacy,/terms,/login,/register,/dashboard,/profile,/settings,/api/v2/auth,/api/v2/data,/api/v2/config,/api/health,/api/metrics,/api/logs,/search,/sitemap.xml,/robots.txt,/favicon.ico,/manifest.json,/service-worker.js,/api/v3/cache,/api/v3/purge,/cdn/assets/img1.jpg,/cdn/assets/img2.png,/cdn/assets/video1.mp4,/cdn/scripts/main.js,/cdn/styles/theme.css';
     
-    -- Domain variations
+    
     DECLARE domains TEXT DEFAULT 'example.com,cdn.example.com,api.example.com,static.example.com,images.example.com,video.example.com,download.example.com,blog.example.com';
     
-    -- URL query parameters
+    
     DECLARE query_params TEXT DEFAULT '?cache=true&version=1,?width=1920&height=1080,?format=webp&quality=80,?token=abc123&expires=3600,?page=1&limit=50,?sort=date&order=desc,?filter=active&status=1,?search=test&q=query,?locale=en_US&region=us,?debug=true&trace=1';
     
     DECLARE current_path TEXT;
@@ -1069,11 +2073,11 @@ BEGIN
     DECLARE full_url TEXT;
     DECLARE url_hash BINARY(16);
     
-    -- Cursor for servers
+    
     DECLARE v_server_cursor CURSOR FOR SELECT id FROM servers LIMIT 5;
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
     
-    -- Calculate counts
+    
     SET v_url_count = (LENGTH(url_paths) - LENGTH(REPLACE(url_paths, ',', '')) + 1);
     
     OPEN v_server_cursor;
@@ -1084,37 +2088,37 @@ BEGIN
             LEAVE server_loop;
         END IF;
         
-        -- Reset interval for each server
+        
         SET v_interval_minutes = 145;
         SET v_time_counter = 0;
         
-        -- Generate data for 30 time buckets (5-minute intervals)
+        
         WHILE v_time_counter < 30 DO
-            -- Calculate bucket time (going backwards)
+            
             SET v_bucket_ts = NOW() - INTERVAL v_interval_minutes MINUTE;
-            -- Round to nearest 5-minute bucket
+            
             SET v_bucket_ts = FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(v_bucket_ts) / 300) * 300);
             
-            -- Insert 3-8 different URLs per time bucket
+            
             SET v_url_counter = 0;
             SET v_url_index = FLOOR(RAND() * (v_url_count - 5)) + 1;
             
             WHILE v_url_counter < FLOOR(RAND() * 6) + 3 DO
-                -- Extract URL path
+                
                 SET current_path = SUBSTRING_INDEX(
                     SUBSTRING_INDEX(url_paths, ',', v_url_index), 
                     ',', 
                     -1
                 );
                 
-                -- Select random domain
+                
                 SET current_domain = SUBSTRING_INDEX(
                     SUBSTRING_INDEX(domains, ',', FLOOR(RAND() * 8) + 1),
                     ',',
                     -1
                 );
                 
-                -- Add query parameters 40% of the time
+                
                 IF RAND() < 0.4 THEN
                     SET current_param = SUBSTRING_INDEX(
                         SUBSTRING_INDEX(query_params, ',', FLOOR(RAND() * 10) + 1),
@@ -1125,7 +2129,7 @@ BEGIN
                     SET current_param = '';
                 END IF;
                 
-                -- Construct full URL
+                
                 SET full_url = CONCAT(
                     'https://',
                     current_domain,
@@ -1133,10 +2137,10 @@ BEGIN
                     current_param
                 );
                 
-                -- Generate deterministic hash
+                
                 SET url_hash = UNHEX(MD5(CONCAT(v_server_id, v_bucket_ts, full_url)));
                 
-                -- Insert record with realistic request count distribution
+                
                 INSERT INTO `url_request_stats` (
                     `server_id`, 
                     `bucket_ts`, 
@@ -1149,19 +2153,19 @@ BEGIN
                     url_hash,
                     full_url,
                     CASE 
-                        -- Homepage and static assets get highest traffic
+                        
                         WHEN current_path IN ('/', '/index.html') THEN FLOOR(RAND() * 5000) + 1000
-                        -- API endpoints get medium traffic
+                        
                         WHEN current_path LIKE '/api/%' THEN FLOOR(RAND() * 1000) + 100
-                        -- Static assets (CSS, JS, images)
+                        
                         WHEN current_path LIKE '%/static/%' OR current_path LIKE '%/images/%' OR current_path LIKE '%/cdn/%' THEN FLOOR(RAND() * 2000) + 500
-                        -- Pages (blog, contact, about)
+                        
                         WHEN current_path LIKE '/blog%' OR current_path IN ('/contact', '/about', '/privacy', '/terms') THEN FLOOR(RAND() * 300) + 50
-                        -- Auth and user pages
+                        
                         WHEN current_path IN ('/login', '/register', '/dashboard', '/profile', '/settings') THEN FLOOR(RAND() * 200) + 20
-                        -- System files
+                        
                         WHEN current_path IN ('/robots.txt', '/sitemap.xml', '/favicon.ico', '/manifest.json') THEN FLOOR(RAND() * 100) + 10
-                        -- Default
+                        
                         ELSE FLOOR(RAND() * 100) + 5
                     END
                 ) ON DUPLICATE KEY UPDATE 
@@ -1170,7 +2174,7 @@ BEGIN
                 SET v_url_counter = v_url_counter + 1;
                 SET v_url_index = v_url_index + 1;
                 
-                -- Wrap around if we exceed the URL list
+                
                 IF v_url_index > v_url_count THEN
                     SET v_url_index = 1;
                 END IF;
@@ -1183,17 +2187,27 @@ BEGIN
     
     CLOSE v_server_cursor;
     
-    -- Return summary
+    
     SELECT 
         CONCAT('Generated URL request data for ', 
                (SELECT COUNT(DISTINCT server_id) FROM url_request_stats WHERE bucket_ts >= NOW() - INTERVAL 150 MINUTE),
                ' servers') AS result;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for procedure cdnproxy.GenerateUserAgentStats
-DROP PROCEDURE IF EXISTS `GenerateUserAgentStats`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `GenerateUserAgentStats`;;
 CREATE PROCEDURE `GenerateUserAgentStats`()
 BEGIN
     DECLARE v_server_id BIGINT;
@@ -1205,17 +2219,17 @@ BEGIN
     DECLARE v_ua_count INT;
     DECLARE v_done INT DEFAULT FALSE;
     
-    -- Common user agents list
+    
     DECLARE useragents TEXT DEFAULT 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36,Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0,Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36,Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0,Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15,Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1,Mozilla/5.0 (Linux; Android 14; SM-S901U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36,Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36,Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html),Mozilla/5.0 (compatible; Bingbot/2.0; +http://www.bing.com/bingbot.htm),Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0,Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36,Mozilla/5.0 (iPad; CPU OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1,curl/7.88.1,PostmanRuntime/7.36.0';
     
     DECLARE current_ua TEXT;
     DECLARE ua_hash BINARY(16);
     
-    -- Cursor for servers
+    
     DECLARE v_server_cursor CURSOR FOR SELECT id FROM servers LIMIT 5;
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
     
-    -- Calculate user agent count
+    
     SET v_ua_count = (LENGTH(useragents) - LENGTH(REPLACE(useragents, ',', '')) + 1);
     
     OPEN v_server_cursor;
@@ -1226,34 +2240,34 @@ BEGIN
             LEAVE server_loop;
         END IF;
         
-        -- Reset interval for each server (go back 145 minutes initially)
+        
         SET v_interval_minutes = 145;
         SET v_time_counter = 0;
         
-        -- Generate data for 30 time buckets (5-minute intervals covering ~2.5 hours)
+        
         WHILE v_time_counter < 30 DO
-            -- Calculate bucket time (going backwards in time)
+            
             SET v_bucket_ts = NOW() - INTERVAL v_interval_minutes MINUTE;
-            -- Round to nearest 5-minute bucket
+            
             SET v_bucket_ts = FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(v_bucket_ts) / 300) * 300);
             
-            -- Insert 2-5 different user agents per time bucket
+            
             SET v_ua_counter = 0;
-            -- Start from random position in UA list
+            
             SET v_ua_index = FLOOR(RAND() * (v_ua_count - 2)) + 1;
             
             WHILE v_ua_counter < FLOOR(RAND() * 4) + 2 DO
-                -- Extract user agent from comma-separated list
+                
                 SET current_ua = SUBSTRING_INDEX(
                     SUBSTRING_INDEX(useragents, ',', v_ua_index), 
                     ',', 
                     -1
                 );
                 
-                -- Generate deterministic hash for this user agent
+                
                 SET ua_hash = UNHEX(MD5(CONCAT(v_server_id, v_bucket_ts, current_ua)));
                 
-                -- Insert record
+                
                 INSERT INTO `useragent_request_stats` (
                     `server_id`, 
                     `bucket_ts`, 
@@ -1265,12 +2279,12 @@ BEGIN
                     v_bucket_ts,
                     ua_hash,
                     current_ua,
-                    -- Generate request count with realistic distribution
+                    
                     CASE 
-                        WHEN current_ua LIKE '%bot%' THEN FLOOR(RAND() * 10) + 1      -- Bots: 1-10 requests
-                        WHEN current_ua LIKE '%Mobile%' THEN FLOOR(RAND() * 100) + 10  -- Mobile: 10-110 requests
-                        WHEN current_ua LIKE '%curl%' OR current_ua LIKE '%Postman%' THEN FLOOR(RAND() * 5) + 1  -- Tools: 1-5 requests
-                        ELSE FLOOR(RAND() * 500) + 50                                 -- Desktop browsers: 50-550 requests
+                        WHEN current_ua LIKE '%bot%' THEN FLOOR(RAND() * 10) + 1      
+                        WHEN current_ua LIKE '%Mobile%' THEN FLOOR(RAND() * 100) + 10  
+                        WHEN current_ua LIKE '%curl%' OR current_ua LIKE '%Postman%' THEN FLOOR(RAND() * 5) + 1  
+                        ELSE FLOOR(RAND() * 500) + 50                                 
                     END
                 ) ON DUPLICATE KEY UPDATE 
                     request_count = request_count + VALUES(request_count);
@@ -1278,380 +2292,40 @@ BEGIN
                 SET v_ua_counter = v_ua_counter + 1;
                 SET v_ua_index = v_ua_index + 1;
                 
-                -- Wrap around if we exceed the UA list
+                
                 IF v_ua_index > v_ua_count THEN
                     SET v_ua_index = 1;
                 END IF;
             END WHILE;
             
             SET v_time_counter = v_time_counter + 1;
-            SET v_interval_minutes = v_interval_minutes - 5;  -- Move to next 5-minute bucket
+            SET v_interval_minutes = v_interval_minutes - 5;  
         END WHILE;
     END LOOP;
     
     CLOSE v_server_cursor;
     
-    -- Return summary
+    
     SELECT 
         CONCAT('Generated user agent data for ', 
                (SELECT COUNT(DISTINCT server_id) FROM useragent_request_stats WHERE bucket_ts >= NOW() - INTERVAL 150 MINUTE),
                ' servers') AS result;
-END//
+END ;;
 DELIMITER ;
-
--- Dumping structure for function cdnproxy.get_server_with_defense
-DROP FUNCTION IF EXISTS `get_server_with_defense`;
-DELIMITER //
-CREATE FUNCTION `get_server_with_defense`(p_server_id INT) RETURNS json
-    READS SQL DATA
-    DETERMINISTIC
-BEGIN
-    DECLARE result JSON;
-    
-    SELECT JSON_OBJECT(
-        'server', JSON_OBJECT(
-            'id', s.id,
-            'name', s.name,
-            'ip', s.ip,
-            'l4_id', s.l4_id
-        ),
-        'ddos_defense', JSON_OBJECT(
-            'id', d.id,
-            'global', JSON_OBJECT(
-                'dev', d.dev,
-                'attach_mode', d.attach_mode,
-                'black_ip_duration', d.black_ip_duration
-            ),
-            'syn_protection', JSON_OBJECT(
-                'valid', d.syn_valid,
-                'threshold', d.syn_threshold,
-                'burst_pkt', d.syn_burst_pkt,
-                'burst_count_per_sec', d.syn_burst_count_per_sec,
-                'fixed_threshold', d.syn_fixed_threshold,
-                'fixed_check_duration', d.syn_fixed_check_duration,
-                'challenge_timeout', d.challenge_timeout,
-                'protection_duration', d.syn_protection_duration
-            ),
-            'ack_protection', JSON_OBJECT(
-                'valid', d.ack_valid,
-                'threshold', d.ack_threshold,
-                'burst_pkt', d.ack_burst_pkt,
-                'burst_count_per_sec', d.ack_burst_count_per_sec,
-                'fixed_threshold', d.ack_fixed_threshold,
-                'fixed_check_duration', d.ack_fixed_check_duration,
-                'protection_duration', d.ack_protection_duration
-            )
-            -- Add other sections similarly...
-        )
-    ) INTO result
-    FROM servers s
-    LEFT JOIN l4_ddos_defense d ON s.l4_id = d.id
-    WHERE s.id = p_server_id;
-    
-    RETURN result;
-END//
-DELIMITER ;
-
--- Dumping structure for table cdnproxy.ip_request_stats
-DROP TABLE IF EXISTS `ip_request_stats`;
-CREATE TABLE IF NOT EXISTS `ip_request_stats` (
-  `server_id` bigint NOT NULL,
-  `site_id` bigint NOT NULL DEFAULT 0,
-  `bucket_ts` datetime NOT NULL,
-  `ip` varbinary(16) NOT NULL,
-  `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`ip`),
-  KEY `idx_bucket` (`bucket_ts`),
-  KEY `idx_ip` (`ip`),
-  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
-  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
-  CONSTRAINT `ip_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.isp_request_stats
-DROP TABLE IF EXISTS `isp_request_stats`;
-CREATE TABLE IF NOT EXISTS `isp_request_stats` (
-  `server_id` bigint NOT NULL,
-  `site_id` bigint NOT NULL DEFAULT 0,
-  `bucket_ts` datetime NOT NULL,
-  `isp_hash` binary(16) NOT NULL,
-  `request_isp` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`isp_hash`) USING BTREE,
-  KEY `idx_bucket` (`bucket_ts`) USING BTREE,
-  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
-  KEY `idx_server_bucket` (`server_id`,`bucket_ts`) USING BTREE,
-  CONSTRAINT `isp_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.l4_attack_stats
-DROP TABLE IF EXISTS `l4_attack_stats`;
-CREATE TABLE IF NOT EXISTS `l4_attack_stats` (
-  `server_id` bigint NOT NULL,
-  `bucket_ts` datetime NOT NULL,
-  `total_traffic` bigint unsigned NOT NULL DEFAULT '0',
-  `allowed_traffic` bigint unsigned NOT NULL DEFAULT '0',
-  `blocked_traffic` bigint unsigned NOT NULL DEFAULT '0',
-  `tcp` bigint unsigned NOT NULL DEFAULT '0',
-  `udp` bigint unsigned NOT NULL DEFAULT '0',
-  `icmp` bigint unsigned NOT NULL DEFAULT '0',
-  `gre` bigint unsigned NOT NULL DEFAULT '0',
-  `other` bigint unsigned NOT NULL DEFAULT '0',
-  `tcp_syn` bigint unsigned NOT NULL DEFAULT '0',
-  `tcp_ack` bigint unsigned NOT NULL DEFAULT '0',
-  `tcp_rst` bigint unsigned NOT NULL DEFAULT '0',
-  PRIMARY KEY (`server_id`,`bucket_ts`),
-  KEY `idx_bucket` (`bucket_ts`),
-  CONSTRAINT `l4_attack_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.l4_blacklist
-DROP TABLE IF EXISTS `l4_blacklist`;
-CREATE TABLE IF NOT EXISTS `l4_blacklist` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
-  `source_ip` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `reason` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `l4_blacklist_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1056 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.l4_ddos_defense
-DROP TABLE IF EXISTS `l4_ddos_defense`;
-CREATE TABLE IF NOT EXISTS `l4_ddos_defense` (
-  `id` int NOT NULL AUTO_INCREMENT,
-  `dev` varchar(50) DEFAULT 'eth2',
-  `protection_mode` enum('Always On','Monitor') DEFAULT 'Always On',
-  `sensitivity` enum('Low','Medium','High') DEFAULT 'Medium',
-  `attach_mode` enum('skb','native','drv','hw') DEFAULT 'native',
-  `black_ip_duration` int DEFAULT '3600',
-  `syn_valid` tinyint(1) DEFAULT '1',
-  `syn_threshold` int DEFAULT '200000',
-  `syn_burst_pkt` int DEFAULT '20',
-  `syn_burst_count_per_sec` int DEFAULT '10',
-  `syn_fixed_threshold` int DEFAULT '2000',
-  `syn_fixed_check_duration` int DEFAULT '15',
-  `challenge_timeout` int DEFAULT '3',
-  `syn_protection_duration` int DEFAULT '60',
-  `ack_valid` tinyint(1) DEFAULT '1',
-  `ack_threshold` int DEFAULT '200000',
-  `ack_burst_pkt` int DEFAULT '200',
-  `ack_burst_count_per_sec` int DEFAULT '100',
-  `ack_fixed_threshold` int DEFAULT '2000',
-  `ack_fixed_check_duration` int DEFAULT '15',
-  `ack_protection_duration` int DEFAULT '60',
-  `rst_valid` tinyint(1) DEFAULT '1',
-  `rst_threshold` int DEFAULT '200000',
-  `rst_burst_pkt` int DEFAULT '20',
-  `rst_burst_count_per_sec` int DEFAULT '10',
-  `rst_fixed_threshold` int DEFAULT '2000',
-  `rst_fixed_check_duration` int DEFAULT '15',
-  `rst_protection_duration` int DEFAULT '60',
-  `icmp_valid` tinyint(1) DEFAULT '1',
-  `icmp_threshold` int DEFAULT '200000',
-  `icmp_burst_pkt` int DEFAULT '20',
-  `icmp_burst_count_per_sec` int DEFAULT '10',
-  `icmp_fixed_threshold` int DEFAULT '2000',
-  `icmp_fixed_check_duration` int DEFAULT '15',
-  `icmp_protection_duration` int DEFAULT '60',
-  `udp_valid` tinyint(1) DEFAULT '1',
-  `udp_threshold` int DEFAULT '200000',
-  `udp_burst_pkt` int DEFAULT '20',
-  `udp_burst_count_per_sec` int DEFAULT '10',
-  `udp_fixed_threshold` int DEFAULT '2000',
-  `udp_fixed_check_duration` int DEFAULT '15',
-  `udp_protection_duration` int DEFAULT '60',
-  `gre_valid` tinyint(1) DEFAULT '1',
-  `gre_threshold` int DEFAULT '200000',
-  `gre_burst_pkt` int DEFAULT '20',
-  `gre_burst_count_per_sec` int DEFAULT '10',
-  `gre_fixed_threshold` int DEFAULT '2000',
-  `gre_fixed_check_duration` int DEFAULT '15',
-  `gre_protection_duration` int DEFAULT '60',
-  `tcp_seg_check` tinyint(1) DEFAULT '0',
-  `geo_check` tinyint(1) DEFAULT '0',
-  `geo_db_ipv4_path` varchar(255) DEFAULT 'geodb/ipv4.csv',
-  `geo_db_location_path` varchar(255) DEFAULT 'geodb/location.csv',
-  `geo_allow_countries` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `tcp_connection_limit_check` tinyint(1) DEFAULT '1',
-  `tcp_connection_limit_cnt` int DEFAULT '50',
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`)
-) ENGINE=InnoDB AUTO_INCREMENT=1137 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.l4_live_attack
-DROP TABLE IF EXISTS `l4_live_attack`;
-CREATE TABLE IF NOT EXISTS `l4_live_attack` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
-  `source_ip` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `attack_type` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `l4_live_attack_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1070 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.l4_whitelist
-DROP TABLE IF EXISTS `l4_whitelist`;
-CREATE TABLE IF NOT EXISTS `l4_whitelist` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
-  `source_ip` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `reason` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `l4_whitelist_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1055 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.referer_request_stats
-DROP TABLE IF EXISTS `referer_request_stats`;
-CREATE TABLE IF NOT EXISTS `referer_request_stats` (
-  `server_id` bigint NOT NULL,
-  `site_id` bigint NOT NULL DEFAULT 0,
-  `bucket_ts` datetime NOT NULL,
-  `referer_hash` binary(16) NOT NULL,
-  `request_referer` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`referer_hash`) USING BTREE,
-  KEY `idx_bucket` (`bucket_ts`) USING BTREE,
-  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
-  KEY `idx_server_bucket` (`server_id`,`bucket_ts`) USING BTREE,
-  CONSTRAINT `referer_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.security_events
-DROP TABLE IF EXISTS `security_events`;
-CREATE TABLE IF NOT EXISTS `security_events` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `title` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `description` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE
-) ENGINE=InnoDB AUTO_INCREMENT=1021 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.servers
-DROP TABLE IF EXISTS `servers`;
-CREATE TABLE IF NOT EXISTS `servers` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `name` varchar(255) DEFAULT NULL,
-  `ip` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `status` enum('Normal','Pause','Expired') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'Normal',
-  `license_type` enum('Enterprise','Professional','Trial') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'Trial',
-  `license_file` varchar(1024) DEFAULT NULL,
-  `version` varchar(50) DEFAULT NULL,
-  `created` datetime DEFAULT NULL,
-  `expired` datetime DEFAULT NULL,
-  `ssh_user` varchar(64) DEFAULT NULL,
-  `ssh_password` varchar(255) DEFAULT NULL,
-  `ssh_port` int DEFAULT '22',
-  `l4_id` int DEFAULT NULL,
-  `token` varchar(255) DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  KEY `id` (`id`),
-  KEY `idx_servers_l4_id` (`l4_id`),
-  CONSTRAINT `fk_server_l4_defense` FOREIGN KEY (`l4_id`) REFERENCES `l4_ddos_defense` (`id`) ON DELETE SET NULL
-) ENGINE=InnoDB AUTO_INCREMENT=1033 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.server_traffic_stats
-DROP TABLE IF EXISTS `server_traffic_stats`;
-CREATE TABLE IF NOT EXISTS `server_traffic_stats` (
-  `server_id` bigint NOT NULL,
-  `bucket_ts` datetime NOT NULL,
-  `traffic_nic_rx` float unsigned NOT NULL DEFAULT (0),
-  `traffic_nic_tx` float unsigned NOT NULL DEFAULT (0),
-  `traffic_l7_rx` float unsigned NOT NULL DEFAULT (0),
-  `traffic_l7_tx` float unsigned NOT NULL DEFAULT (0),
-  `bandwidth_nic_rx` bigint unsigned NOT NULL DEFAULT '0',
-  `bandwidth_nic_tx` bigint unsigned NOT NULL DEFAULT '0',
-  `bandwidth_l7_rx` bigint unsigned NOT NULL DEFAULT '0',
-  `bandwidth_l7_tx` bigint unsigned NOT NULL DEFAULT '0',
-  `request_count` bigint unsigned NOT NULL DEFAULT '0',
-  `response_count` bigint unsigned NOT NULL DEFAULT '0',
-  `blocked_request_count` bigint unsigned NOT NULL DEFAULT '0',
-  `ip_count` int unsigned NOT NULL DEFAULT '0',
-  `blocked_ip_count` int unsigned NOT NULL DEFAULT '0',
-  `code200` bigint unsigned NOT NULL DEFAULT '0',
-  `code206` bigint unsigned NOT NULL DEFAULT '0',
-  `code301` bigint unsigned NOT NULL DEFAULT '0',
-  `code302` bigint unsigned NOT NULL DEFAULT '0',
-  `code400` bigint unsigned NOT NULL DEFAULT '0',
-  `code403` bigint unsigned NOT NULL DEFAULT '0',
-  `code404` bigint unsigned NOT NULL DEFAULT '0',
-  `code444` bigint unsigned NOT NULL DEFAULT '0',
-  `code499` bigint unsigned NOT NULL DEFAULT '0',
-  `code500` bigint unsigned NOT NULL DEFAULT '0',
-  `code502` bigint unsigned NOT NULL DEFAULT '0',
-  `code503` bigint unsigned NOT NULL DEFAULT '0',
-  `code504` bigint unsigned NOT NULL DEFAULT '0',
-  `code904` bigint unsigned NOT NULL DEFAULT '0',
-  `code929` bigint unsigned NOT NULL DEFAULT '0',
-  `code978` bigint unsigned NOT NULL DEFAULT '0',
-  `get_count` bigint unsigned NOT NULL DEFAULT '0',
-  `post_count` bigint unsigned NOT NULL DEFAULT '0',
-  `delete_count` bigint unsigned NOT NULL DEFAULT '0',
-  `put_count` bigint unsigned NOT NULL DEFAULT '0',
-  `head_count` bigint unsigned NOT NULL DEFAULT '0',
-  `patch_count` bigint unsigned NOT NULL DEFAULT '0',
-  `options_count` bigint unsigned NOT NULL DEFAULT '0',
-  `others_count` bigint unsigned NOT NULL DEFAULT '0',
-  `http1_0_count` bigint unsigned NOT NULL DEFAULT '0',
-  `http1_1_count` bigint unsigned NOT NULL DEFAULT '0',
-  `http2_count` bigint unsigned NOT NULL DEFAULT '0',
-  `http3_count` bigint unsigned NOT NULL DEFAULT '0',
-  PRIMARY KEY (`server_id`,`bucket_ts`),
-  KEY `idx_bucket` (`bucket_ts`),
-  CONSTRAINT `server_traffic_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.server_users
-DROP TABLE IF EXISTS `server_users`;
-CREATE TABLE IF NOT EXISTS `server_users` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
-  `user_id` bigint NOT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `unique_membership` (`server_id`,`user_id`),
-  KEY `user_id` (`user_id`),
-  CONSTRAINT `server_users_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `server_users_ibfk_2` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1074 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for procedure cdnproxy.SP_GENERATE_L4_ATTACK_STATS
-DROP PROCEDURE IF EXISTS `SP_GENERATE_L4_ATTACK_STATS`;
-DELIMITER //
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'NO_AUTO_VALUE_ON_ZERO' */ ;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_general_ci */ ;
+DELIMITER ;;
+DROP PROCEDURE IF EXISTS `SP_GENERATE_L4_ATTACK_STATS`;;
 CREATE PROCEDURE `SP_GENERATE_L4_ATTACK_STATS`()
 BEGIN
     DECLARE v_server_id BIGINT;
@@ -1660,24 +2334,24 @@ BEGIN
     DECLARE v_time_counter INT;
     DECLARE v_done INT DEFAULT FALSE;
     
-    -- Traffic patterns for different times
+    
     DECLARE v_base_traffic BIGINT UNSIGNED;
     DECLARE v_attack_factor DECIMAL(5,2);
     DECLARE v_block_rate DECIMAL(5,2);
     
-    -- Protocol distributions
+    
     DECLARE v_tcp_ratio DECIMAL(5,4);
     DECLARE v_udp_ratio DECIMAL(5,4);
     DECLARE v_icmp_ratio DECIMAL(5,4);
     DECLARE v_gre_ratio DECIMAL(5,4);
     DECLARE v_other_ratio DECIMAL(5,4);
     
-    -- TCP flag distributions
+    
     DECLARE v_tcp_syn_ratio DECIMAL(5,4);
     DECLARE v_tcp_ack_ratio DECIMAL(5,4);
     DECLARE v_tcp_rst_ratio DECIMAL(5,4);
     
-    -- Calculated values
+    
     DECLARE v_total_traffic BIGINT UNSIGNED;
     DECLARE v_allowed_traffic BIGINT UNSIGNED;
     DECLARE v_blocked_traffic BIGINT UNSIGNED;
@@ -1690,7 +2364,7 @@ BEGIN
     DECLARE v_tcp_ack_traffic BIGINT UNSIGNED;
     DECLARE v_tcp_rst_traffic BIGINT UNSIGNED;
     
-    -- Cursor for servers
+    
     DECLARE v_server_cursor CURSOR FOR SELECT id FROM servers LIMIT 5;
     DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = TRUE;
     
@@ -1702,54 +2376,54 @@ BEGIN
             LEAVE server_loop;
         END IF;
         
-        -- Reset interval for each server
+        
         SET v_interval_minutes = 145;
         SET v_time_counter = 0;
         
-        -- Generate data for 30 time buckets (5-minute intervals over ~2.5 hours)
+        
         WHILE v_time_counter < 30 DO
-            -- Calculate bucket time (going backwards)
+            
             SET v_bucket_ts = NOW() - INTERVAL v_interval_minutes MINUTE;
             SET v_bucket_ts = FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(v_bucket_ts) / 300) * 300);
             
-            -- Determine traffic patterns based on time and server
+            
             SET @hour = HOUR(v_bucket_ts);
             SET @minute = MINUTE(v_bucket_ts);
             SET @server_mod = MOD(v_server_id, 3);
             
-            -- Base traffic varies by time of day (in bytes)
-            -- Reduced to smaller values to avoid overflow
+            
+            
             SET v_base_traffic = CASE 
-                WHEN @hour BETWEEN 0 AND 5 THEN 50000000    -- 50 MB overnight
-                WHEN @hour BETWEEN 6 AND 9 THEN 150000000   -- 150 MB morning rush
-                WHEN @hour BETWEEN 10 AND 17 THEN 200000000 -- 200 MB daytime peak
-                WHEN @hour BETWEEN 18 AND 21 THEN 250000000 -- 250 MB evening peak
-                ELSE 100000000                              -- 100 MB late night
+                WHEN @hour BETWEEN 0 AND 5 THEN 50000000    
+                WHEN @hour BETWEEN 6 AND 9 THEN 150000000   
+                WHEN @hour BETWEEN 10 AND 17 THEN 200000000 
+                WHEN @hour BETWEEN 18 AND 21 THEN 250000000 
+                ELSE 100000000                              
             END;
             
-            -- Attack factor (0.1 to 3.0) - higher during certain times
+            
             SET v_attack_factor = CASE 
-                WHEN @hour BETWEEN 2 AND 4 THEN 0.5 + (RAND() * 1.0)   -- Low attack period
-                WHEN @hour BETWEEN 9 AND 11 THEN 1.5 + (RAND() * 1.5)  -- Morning attacks
-                WHEN @hour BETWEEN 14 AND 16 THEN 2.0 + (RAND() * 1.0) -- Afternoon DDoS
-                WHEN @hour BETWEEN 19 AND 21 THEN 1.8 + (RAND() * 1.2) -- Evening attacks
-                ELSE 0.8 + (RAND() * 0.7)                             -- Normal periods
+                WHEN @hour BETWEEN 2 AND 4 THEN 0.5 + (RAND() * 1.0)   
+                WHEN @hour BETWEEN 9 AND 11 THEN 1.5 + (RAND() * 1.5)  
+                WHEN @hour BETWEEN 14 AND 16 THEN 2.0 + (RAND() * 1.0) 
+                WHEN @hour BETWEEN 19 AND 21 THEN 1.8 + (RAND() * 1.2) 
+                ELSE 0.8 + (RAND() * 0.7)                             
             END;
             
-            -- Block rate varies by server and time (0.01 to 0.30)
+            
             SET v_block_rate = 0.05 + (@server_mod * 0.08) + (RAND() * 0.12);
             SET v_block_rate = LEAST(GREATEST(v_block_rate, 0.01), 0.30);
             
-            -- Protocol distribution (sums to 1.0)
-            SET v_tcp_ratio = 0.65 + (RAND() * 0.20);   -- 65-85% TCP
-            SET v_udp_ratio = 0.10 + (RAND() * 0.15);   -- 10-25% UDP
-            SET v_icmp_ratio = 0.02 + (RAND() * 0.03);  -- 2-5% ICMP
-            SET v_gre_ratio = 0.01 + (RAND() * 0.02);   -- 1-3% GRE
             
-            -- Calculate other ratio ensuring it doesn't go negative
+            SET v_tcp_ratio = 0.65 + (RAND() * 0.20);   
+            SET v_udp_ratio = 0.10 + (RAND() * 0.15);   
+            SET v_icmp_ratio = 0.02 + (RAND() * 0.03);  
+            SET v_gre_ratio = 0.01 + (RAND() * 0.02);   
+            
+            
             SET v_other_ratio = GREATEST(0, 1.0 - (v_tcp_ratio + v_udp_ratio + v_icmp_ratio + v_gre_ratio));
             
-            -- Normalize ratios to ensure they sum to 1.0
+            
             SET @sum_ratios = v_tcp_ratio + v_udp_ratio + v_icmp_ratio + v_gre_ratio + v_other_ratio;
             SET v_tcp_ratio = v_tcp_ratio / @sum_ratios;
             SET v_udp_ratio = v_udp_ratio / @sum_ratios;
@@ -1757,12 +2431,12 @@ BEGIN
             SET v_gre_ratio = v_gre_ratio / @sum_ratios;
             SET v_other_ratio = v_other_ratio / @sum_ratios;
             
-            -- TCP flag distribution (within TCP traffic)
-            SET v_tcp_syn_ratio = 0.40 + (RAND() * 0.30);  -- 40-70% SYN
-            SET v_tcp_ack_ratio = 0.20 + (RAND() * 0.20);  -- 20-40% ACK
-            SET v_tcp_rst_ratio = 0.05 + (RAND() * 0.10);  -- 5-15% RST
             
-            -- Normalize TCP flag ratios
+            SET v_tcp_syn_ratio = 0.40 + (RAND() * 0.30);  
+            SET v_tcp_ack_ratio = 0.20 + (RAND() * 0.20);  
+            SET v_tcp_rst_ratio = 0.05 + (RAND() * 0.10);  
+            
+            
             SET @sum_tcp_ratios = v_tcp_syn_ratio + v_tcp_ack_ratio + v_tcp_rst_ratio;
             IF @sum_tcp_ratios > 1.0 THEN
                 SET v_tcp_syn_ratio = v_tcp_syn_ratio / @sum_tcp_ratios;
@@ -1770,36 +2444,36 @@ BEGIN
                 SET v_tcp_rst_ratio = v_tcp_rst_ratio / @sum_tcp_ratios;
             END IF;
             
-            -- Calculate total traffic with attack factor
+            
             SET v_total_traffic = FLOOR(v_base_traffic * v_attack_factor * (0.9 + RAND() * 0.2));
             
-            -- Calculate blocked traffic (ensure it's less than total)
+            
             SET v_blocked_traffic = FLOOR(v_total_traffic * v_block_rate * (0.8 + RAND() * 0.4));
             SET v_blocked_traffic = LEAST(v_total_traffic - 1, v_blocked_traffic);
             SET v_allowed_traffic = v_total_traffic - v_blocked_traffic;
             
-            -- Calculate protocol-specific traffic
+            
             SET v_tcp_traffic = FLOOR(v_total_traffic * v_tcp_ratio);
             SET v_udp_traffic = FLOOR(v_total_traffic * v_udp_ratio);
             SET v_icmp_traffic = FLOOR(v_total_traffic * v_icmp_ratio);
             SET v_gre_traffic = FLOOR(v_total_traffic * v_gre_ratio);
             
-            -- Calculate other traffic as remainder
+            
             SET v_other_traffic = v_total_traffic - (v_tcp_traffic + v_udp_traffic + v_icmp_traffic + v_gre_traffic);
             
-            -- Ensure v_other_traffic is not negative
+            
             IF v_other_traffic < 0 THEN
-                -- Adjust by reducing from largest protocol
+                
                 SET v_tcp_traffic = v_tcp_traffic + v_other_traffic;
                 SET v_other_traffic = 0;
             END IF;
             
-            -- Calculate TCP flag traffic (within TCP traffic)
+            
             SET v_tcp_syn_traffic = FLOOR(v_tcp_traffic * v_tcp_syn_ratio);
             SET v_tcp_ack_traffic = FLOOR(v_tcp_traffic * v_tcp_ack_ratio);
             SET v_tcp_rst_traffic = FLOOR(v_tcp_traffic * v_tcp_rst_ratio);
             
-            -- Ensure TCP flag traffic doesn't exceed TCP traffic
+            
             SET @tcp_flags_sum = v_tcp_syn_traffic + v_tcp_ack_traffic + v_tcp_rst_traffic;
             IF @tcp_flags_sum > v_tcp_traffic THEN
                 SET v_tcp_syn_traffic = FLOOR(v_tcp_syn_traffic * v_tcp_traffic / @tcp_flags_sum);
@@ -1807,7 +2481,7 @@ BEGIN
                 SET v_tcp_rst_traffic = v_tcp_traffic - v_tcp_syn_traffic - v_tcp_ack_traffic;
             END IF;
             
-            -- Insert record
+            
             INSERT INTO `l4_attack_stats` (
                 `server_id`, 
                 `bucket_ts`, 
@@ -1856,560 +2530,31 @@ BEGIN
     
     CLOSE v_server_cursor;
     
-    -- Return summary
+    
     SELECT 
         CONCAT('Generated L4 attack stats for ', 
                (SELECT COUNT(DISTINCT server_id) FROM l4_attack_stats WHERE bucket_ts >= NOW() - INTERVAL 150 MINUTE),
                ' servers') AS RESULT;
-END//
+END ;;
 DELIMITER ;
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
 
--- Dumping structure for table cdnproxy.upstream_servers
-DROP TABLE IF EXISTS `upstream_servers`;
-CREATE TABLE IF NOT EXISTS `upstream_servers` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `site_id` bigint NOT NULL,
-  `ip_port` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `protocol` enum('HTTP','HTTPS') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'HTTP',
-  `description` varchar(500) NOT NULL DEFAULT '0',
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `site_id` (`site_id`) USING BTREE,
-  CONSTRAINT `upstream_servers_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1018 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.listening_ports
-DROP TABLE IF EXISTS `listening_ports`;
-CREATE TABLE IF NOT EXISTS `listening_ports` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `server_id` bigint NOT NULL,
-  `port` int NOT NULL,
-  `protocol` enum('HTTP','HTTPS') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'HTTP',
-  `description` varchar(500) NOT NULL DEFAULT '',
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `server_id` (`server_id`) USING BTREE,
-  CONSTRAINT `listening_ports_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.site_listening_ports
-DROP TABLE IF EXISTS `site_listening_ports`;
-CREATE TABLE IF NOT EXISTS `site_listening_ports` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `site_id` bigint NOT NULL,
-  `listening_port_id` bigint NOT NULL,
-  `created_at` timestamp NULL DEFAULT (now()),
-  PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE KEY `site_listening_port_unique` (`site_id`, `listening_port_id`) USING BTREE,
-  KEY `site_id` (`site_id`) USING BTREE,
-  KEY `listening_port_id` (`listening_port_id`) USING BTREE,
-  CONSTRAINT `site_listening_ports_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT `site_listening_ports_port_fk` FOREIGN KEY (`listening_port_id`) REFERENCES `listening_ports` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.cache_rules
-DROP TABLE IF EXISTS `cache_rules`;
-CREATE TABLE IF NOT EXISTS `cache_rules` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `site_id` bigint NOT NULL,
-  `rule_name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `rule_type` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'file',
-  `caching_time` int NOT NULL DEFAULT 3600,
-  `url` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
-  `file_types` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
-  `priority` int NOT NULL DEFAULT 1000,
-  `cache_slice` double NOT NULL DEFAULT 100,
-  `without_parameter` varchar(16) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'yes',
-  `cache_mode` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'origin',
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `site_id` (`site_id`) USING BTREE,
-  CONSTRAINT `cache_rules_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.compress_settings
-DROP TABLE IF EXISTS `compress_settings`;
-CREATE TABLE IF NOT EXISTS `compress_settings` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `site_id` bigint NOT NULL,
-  `css` tinyint(1) NOT NULL DEFAULT 1,
-  `html` tinyint(1) NOT NULL DEFAULT 1,
-  `js` tinyint(1) NOT NULL DEFAULT 1,
-  `audio` tinyint(1) NOT NULL DEFAULT 0,
-  `font` tinyint(1) NOT NULL DEFAULT 0,
-  `applications` tinyint(1) NOT NULL DEFAULT 0,
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE KEY `site_id` (`site_id`) USING BTREE,
-  CONSTRAINT `compress_settings_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.sites
-DROP TABLE IF EXISTS `sites`;
-CREATE TABLE IF NOT EXISTS `sites` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `domain` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  `waf_id` bigint DEFAULT NULL,
-  `certificate_status` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',
-  `certificate_expiry` datetime DEFAULT NULL,
-  `certificate_error` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `cache_ratio` double NOT NULL DEFAULT 0,
-  `bandwidth` bigint unsigned NOT NULL DEFAULT 0,
-  `ssl_type` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'none',
-  `ssl_cert` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `ssl_cert_key` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  UNIQUE KEY `unique_site_domain` (`domain`) USING BTREE,
-  KEY `waf_id` (`waf_id`) USING BTREE,
-  CONSTRAINT `sites_waf_rule_fk` FOREIGN KEY (`waf_id`) REFERENCES `waf_rule` (`id`) ON DELETE SET NULL ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.site_servers
-DROP TABLE IF EXISTS `site_servers`;
-CREATE TABLE IF NOT EXISTS `site_servers` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `site_id` bigint NOT NULL,
-  `server_id` bigint NOT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `unique_site_server` (`site_id`, `server_id`),
-  KEY `server_id` (`server_id`),
-  CONSTRAINT `site_servers_ibfk_1` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
-  CONSTRAINT `site_servers_ibfk_2` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.site_traffic_stats
-DROP TABLE IF EXISTS `site_traffic_stats`;
-CREATE TABLE IF NOT EXISTS `site_traffic_stats` (
-  `server_id` bigint NOT NULL,
-  `site_id` bigint NOT NULL,
-  `bucket_ts` datetime NOT NULL,
-  `traffic_l7_rx` float unsigned NOT NULL DEFAULT (0),
-  `traffic_l7_tx` float unsigned NOT NULL DEFAULT (0),
-  `bandwidth_l7_rx` bigint unsigned NOT NULL DEFAULT '0',
-  `bandwidth_l7_tx` bigint unsigned NOT NULL DEFAULT '0',
-  `request_count` bigint unsigned NOT NULL DEFAULT '0',
-  `response_count` bigint unsigned NOT NULL DEFAULT '0',
-  `blocked_request_count` bigint unsigned NOT NULL DEFAULT '0',
-  `ip_count` int unsigned NOT NULL DEFAULT '0',
-  `blocked_ip_count` int unsigned NOT NULL DEFAULT '0',
-  `code200` bigint unsigned NOT NULL DEFAULT '0',
-  `code206` bigint unsigned NOT NULL DEFAULT '0',
-  `code301` bigint unsigned NOT NULL DEFAULT '0',
-  `code302` bigint unsigned NOT NULL DEFAULT '0',
-  `code400` bigint unsigned NOT NULL DEFAULT '0',
-  `code403` bigint unsigned NOT NULL DEFAULT '0',
-  `code404` bigint unsigned NOT NULL DEFAULT '0',
-  `code444` bigint unsigned NOT NULL DEFAULT '0',
-  `code499` bigint unsigned NOT NULL DEFAULT '0',
-  `code500` bigint unsigned NOT NULL DEFAULT '0',
-  `code501` bigint unsigned NOT NULL DEFAULT '0',
-  `code502` bigint unsigned NOT NULL DEFAULT '0',
-  `code503` bigint unsigned NOT NULL DEFAULT '0',
-  `code504` bigint unsigned NOT NULL DEFAULT '0',
-  `code904` bigint unsigned NOT NULL DEFAULT '0',
-  `code929` bigint unsigned NOT NULL DEFAULT '0',
-  `code978` bigint unsigned NOT NULL DEFAULT '0',
-  `get_count` bigint unsigned NOT NULL DEFAULT '0',
-  `post_count` bigint unsigned NOT NULL DEFAULT '0',
-  `delete_count` bigint unsigned NOT NULL DEFAULT '0',
-  `put_count` bigint unsigned NOT NULL DEFAULT '0',
-  `head_count` bigint unsigned NOT NULL DEFAULT '0',
-  `patch_count` bigint unsigned NOT NULL DEFAULT '0',
-  `options_count` bigint unsigned NOT NULL DEFAULT '0',
-  `others_count` bigint unsigned NOT NULL DEFAULT '0',
-  `http1_0_count` bigint unsigned NOT NULL DEFAULT '0',
-  `http1_1_count` bigint unsigned NOT NULL DEFAULT '0',
-  `http2_count` bigint unsigned NOT NULL DEFAULT '0',
-  `http3_count` bigint unsigned NOT NULL DEFAULT '0',
-  `cache_hit_count` bigint unsigned NOT NULL DEFAULT '0',
-  `cache_miss_count` bigint unsigned NOT NULL DEFAULT '0',
-  `cache_bypass_count` bigint unsigned NOT NULL DEFAULT '0',
-  `cache_hit_ratio` double NOT NULL DEFAULT '0',
-  PRIMARY KEY (`server_id`, `site_id`, `bucket_ts`),
-  KEY `idx_bucket` (`bucket_ts`),
-  KEY `idx_site_bucket` (`site_id`, `bucket_ts`),
-  KEY `idx_server_bucket` (`server_id`, `bucket_ts`),
-  CONSTRAINT `site_traffic_stats_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.domain_request_stats
-DROP TABLE IF EXISTS `domain_request_stats`;
-CREATE TABLE IF NOT EXISTS `domain_request_stats` (
-  `server_id` bigint NOT NULL,
-  `site_id` bigint NOT NULL,
-  `bucket_ts` datetime NOT NULL,
-  `domain_hash` binary(16) NOT NULL,
-  `request_domain` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `request_count` int unsigned NOT NULL DEFAULT '1',
-  `traffic_l7_rx` bigint unsigned NOT NULL DEFAULT '0',
-  `traffic_l7_tx` bigint unsigned NOT NULL DEFAULT '0',
-  `bandwidth_l7_rx` bigint unsigned NOT NULL DEFAULT '0',
-  `bandwidth_l7_tx` bigint unsigned NOT NULL DEFAULT '0',
-  PRIMARY KEY (`server_id`, `site_id`, `bucket_ts`, `domain_hash`),
-  KEY `idx_bucket` (`bucket_ts`),
-  KEY `idx_site_bucket` (`site_id`, `bucket_ts`),
-  KEY `idx_server_bucket` (`server_id`, `bucket_ts`),
-  CONSTRAINT `domain_request_stats_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.url_request_stats
-DROP TABLE IF EXISTS `url_request_stats`;
-CREATE TABLE IF NOT EXISTS `url_request_stats` (
-  `server_id` bigint NOT NULL,
-  `site_id` bigint NOT NULL DEFAULT 0,
-  `bucket_ts` datetime NOT NULL,
-  `url_hash` binary(16) NOT NULL,
-  `request_url` text NOT NULL,
-  `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`url_hash`),
-  KEY `idx_bucket` (`bucket_ts`),
-  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
-  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
-  CONSTRAINT `url_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.useragent_request_stats
-DROP TABLE IF EXISTS `useragent_request_stats`;
-CREATE TABLE IF NOT EXISTS `useragent_request_stats` (
-  `server_id` bigint NOT NULL,
-  `site_id` bigint NOT NULL DEFAULT 0,
-  `bucket_ts` datetime NOT NULL,
-  `useragent_hash` binary(16) NOT NULL,
-  `request_useragent` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `request_count` int unsigned NOT NULL DEFAULT '1',
-  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`useragent_hash`) USING BTREE,
-  KEY `idx_bucket` (`bucket_ts`) USING BTREE,
-  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
-  KEY `idx_server_bucket` (`server_id`,`bucket_ts`) USING BTREE,
-  CONSTRAINT `useragent_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.users
-DROP TABLE IF EXISTS `users`;
-CREATE TABLE IF NOT EXISTS `users` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `name` varchar(255) NOT NULL,
-  `email` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `password` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `role` enum('Admin','User') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `status` enum('Waiting','Active','Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `created` datetime DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `email` (`email`)
-) ENGINE=InnoDB AUTO_INCREMENT=1007 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
-
--- Dumping structure for table cdnproxy.waf_rule
-DROP TABLE IF EXISTS `waf_rule`;
-CREATE TABLE IF NOT EXISTS `waf_rule` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `name` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `role` enum('predefined','custom') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `created_at` timestamp NULL DEFAULT (now()),
-  PRIMARY KEY (`id`) USING BTREE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.waf_anticc
-DROP TABLE IF EXISTS `waf_anticc`;
-CREATE TABLE IF NOT EXISTS `waf_anticc` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `waf_rule_id` bigint NOT NULL,
-  `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `method` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  `threshold` int DEFAULT NULL,
-  `window` int DEFAULT NULL,
-  `action` enum('5-Second Shield','Challenge','Return Code') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `behavior` enum('Deny','Drop','Drop+Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Drop',
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
-  CONSTRAINT `waf_anticc_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1006 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.waf_antiheader
-DROP TABLE IF EXISTS `waf_antiheader`;
-CREATE TABLE IF NOT EXISTS `waf_antiheader` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `waf_rule_id` bigint NOT NULL,
-  `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `header` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `value` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `block_mode` enum('If match','If not match') DEFAULT NULL,
-  `behavior` enum('Deny','Drop','Drop+Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Drop',
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
-  CONSTRAINT `waf_antiheader_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1008 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.waf_blacklist
-DROP TABLE IF EXISTS `waf_blacklist`;
-CREATE TABLE IF NOT EXISTS `waf_blacklist` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `waf_rule_id` bigint NOT NULL,
-  `black_ip_list` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `method` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `behavior` enum('Deny','Drop','Drop+Block') NOT NULL DEFAULT 'Drop',
-  `description` text CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
-  CONSTRAINT `waf_blacklist_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1029 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.waf_geolocation
-DROP TABLE IF EXISTS `waf_geolocation`;
-CREATE TABLE IF NOT EXISTS `waf_geolocation` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `waf_rule_id` bigint NOT NULL,
-  `country` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `behavior` enum('Deny','Drop','Drop+Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Drop',
-  `created_at` timestamp NULL DEFAULT (now()),
-  `operation` enum('BLACK','WHITE') DEFAULT 'BLACK',
-  `status` enum('ENABLE','DISABLE') DEFAULT 'ENABLE',
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
-  CONSTRAINT `waf_geolocation_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1008 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.waf_intervalfreqlimit
-DROP TABLE IF EXISTS `waf_intervalfreqlimit`;
-CREATE TABLE IF NOT EXISTS `waf_intervalfreqlimit` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `waf_rule_id` bigint NOT NULL,
-  `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `time` int NOT NULL DEFAULT (0),
-  `request_count` int NOT NULL DEFAULT (0),
-  `behavior` enum('Deny','Drop','Drop+Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Drop',
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
-  CONSTRAINT `waf_intervalfreqlimit_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1008 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.waf_responsefreq
-DROP TABLE IF EXISTS `waf_responsefreq`;
-CREATE TABLE IF NOT EXISTS `waf_responsefreq` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `waf_rule_id` bigint NOT NULL,
-  `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `response_code` varchar(100) NOT NULL DEFAULT '0',
-  `time` int NOT NULL DEFAULT '0',
-  `response_count` int DEFAULT NULL,
-  `behavior` enum('Deny','Drop','Drop+Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Drop',
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
-  CONSTRAINT `waf_responsefreq_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1010 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.waf_secondfreqlimit
-DROP TABLE IF EXISTS `waf_secondfreqlimit`;
-CREATE TABLE IF NOT EXISTS `waf_secondfreqlimit` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `waf_rule_id` bigint NOT NULL,
-  `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `request_count` int NOT NULL DEFAULT '0',
-  `burst` int NOT NULL DEFAULT '0',
-  `behavior` enum('Deny','Drop','Drop+Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Drop',
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
-  CONSTRAINT `waf_secondfreqlimit_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1009 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.waf_useragent
-DROP TABLE IF EXISTS `waf_useragent`;
-CREATE TABLE IF NOT EXISTS `waf_useragent` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `waf_rule_id` bigint NOT NULL,
-  `url` varchar(500) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `user_agent` varchar(500) NOT NULL DEFAULT '0',
-  `match` enum('Equals','Contains','Regex') NOT NULL DEFAULT 'Equals',
-  `behavior` enum('Deny','Drop','Drop+Block') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'Drop',
-  `status` enum('ENABLE','DISABLE') CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci DEFAULT 'ENABLE',
-  `created_at` timestamp NULL DEFAULT (now()),
-  `updated_at` timestamp NULL DEFAULT (now()) ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`) USING BTREE,
-  KEY `waf_rule_id` (`waf_rule_id`) USING BTREE,
-  CONSTRAINT `waf_useragent_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1010 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for table cdnproxy.waf_whitelist
-DROP TABLE IF EXISTS `waf_whitelist`;
-CREATE TABLE IF NOT EXISTS `waf_whitelist` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `waf_rule_id` bigint NOT NULL,
-  `white_ip_list` varchar(255) NOT NULL,
-  `url` varchar(500) NOT NULL,
-  `method` varchar(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
-  `description` text,
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  KEY `waf_rule_id` (`waf_rule_id`),
-  CONSTRAINT `waf_whitelist_waf_rule_fk` FOREIGN KEY (`waf_rule_id`) REFERENCES `waf_rule` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
-) ENGINE=InnoDB AUTO_INCREMENT=1015 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Data exporting was unselected.
-
--- Dumping structure for trigger cdnproxy.trg_create_l4_defense_on_server_insert
-DROP TRIGGER IF EXISTS `trg_create_l4_defense_on_server_insert`;
-SET @OLDTMP_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
-DELIMITER //
-CREATE TRIGGER `trg_create_l4_defense_on_server_insert` BEFORE INSERT ON `servers` FOR EACH ROW BEGIN
-    DECLARE new_l4_id INT;
-    
-    IF NEW.l4_id IS NULL THEN
-        -- Insert default DDoS defense configuration
-        INSERT INTO l4_ddos_defense () VALUES ();
-        
-        SET new_l4_id = LAST_INSERT_ID();
-        SET NEW.l4_id = new_l4_id;
-    END IF;
-END//
-DELIMITER ;
-SET SQL_MODE=@OLDTMP_SQL_MODE;
-
--- Dumping structure for trigger cdnproxy.trg_delete_l4_defense_on_server_delete
-DROP TRIGGER IF EXISTS `trg_delete_l4_defense_on_server_delete`;
-SET @OLDTMP_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
-DELIMITER //
-CREATE TRIGGER `trg_delete_l4_defense_on_server_delete` AFTER DELETE ON `servers` FOR EACH ROW BEGIN
-    IF OLD.l4_id IS NOT NULL THEN
-        DELETE FROM l4_ddos_defense WHERE id = OLD.l4_id;
-    END IF;
-END//
-DELIMITER ;
-SET SQL_MODE=@OLDTMP_SQL_MODE;
-
--- Dumping structure for table cdnproxy.api_tokens
-DROP TABLE IF EXISTS `api_tokens`;
-CREATE TABLE IF NOT EXISTS `api_tokens` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `user_id` bigint NOT NULL,
-  `name` varchar(128) NOT NULL,
-  `token_prefix` varchar(32) NOT NULL,
-  `token_hash` char(64) NOT NULL,
-  `scopes` json NOT NULL,
-  `expires_at` datetime(6) DEFAULT NULL,
-  `last_used_at` datetime(6) DEFAULT NULL,
-  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
-  `revoked_at` datetime(6) DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_api_tokens_hash` (`token_hash`),
-  KEY `idx_api_tokens_user` (`user_id`),
-  CONSTRAINT `fk_api_tokens_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Dumping structure for table cdnproxy.audit_logs
-DROP TABLE IF EXISTS `audit_logs`;
-CREATE TABLE IF NOT EXISTS `audit_logs` (
-  `id` bigint NOT NULL AUTO_INCREMENT,
-  `action` varchar(64) NOT NULL,
-  `category` varchar(64) NOT NULL,
-  `resource_type` varchar(64) DEFAULT NULL,
-  `resource_id` bigint DEFAULT NULL,
-  `resource_name` varchar(255) DEFAULT NULL,
-  `actor_user_id` bigint DEFAULT NULL,
-  `actor_name` varchar(255) DEFAULT NULL,
-  `actor_email` varchar(255) DEFAULT NULL,
-  `actor_role` varchar(32) DEFAULT NULL,
-  `ip_address` varchar(64) DEFAULT NULL,
-  `user_agent` varchar(512) DEFAULT NULL,
-  `http_method` varchar(16) DEFAULT NULL,
-  `path` varchar(512) DEFAULT NULL,
-  `status_code` int DEFAULT NULL,
-  `details` text,
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  KEY `idx_audit_logs_created_at` (`created_at`),
-  KEY `idx_audit_logs_category` (`category`),
-  KEY `idx_audit_logs_action` (`action`),
-  KEY `idx_audit_logs_actor_user_id` (`actor_user_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
--- Dumping structure for trigger cdnproxy.trg_prevent_l4_id_update
-DROP TRIGGER IF EXISTS `trg_prevent_l4_id_update`;
-SET @OLDTMP_SQL_MODE=@@SQL_MODE, SQL_MODE='ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION';
-DELIMITER //
-CREATE TRIGGER `trg_prevent_l4_id_update` BEFORE UPDATE ON `servers` FOR EACH ROW BEGIN
-    -- If changing l4_id and old value exists, delete the old defense settings
-    IF NEW.l4_id != OLD.l4_id AND OLD.l4_id IS NOT NULL THEN
-        DELETE FROM l4_ddos_defense WHERE id = OLD.l4_id;
-    END IF;
-END//
-DELIMITER ;
-SET SQL_MODE=@OLDTMP_SQL_MODE;
-
-/*!40103 SET TIME_ZONE=IFNULL(@OLD_TIME_ZONE, 'system') */;
-/*!40101 SET SQL_MODE=IFNULL(@OLD_SQL_MODE, '') */;
-/*!40014 SET FOREIGN_KEY_CHECKS=IFNULL(@OLD_FOREIGN_KEY_CHECKS, 1) */;
+/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
+/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
+/*!40014 SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS */;
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
-/*!40111 SET SQL_NOTES=IFNULL(@OLD_SQL_NOTES, 1) */;
+/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
+/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+/*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+
+
+-- Seed: license tier catalog (prices editable from the panel; existing rows are kept).
+INSERT IGNORE INTO `license_plans` (`id`,`title`,`tagline`,`badge`,`accent`,`monthly_price`,`annual_price`,`sort_order`,`active`) VALUES
+  ('Trial','Trial','Evaluation',NULL,'trial',0,0,0,1),
+  ('L4','L4','Network protection',NULL,'l4',25,240,1,1),
+  ('L7','L7','Application security',NULL,'l7',250,2400,2,1),
+  ('Unified','Unified','Complete stack','Best value','unified',349,3348,3,1);

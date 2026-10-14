@@ -162,7 +162,7 @@ func (store *apiTokenStore) LookupActiveBySecret(ctx context.Context, secret str
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
 			t.id, t.user_id, t.name, t.token_prefix, t.scopes, t.expires_at, t.last_used_at, t.created_at, t.revoked_at,
-			u.id, u.name, u.email, u.password, u.role, u.status
+			u.id, u.name, u.email, COALESCE(u.password, ''), u.role, u.status
 		FROM api_tokens t
 		INNER JOIN users u ON u.id = t.user_id
 		WHERE t.token_hash = ? AND t.revoked_at IS NULL

@@ -62,6 +62,10 @@ type Config struct {
 	AcmeRFC2136Zone             string
 	JWTSecret                   string
 	JWTTTLHours                 int
+	LoginMaxAccountFailures     int
+	LoginMaxIPFailures          int
+	LoginFailureWindowMinutes   int
+	LoginLockoutMinutes         int
 	FrontendURL                 string
 	GoogleClientID              string
 	GoogleClientSecret          string
@@ -74,6 +78,7 @@ type Config struct {
 	SSOOIDCClientSecret         string
 	SSOOIDCRedirectURL          string
 	SSOOIDCScopes               string
+	DataEncryptionKey           string
 }
 
 func Load() Config {
@@ -115,6 +120,10 @@ func Load() Config {
 		AcmeRenewIntervalHours:      12,
 		AcmeRFC2136TSIGAlgorithm:    "hmac-sha256",
 		JWTTTLHours:                 24,
+		LoginMaxAccountFailures:     10,
+		LoginMaxIPFailures:          30,
+		LoginFailureWindowMinutes:   15,
+		LoginLockoutMinutes:         15,
 	}
 
 	configPath := strings.TrimSpace(os.Getenv("CONFIG_FILE"))
@@ -295,6 +304,18 @@ func Load() Config {
 	if cfg.JWTTTLHours <= 0 {
 		cfg.JWTTTLHours = 24
 	}
+	for env, target := range map[string]*int{
+		"LOGIN_MAX_ACCOUNT_FAILURES":   &cfg.LoginMaxAccountFailures,
+		"LOGIN_MAX_IP_FAILURES":        &cfg.LoginMaxIPFailures,
+		"LOGIN_FAILURE_WINDOW_MINUTES": &cfg.LoginFailureWindowMinutes,
+		"LOGIN_LOCKOUT_MINUTES":        &cfg.LoginLockoutMinutes,
+	} {
+		if raw := strings.TrimSpace(os.Getenv(env)); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+				*target = parsed
+			}
+		}
+	}
 	if strings.TrimSpace(cfg.JWTSecret) == "" {
 		cfg.JWTSecret = generateDevJWTSecret()
 		log.Printf("[config] WARNING: JWT_SECRET is unset; using an ephemeral in-process secret. Set JWT_SECRET for production.")
@@ -336,6 +357,8 @@ func Load() Config {
 	if scopes := strings.TrimSpace(os.Getenv("SSO_OIDC_SCOPES")); scopes != "" {
 		cfg.SSOOIDCScopes = scopes
 	}
+
+	cfg.DataEncryptionKey = strings.TrimSpace(os.Getenv("DATA_ENCRYPTION_KEY"))
 
 	if len(cfg.AllowedOrigins) == 0 && !cfg.AllowAllCORS {
 		cfg.AllowAllCORS = true

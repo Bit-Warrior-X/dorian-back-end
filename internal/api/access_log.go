@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
 
+	"vue-project-backend/internal/remotesvc"
 	"vue-project-backend/internal/store"
 )
 
@@ -91,7 +91,7 @@ func streamAccessLog(w http.ResponseWriter, r *http.Request, servers store.Serve
 	if port == "" {
 		port = "22"
 	}
-	if ip == "" || user == "" || password == "" {
+	if ip == "" || user == "" || (password == "" && strings.TrimSpace(view.SSHPrivateKey) == "") {
 		_ = conn.WriteJSON(errorResponse{Error: "bad request", Message: "server SSH credentials are missing"})
 		return
 	}
@@ -102,14 +102,18 @@ func streamAccessLog(w http.ResponseWriter, r *http.Request, servers store.Serve
 		logPath = defaultAccessLogPath
 	}
 
-	client, err := ssh.Dial("tcp", net.JoinHostPort(ip, port), &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.Password(password)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         8 * time.Second,
+	dialCtx, cancelDial := context.WithTimeout(r.Context(), 8*time.Second)
+	client, err := remotesvc.DialSSH(dialCtx, remotesvc.SSHTarget{
+		Host: ip, User: user, Password: password, Port: port,
+		PrivateKey: view.SSHPrivateKey, KeyPassphrase: view.SSHKeyPassphrase,
 	})
+	cancelDial()
 	if err != nil {
-		_ = conn.WriteJSON(errorResponse{Error: "connection failed", Message: "failed to connect to server via SSH"})
+		message := "failed to connect to server via SSH"
+		if remotesvc.IsHostKeyMismatch(err) {
+			message = err.Error()
+		}
+		_ = conn.WriteJSON(errorResponse{Error: "connection failed", Message: message})
 		return
 	}
 	defer client.Close()

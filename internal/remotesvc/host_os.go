@@ -3,10 +3,7 @@ package remotesvc
 import (
 	"context"
 	"fmt"
-	"net"
 	"strings"
-
-	"golang.org/x/crypto/ssh"
 )
 
 const hostOsDetectScript = `
@@ -26,33 +23,10 @@ func NormalizeHostOS(raw string) string {
 // DetectHostOS SSHes to the target and reads /etc/os-release to produce a slug
 // such as ubuntu-22.04, matching the versions.os column in deploy_license.
 func DetectHostOS(ctx context.Context, target SSHTarget) (string, error) {
-	user := strings.TrimSpace(target.User)
-	if user == "" {
-		return "", fmt.Errorf("ssh user is required")
-	}
-	if strings.TrimSpace(target.Host) == "" {
-		return "", fmt.Errorf("ssh host is required")
-	}
-
-	config := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.Password(target.Password)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         defaultDialTimeout,
-	}
-
-	dialer := &net.Dialer{Timeout: defaultDialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", target.dialAddr())
+	client, err := dialSSH(ctx, target)
 	if err != nil {
-		return "", fmt.Errorf("ssh dial %s: %w", target.dialAddr(), err)
+		return "", err
 	}
-	defer conn.Close()
-
-	cc, chans, reqs, err := ssh.NewClientConn(conn, target.dialAddr(), config)
-	if err != nil {
-		return "", fmt.Errorf("ssh handshake %s: %w", target.dialAddr(), err)
-	}
-	client := ssh.NewClient(cc, chans, reqs)
 	defer client.Close()
 
 	session, err := client.NewSession()

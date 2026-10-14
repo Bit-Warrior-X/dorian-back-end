@@ -12,21 +12,16 @@ import (
 
 const remoteRuntimeProbeTimeout = 120 * time.Second
 
-func probeRemoteRuntimeStatuses(ctx context.Context, ip, user, pass, port string) remotesvc.RuntimeStatuses {
+func probeRemoteRuntimeStatuses(ctx context.Context, target remotesvc.SSHTarget) remotesvc.RuntimeStatuses {
 	probeCtx, cancel := context.WithTimeout(ctx, remoteRuntimeProbeTimeout)
 	defer cancel()
 
-	statuses, err := remotesvc.ProbeDorianServices(probeCtx, remotesvc.SSHTarget{
-		Host:     ip,
-		User:     user,
-		Password: pass,
-		Port:     port,
-	})
+	statuses, err := remotesvc.ProbeDorianServices(probeCtx, target)
 	if err != nil {
 		log.Printf("[api] remote runtime probe failed ssh_target=%s@%s:%s: %v",
-			strings.TrimSpace(user),
-			strings.TrimSpace(ip),
-			strings.TrimSpace(port),
+			strings.TrimSpace(target.User),
+			strings.TrimSpace(target.Host),
+			strings.TrimSpace(target.Port),
 			err,
 		)
 		if strings.TrimSpace(statuses.AngelosReason) == "" &&

@@ -26,6 +26,9 @@ type SSHTarget struct {
 	User     string
 	Password string
 	Port     string
+	// PrivateKey (PEM / OpenSSH format) is optional; when set it is tried before Password.
+	PrivateKey    string
+	KeyPassphrase string
 }
 
 // RuntimeStatuses holds normalized runtime states for dashboard display.
@@ -247,33 +250,10 @@ printf '%%s\n%%s|%%s|%%s|%%s|%%s\n' "$active" "$sub_state" "$result" "$exec_main
 }
 
 func probeOnce(ctx context.Context, target SSHTarget) (RuntimeStatuses, error) {
-	user := strings.TrimSpace(target.User)
-	if user == "" {
-		return RuntimeStatuses{}, fmt.Errorf("ssh user is required")
-	}
-	if strings.TrimSpace(target.Host) == "" {
-		return RuntimeStatuses{}, fmt.Errorf("ssh host is required")
-	}
-
-	config := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.Password(target.Password)},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         defaultDialTimeout,
-	}
-
-	dialer := &net.Dialer{Timeout: defaultDialTimeout}
-	conn, err := dialer.DialContext(ctx, "tcp", target.dialAddr())
+	client, err := dialSSH(ctx, target)
 	if err != nil {
-		return RuntimeStatuses{}, fmt.Errorf("ssh dial %s: %w", target.dialAddr(), err)
+		return RuntimeStatuses{}, err
 	}
-	defer conn.Close()
-
-	cc, chans, reqs, err := ssh.NewClientConn(conn, target.dialAddr(), config)
-	if err != nil {
-		return RuntimeStatuses{}, fmt.Errorf("ssh handshake %s: %w", target.dialAddr(), err)
-	}
-	client := ssh.NewClient(cc, chans, reqs)
 	defer client.Close()
 
 	angelos := probeUnit(client, "angelos.service")
@@ -333,6 +313,9 @@ func ProbeDorianServices(ctx context.Context, target SSHTarget) (RuntimeStatuses
 		lastErr = err
 		if err == nil {
 			return statuses, nil
+		}
+		if IsHostKeyMismatch(err) {
+			break
 		}
 	}
 

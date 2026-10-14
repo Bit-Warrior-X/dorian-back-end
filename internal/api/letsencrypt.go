@@ -2,6 +2,9 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -31,6 +34,30 @@ func preserveManagedCertificates(existing store.Site, payload *store.SiteInput) 
 		formatted := existing.CertificateExpiry.UTC().Format(time.RFC3339)
 		payload.CertificateExpiry = &formatted
 	}
+}
+
+// resolveCustomCertificate keeps the stored private key when the client sends a
+// blank one (the API never returns it) and, when the certificate or key changed,
+// checks that they belong together. existing is nil on create.
+func resolveCustomCertificate(existing *store.Site, payload *store.SiteInput) error {
+	if payload == nil || !strings.EqualFold(strings.TrimSpace(payload.SslType), "custom") {
+		return nil
+	}
+	if strings.TrimSpace(payload.SslCertKey) == "" && existing != nil {
+		payload.SslCertKey = existing.SslCertKey
+	}
+	cert := strings.TrimSpace(payload.SslCert)
+	key := strings.TrimSpace(payload.SslCertKey)
+	if cert == "" || key == "" {
+		return errors.New("custom SSL requires both a certificate and a private key")
+	}
+	if existing != nil && cert == strings.TrimSpace(existing.SslCert) && key == strings.TrimSpace(existing.SslCertKey) {
+		return nil
+	}
+	if _, err := tls.X509KeyPair([]byte(cert), []byte(key)); err != nil {
+		return fmt.Errorf("certificate and private key do not match: %v", err)
+	}
+	return nil
 }
 
 // clearSiteSslConfiguration forces "Not Configured" SSL: no provider, no cert material,

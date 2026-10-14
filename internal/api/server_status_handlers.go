@@ -24,6 +24,8 @@ func sshTargetFromView(view store.ServerView) remotesvc.SSHTarget {
 		User:     view.SSHUser,
 		Password: view.SSHPassword,
 		Port:     view.SSHPort,
+		PrivateKey:    view.SSHPrivateKey,
+		KeyPassphrase: view.SSHKeyPassphrase,
 	}
 }
 
@@ -46,13 +48,7 @@ func persistRuntimeStatuses(
 	serverID int64,
 	view store.ServerView,
 ) (store.ServerView, error) {
-	statuses := probeRemoteRuntimeStatuses(
-		ctx,
-		view.IP,
-		view.SSHUser,
-		view.SSHPassword,
-		view.SSHPort,
-	)
+	statuses := probeRemoteRuntimeStatuses(ctx, sshTargetFromView(view))
 	tok := strings.TrimSpace(view.Token)
 	if err := servers.UpdateDeploymentData(
 		ctx,

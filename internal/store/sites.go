@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+
+	"vue-project-backend/internal/secretbox"
 )
 
 type Site struct {
@@ -29,7 +32,8 @@ type Site struct {
 	CurrentBandwidth  int64      `json:"currentBandwidth"`
 	SslType           string     `json:"sslType"`
 	SslCert           string     `json:"sslCert,omitempty"`
-	SslCertKey        string     `json:"sslCertKey,omitempty"`
+	SslCertKey        string     `json:"-"`
+	HasSslCertKey     bool       `json:"hasSslCertKey"`
 	CreatedAt         time.Time  `json:"createdAt"`
 	UpdatedAt         time.Time  `json:"updatedAt"`
 	ServerIDs         []int64    `json:"serverIds"`
@@ -69,6 +73,7 @@ func (input SiteInput) Normalize() SiteInput {
 type SiteStore interface {
 	List(ctx context.Context) ([]Site, error)
 	Count(ctx context.Context) (int64, error)
+	CountScoped(ctx context.Context, serverIDs []int64) (total int64, active int64, err error)
 	CountActive(ctx context.Context) (int64, error)
 	Get(ctx context.Context, id int64) (Site, error)
 	Create(ctx context.Context, input SiteInput) (Site, error)
@@ -80,14 +85,33 @@ type SiteStore interface {
 	EnsureWafRule(ctx context.Context, siteID int64, wafRules WafRuleStore) (int64, error)
 	WafRuleIDForWrite(ctx context.Context, siteID int64, wafRules WafRuleStore) (int64, error)
 	ForkPredefinedWafForSite(ctx context.Context, siteID int64, wafRules WafRuleStore) (Site, error)
+	EncryptLegacySecrets(ctx context.Context) (int, error)
 }
 
 type siteStore struct {
-	db *sql.DB
+	db  *sql.DB
+	box *secretbox.Box
 }
 
-func NewSiteStore(db *sql.DB) SiteStore {
-	return &siteStore{db: db}
+func NewSiteStore(db *sql.DB, box *secretbox.Box) SiteStore {
+	return &siteStore{db: db, box: box}
+}
+
+func (store *siteStore) sealCertKey(keyPEM string) (sql.NullString, error) {
+	trimmed := strings.TrimSpace(keyPEM)
+	if trimmed == "" {
+		return sql.NullString{}, nil
+	}
+	sealed, err := store.box.Seal(trimmed)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: sealed, Valid: true}, nil
+}
+
+// EncryptLegacySecrets seals ssl_cert_key values still stored in plaintext.
+func (store *siteStore) EncryptLegacySecrets(ctx context.Context) (int, error) {
+	return sealLegacyColumn(ctx, store.db, store.box, "sites", "ssl_cert_key")
 }
 
 const siteSelectColumns = `
@@ -148,8 +172,14 @@ func (store *siteStore) scanSite(row interface {
 	if sslCert.Valid {
 		item.SslCert = sslCert.String
 	}
-	if sslCertKey.Valid {
-		item.SslCertKey = sslCertKey.String
+	if sslCertKey.Valid && sslCertKey.String != "" {
+		item.HasSslCertKey = true
+		plain, err := store.box.Open(sslCertKey.String)
+		if err != nil {
+			log.Printf("[store] site %d: ssl private key: %v", item.ID, err)
+		} else {
+			item.SslCertKey = plain
+		}
 	}
 
 	return item, nil
@@ -216,6 +246,21 @@ func (store *siteStore) CountActive(ctx context.Context) (int64, error) {
 	return count, err
 }
 
+// CountScoped returns total and enabled sites served by any of serverIDs.
+func (store *siteStore) CountScoped(ctx context.Context, serverIDs []int64) (int64, int64, error) {
+	query, args := appendIDAllowList(`
+		SELECT COUNT(DISTINCT s.id),
+			COUNT(DISTINCT CASE WHEN UPPER(s.status) = 'ENABLE' THEN s.id END)
+		FROM sites s
+		JOIN site_servers ss ON ss.site_id = s.id
+		WHERE 1 = 1`, nil, "ss.server_id", serverIDs)
+	var total, active int64
+	if err := store.db.QueryRowContext(ctx, query, args...).Scan(&total, &active); err != nil {
+		return 0, 0, err
+	}
+	return total, active, nil
+}
+
 func (store *siteStore) Get(ctx context.Context, id int64) (Site, error) {
 	row := store.db.QueryRowContext(ctx, `
 		SELECT `+siteSelectColumns+`
@@ -256,6 +301,10 @@ func (store *siteStore) Create(ctx context.Context, input SiteInput) (Site, erro
 	if err != nil {
 		return Site{}, err
 	}
+	sslCertKey, err := store.sealCertKey(input.SslCertKey)
+	if err != nil {
+		return Site{}, err
+	}
 
 	result, err := store.db.ExecContext(ctx, `
 		INSERT INTO sites (
@@ -271,7 +320,7 @@ func (store *siteStore) Create(ctx context.Context, input SiteInput) (Site, erro
 		input.Bandwidth,
 		coalesceSiteSslType(input.SslType),
 		nullableString(input.SslCert),
-		nullableString(input.SslCertKey),
+		sslCertKey,
 	)
 	if err != nil {
 		return Site{}, err
@@ -293,10 +342,20 @@ func (store *siteStore) Update(ctx context.Context, id int64, input SiteInput) (
 	}
 
 	clearError := coalesceSiteSslType(input.SslType) == "none"
+	sslCertKey, err := store.sealCertKey(input.SslCertKey)
+	if err != nil {
+		return Site{}, err
+	}
+	// The private key is never returned to clients, so a blank key keeps the
+	// stored one unless SSL is being turned off.
+	keyExpr := "COALESCE(?, ssl_cert_key)"
+	if clearError {
+		keyExpr = "?"
+	}
 	query := `
 		UPDATE sites
 		SET domain = ?, status = ?, waf_id = ?, certificate_status = ?, certificate_expiry = ?,
-			cache_ratio = ?, bandwidth = ?, ssl_type = ?, ssl_cert = ?, ssl_cert_key = ?
+			cache_ratio = ?, bandwidth = ?, ssl_type = ?, ssl_cert = ?, ssl_cert_key = ` + keyExpr + `
 		WHERE id = ?`
 	args := []any{
 		input.Domain,
@@ -308,7 +367,7 @@ func (store *siteStore) Update(ctx context.Context, id int64, input SiteInput) (
 		input.Bandwidth,
 		coalesceSiteSslType(input.SslType),
 		nullableString(input.SslCert),
-		nullableString(input.SslCertKey),
+		sslCertKey,
 		id,
 	}
 	if clearError {
@@ -354,12 +413,16 @@ func normalizeSiteSslInput(input SiteInput) SiteInput {
 }
 
 func (store *siteStore) UpdateCertificate(ctx context.Context, id int64, certPEM, keyPEM, status string, expiry *time.Time) error {
+	sealedKey, err := store.sealCertKey(keyPEM)
+	if err != nil {
+		return err
+	}
 	result, err := store.db.ExecContext(ctx, `
 		UPDATE sites
 		SET ssl_cert = ?, ssl_cert_key = ?, certificate_status = ?, certificate_expiry = ?, certificate_error = NULL
 		WHERE id = ?`,
 		nullableString(certPEM),
-		nullableString(keyPEM),
+		sealedKey,
 		coalesceSiteCertStatus(status),
 		nullTime(expiry),
 		id,
