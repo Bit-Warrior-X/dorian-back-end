@@ -108,6 +108,11 @@ func main() {
 	auditLogStore := store.NewAuditLogStore(connection)
 	apiTokenStore := store.NewAPITokenStore(connection)
 	licensePlanStore := store.NewLicensePlanStore(connection)
+	notificationStore := store.NewNotificationStore(connection)
+	if err := notificationStore.EnsureSchema(ctx); err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "panel_notifications_schema", "error": err.Error()})
+		os.Exit(1)
+	}
 	mfaStore := store.NewMFAStore(connection)
 	loginThrottleStore := store.NewLoginThrottleStore(redisClient, store.LoginThrottleConfig{
 		MaxAccountFailures: cfg.LoginMaxAccountFailures,
@@ -116,7 +121,7 @@ func main() {
 		Lockout:            time.Duration(cfg.LoginLockoutMinutes) * time.Minute,
 	})
 	certIssuer := acme.NewIssuer(cfg, siteStore)
-	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore, apiTokenStore, licensePlanStore, certIssuer)
+	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore, apiTokenStore, licensePlanStore, notificationStore, certIssuer)
 
 	// Start background worker to periodically collect IP request statistics
 	// from each server and store them into the database.

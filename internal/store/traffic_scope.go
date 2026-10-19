@@ -19,8 +19,16 @@ type TrafficScope struct {
 }
 
 func appendServerScope(query string, args []any, scope TrafficScope) (string, []any) {
+	return appendServerScopePrefixed(query, args, scope, "")
+}
+
+func appendServerScopePrefixed(query string, args []any, scope TrafficScope, tableAlias string) (string, []any) {
+	column := "server_id"
+	if tableAlias != "" {
+		column = tableAlias + ".server_id"
+	}
 	if scope.ServerID > 0 {
-		return query + " AND server_id = ?", append(args, scope.ServerID)
+		return query + " AND " + column + " = ?", append(args, scope.ServerID)
 	}
 	if len(scope.ServerIDs) == 0 {
 		if scope.Restricted {
@@ -33,7 +41,7 @@ func appendServerScope(query string, args []any, scope TrafficScope) (string, []
 		placeholders[i] = "?"
 		args = append(args, id)
 	}
-	return query + fmt.Sprintf(" AND server_id IN (%s)", strings.Join(placeholders, ",")), args
+	return query + fmt.Sprintf(" AND %s IN (%s)", column, strings.Join(placeholders, ",")), args
 }
 
 // appendIDAllowList adds "AND column IN (...)"; an empty list matches nothing.

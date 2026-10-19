@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -339,6 +340,8 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, l4LiveAttack, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/api/v1/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
+	mux.HandleFunc("/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats))
+	mux.HandleFunc("/api/v1/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats))
 	mux.HandleFunc("/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/dashboard/bandwidth-nic-rx", dashboardBandwidthNicRxHandler(serverTrafficStats, sites))
@@ -472,11 +475,11 @@ func registerRoutes(
 	mux.HandleFunc("/license-plans", licensePlansHandler(licensePlans))
 	mux.HandleFunc("/api/v1/servers/probe-host-versions", probeHostVersionsHandler(cfg))
 	mux.HandleFunc("/servers", serversHandler(cfg, servers))
-	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, sites, blacklist))
-	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(servers, sites, blacklist))
-	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
-	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
-	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist))
+	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, sites, blacklist, agentClient))
+	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(servers, sites, blacklist, agentClient))
+	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4))
+	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4))
+	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4))
 	mux.HandleFunc("/servers/", restrictServerDetail(serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings)))
 	mux.HandleFunc("/users", requireAdmin(usersHandler(users, mfa)))
 	mux.HandleFunc("/users/", requireAdminOrSelfUser(userHandler(users)))
@@ -532,13 +535,38 @@ func statusHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// flexString accepts a JSON string or number. Angelos sends req_id as either.
+type flexString string
+
+func (s *flexString) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		*s = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		*s = flexString(value)
+		return nil
+	}
+	*s = flexString(data)
+	return nil
+}
+
+func (s flexString) String() string { return string(s) }
+
 type reportXdpPayload struct {
-	Token      string `json:"token"`
-	Command    string `json:"command"`
-	Data       string `json:"data"`
-	IP         string `json:"ip"`
-	TTL        string `json:"ttl"`
-	AttackType string `json:"attack_type"`
+	ReqID      flexString `json:"req_id"`
+	Time       string     `json:"time"`
+	Token      string     `json:"token"`
+	Command    string     `json:"command"`
+	Data       string     `json:"data"`
+	IP         string     `json:"ip"`
+	TTL        string     `json:"ttl"`
+	AttackType string     `json:"attack_type"`
 }
 
 // getBlocklistIPsPayload is the request shape for /api/get_blocklist_ips.
@@ -682,71 +710,139 @@ func reportXdpHandler(
 			return
 		}
 
-		var payload reportXdpPayload
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid JSON body")
+			return
+		}
+		// Angelos can send the protection report and report_attack back to back
+		// in one body. Decode every object so attack_start and attack_stop are kept.
+		payloads, err := decodeXdpPayloads(body)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
 
-		payload.Command = strings.TrimSpace(payload.Command)
-		payload.Token = strings.TrimSpace(payload.Token)
-		payload.Data = strings.TrimSpace(payload.Data)
-		payload.IP = strings.TrimSpace(payload.IP)
-		payload.TTL = strings.TrimSpace(payload.TTL)
-		payload.AttackType = strings.TrimSpace(payload.AttackType)
+		var carriedToken string
+		for _, payload := range payloads {
+			if strings.TrimSpace(payload.Token) == "" && carriedToken != "" {
+				payload.Token = carriedToken
+			}
+			payload.ReqID = flexString(strings.TrimSpace(payload.ReqID.String()))
+			payload.Time = strings.TrimSpace(payload.Time)
+			payload.Command = strings.TrimSpace(payload.Command)
+			payload.Token = strings.TrimSpace(payload.Token)
+			payload.Data = strings.TrimSpace(payload.Data)
+			payload.IP = strings.TrimSpace(payload.IP)
+			payload.TTL = strings.TrimSpace(payload.TTL)
+			payload.AttackType = strings.TrimSpace(payload.AttackType)
 
-		if payload.Token == "" {
-			writeError(w, http.StatusForbidden, "missing token")
-			return
-		}
-
-		server, err := servers.GetByToken(r.Context(), payload.Token)
-		if err != nil {
-			if store.IsNotFound(err) {
-				writeError(w, http.StatusForbidden, "invalid token")
+			if payload.Token == "" {
+				writeError(w, http.StatusForbidden, "missing token")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "failed to validate token")
-			return
-		}
+			carriedToken = payload.Token
 
-		if strings.EqualFold(payload.Command, "report_block_ip") {
-			if payload.IP == "" {
-				writeError(w, http.StatusBadRequest, "missing ip")
-				return
-			}
-			//input := buildBlacklistInput(server.Name, payload)
-			//if _, err := blacklist.Create(r.Context(), server.ID, input); err != nil {
-			//	writeError(w, http.StatusInternalServerError, "failed to store blacklist entry")
-			//	return
-			//}
-			if err := l4LiveAttack.Create(r.Context(), server.ID, payload.IP, payload.AttackType); err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to store l4 live attack")
-				return
-			}
-			title, description, ok := buildSecurityEvent(payload)
-			if ok {
-				if err := securityEvents.Create(r.Context(), server.ID, title, description); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to store security event")
+			server, err := servers.GetByToken(r.Context(), payload.Token)
+			if err != nil {
+				if store.IsNotFound(err) {
+					writeError(w, http.StatusForbidden, "invalid token")
 					return
 				}
+				writeError(w, http.StatusInternalServerError, "failed to validate token")
+				return
 			}
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
 
-		title, description, ok := buildSecurityEvent(payload)
-		if !ok {
-			writeError(w, http.StatusBadRequest, "unsupported command or data")
-			return
-		}
+			occurredAt, err := parseReportEventTime(payload.Time)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid time")
+				return
+			}
 
-		if err := securityEvents.Create(r.Context(), server.ID, title, description); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to store security event")
-			return
+			if strings.EqualFold(payload.Command, "report_block_ip") {
+				if payload.IP == "" {
+					writeError(w, http.StatusBadRequest, "missing ip")
+					return
+				}
+				//input := buildBlacklistInput(server.Name, payload)
+				//if _, err := blacklist.Create(r.Context(), server.ID, input); err != nil {
+				//	writeError(w, http.StatusInternalServerError, "failed to store blacklist entry")
+				//	return
+				//}
+				if err := l4LiveAttack.Create(r.Context(), server.ID, payload.IP, payload.AttackType, occurredAt, payload.ReqID.String()); err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to store l4 live attack")
+					return
+				}
+				title, description, ok := buildSecurityEvent(payload)
+				if ok {
+					if err := securityEvents.Create(r.Context(), server.ID, title, description, occurredAt, securityEventReport(payload)); err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to store security event")
+						return
+					}
+				}
+				continue
+			}
+
+			title, description, ok := buildSecurityEvent(payload)
+			if !ok {
+				writeError(w, http.StatusBadRequest, "unsupported command or data")
+				return
+			}
+
+			if err := securityEvents.Create(r.Context(), server.ID, title, description, occurredAt, securityEventReport(payload)); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to store security event")
+				return
+			}
 		}
 
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func decodeXdpPayloads(body []byte) ([]reportXdpPayload, error) {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 {
+		return nil, errors.New("empty body")
+	}
+	if body[0] == '[' {
+		var payloads []reportXdpPayload
+		if err := json.Unmarshal(body, &payloads); err != nil {
+			return nil, err
+		}
+		if len(payloads) == 0 {
+			return nil, errors.New("empty body")
+		}
+		return payloads, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	payloads := make([]reportXdpPayload, 0, 1)
+	for {
+		var payload reportXdpPayload
+		if err := dec.Decode(&payload); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if len(payloads) == 0 {
+				return nil, err
+			}
+			break
+		}
+		payloads = append(payloads, payload)
+	}
+	if len(payloads) == 0 {
+		return nil, errors.New("empty body")
+	}
+	return payloads, nil
+}
+
+func securityEventReport(payload reportXdpPayload) store.SecurityEventReport {
+	return store.SecurityEventReport{
+		Command:    payload.Command,
+		SourceIP:   payload.IP,
+		TTL:        payload.TTL,
+		AttackType: payload.AttackType,
+		Data:       payload.Data,
+		ReqID:      payload.ReqID.String(),
 	}
 }
 
@@ -955,7 +1051,7 @@ func dashboardSecurityEventsHandler(securityEvents store.SecurityEventStore) htt
 		}
 
 		viewer := viewerScopeFromContext(r.Context())
-		events, err := securityEvents.ListRecent(r.Context(), limit,
+		events, err := securityEvents.ListPeriods(r.Context(), limit,
 			store.TrafficScope{ServerIDs: viewer.serverIDs, Restricted: viewer.restricted})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load security events")
@@ -969,30 +1065,129 @@ func dashboardSecurityEventsHandler(securityEvents store.SecurityEventStore) htt
 type bandwidthPoint struct {
 	Timestamp string `json:"timestamp"`
 	Bandwidth int64  `json:"bandwidth"`
+	Peak      int64  `json:"peak,omitempty"`
 }
 
 type bandwidthSeries struct {
-	ServerID int64            `json:"serverId"`
-	Points   []bandwidthPoint `json:"points"`
+	ServerID      int64            `json:"serverId"`
+	BucketSeconds int64            `json:"bucketSeconds"`
+	Points        []bandwidthPoint `json:"points"`
+	Latest        *bandwidthPoint  `json:"latest,omitempty"`
+}
+
+// aggregateBandwidth averages raw samples into fixed time buckets so long
+// ranges keep the real throughput level, and keeps each bucket's peak.
+func aggregateBandwidth(points []store.ServerBandwidthPoint, start time.Time, bucket time.Duration) []bandwidthPoint {
+	type acc struct {
+		sum, peak int64
+		count     int64
+	}
+	order := make([]int64, 0)
+	buckets := make(map[int64]*acc)
+	for _, point := range points {
+		ts, err := time.Parse(time.RFC3339, point.Timestamp)
+		if err != nil {
+			continue
+		}
+		key := ts.Sub(start).Nanoseconds() / bucket.Nanoseconds()
+		if ts.Before(start) {
+			key = 0
+		}
+		entry, ok := buckets[key]
+		if !ok {
+			entry = &acc{}
+			buckets[key] = entry
+			order = append(order, key)
+		}
+		entry.sum += point.Bandwidth
+		entry.count++
+		if point.Bandwidth > entry.peak {
+			entry.peak = point.Bandwidth
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	out := make([]bandwidthPoint, 0, len(order))
+	for _, key := range order {
+		entry := buckets[key]
+		at := start.Add(time.Duration(key) * bucket).UTC()
+		out = append(out, bandwidthPoint{
+			Timestamp: at.Format(time.RFC3339),
+			Bandwidth: int64(math.Round(float64(entry.sum) / float64(entry.count))),
+			Peak:      entry.peak,
+		})
+	}
+	return out
+}
+
+// requestResponseRate and statusCodeRate are per-minute averages per bucket.
+type requestResponseRate struct {
+	Timestamp     string  `json:"timestamp"`
+	RequestCount  float64 `json:"requestCount"`
+	ResponseCount float64 `json:"responseCount"`
+}
+
+type statusCodeRate struct {
+	Timestamp string  `json:"timestamp"`
+	Success   float64 `json:"success"`
+	Redirect  float64 `json:"redirect"`
+	Client    float64 `json:"client"`
+	Server    float64 `json:"server"`
+}
+
+// averageBuckets averages per-minute counters into fixed buckets, so every
+// point stays a per-minute value and totals keep their true proportions.
+func averageBuckets[T, R any](items []T, start time.Time, bucket time.Duration, stamp func(T) string, values func(T) []int64, build func(string, []float64) R) []R {
+	type acc struct {
+		sums  []int64
+		count int64
+	}
+	order := make([]int64, 0)
+	buckets := make(map[int64]*acc)
+	for _, item := range items {
+		ts, err := time.Parse(time.RFC3339, stamp(item))
+		if err != nil {
+			continue
+		}
+		key := int64(0)
+		if !ts.Before(start) {
+			key = ts.Sub(start).Nanoseconds() / bucket.Nanoseconds()
+		}
+		vals := values(item)
+		entry, ok := buckets[key]
+		if !ok {
+			entry = &acc{sums: make([]int64, len(vals))}
+			buckets[key] = entry
+			order = append(order, key)
+		}
+		for i, v := range vals {
+			entry.sums[i] += v
+		}
+		entry.count++
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	out := make([]R, 0, len(order))
+	for _, key := range order {
+		entry := buckets[key]
+		avg := make([]float64, len(entry.sums))
+		for i, sum := range entry.sums {
+			avg[i] = math.Round(float64(sum)/float64(entry.count)*100) / 100
+		}
+		out = append(out, build(start.Add(time.Duration(key)*bucket).UTC().Format(time.RFC3339), avg))
+	}
+	return out
+}
+
+func dashboardBucketSize(rangeValue time.Duration) time.Duration {
+	bucket := time.Minute
+	for rangeValue/bucket > dashboardChartMaxPoints {
+		bucket += time.Minute
+	}
+	return bucket
 }
 
 // dashboardChartMaxPoints keeps Overview payloads chart-sized. Raw 1-minute
 // buckets for multi-day ranges overwhelm ApexCharts and the browser.
 const dashboardChartMaxPoints = 360
-
-func downsampleSlice[T any](items []T, maxPoints int) []T {
-	if maxPoints <= 0 || len(items) <= maxPoints {
-		return items
-	}
-	out := make([]T, maxPoints)
-	last := len(items) - 1
-	step := float64(last) / float64(maxPoints-1)
-	for i := 0; i < maxPoints-1; i++ {
-		out[i] = items[int(float64(i)*step+0.5)]
-	}
-	out[maxPoints-1] = items[last]
-	return out
-}
 
 func dashboardBandwidthHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
 	return dashboardBandwidthByServerHandler(stats, sites, stats.ListBandwidth)
@@ -1043,12 +1238,9 @@ func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, site
 			return
 		}
 
-		grouped := make(map[int64][]bandwidthPoint)
+		grouped := make(map[int64][]store.ServerBandwidthPoint)
 		for _, point := range points {
-			grouped[point.ServerID] = append(grouped[point.ServerID], bandwidthPoint{
-				Timestamp: point.Timestamp,
-				Bandwidth: point.Bandwidth,
-			})
+			grouped[point.ServerID] = append(grouped[point.ServerID], point)
 		}
 
 		serverIDs := make([]int64, 0, len(grouped))
@@ -1057,11 +1249,21 @@ func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, site
 		}
 		sort.Slice(serverIDs, func(i, j int) bool { return serverIDs[i] < serverIDs[j] })
 
+		bucket := dashboardBucketSize(rangeValue)
 		series := make([]bandwidthSeries, 0, len(serverIDs))
 		for _, id := range serverIDs {
+			raw := grouped[id]
+			var latest *bandwidthPoint
+			for _, point := range raw {
+				if latest == nil || point.Timestamp > latest.Timestamp {
+					latest = &bandwidthPoint{Timestamp: point.Timestamp, Bandwidth: point.Bandwidth}
+				}
+			}
 			series = append(series, bandwidthSeries{
-				ServerID: id,
-				Points:   downsampleSlice(grouped[id], dashboardChartMaxPoints),
+				ServerID:      id,
+				BucketSeconds: int64(bucket / time.Second),
+				Points:        aggregateBandwidth(raw, start.UTC().Truncate(bucket), bucket),
+				Latest:        latest,
 			})
 		}
 
@@ -1096,7 +1298,13 @@ func dashboardRequestResponseHandler(stats store.ServerTrafficStatsStore, sites 
 			return
 		}
 
-		writeJSON(w, http.StatusOK, downsampleSlice(points, dashboardChartMaxPoints))
+		bucket := dashboardBucketSize(rangeValue)
+		writeJSON(w, http.StatusOK, averageBuckets(points, start.UTC().Truncate(bucket), bucket,
+			func(p store.RequestResponsePoint) string { return p.Timestamp },
+			func(p store.RequestResponsePoint) []int64 { return []int64{p.RequestCount, p.ResponseCount} },
+			func(ts string, v []float64) requestResponseRate {
+				return requestResponseRate{Timestamp: ts, RequestCount: v[0], ResponseCount: v[1]}
+			}))
 	}
 }
 
@@ -1127,7 +1335,13 @@ func dashboardStatusCodesHandler(stats store.ServerTrafficStatsStore, sites stor
 			return
 		}
 
-		writeJSON(w, http.StatusOK, downsampleSlice(points, dashboardChartMaxPoints))
+		bucket := dashboardBucketSize(rangeValue)
+		writeJSON(w, http.StatusOK, averageBuckets(points, start.UTC().Truncate(bucket), bucket,
+			func(p store.StatusCodePoint) string { return p.Timestamp },
+			func(p store.StatusCodePoint) []int64 { return []int64{p.Success, p.Redirect, p.Client, p.Server} },
+			func(ts string, v []float64) statusCodeRate {
+				return statusCodeRate{Timestamp: ts, Success: v[0], Redirect: v[1], Client: v[2], Server: v[3]}
+			}))
 	}
 }
 
@@ -2329,6 +2543,41 @@ func parseAnalyticsWindow(r *http.Request) (time.Time, time.Time, error) {
 
 	duration := parseTrafficRange(rangeValue)
 	return now.Add(-duration), now, nil
+}
+
+func parseReportEventTime(value string) (time.Time, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return time.Time{}, errors.New("missing time")
+	}
+	if parsed, err := time.Parse(time.RFC3339, trimmed); err == nil {
+		return parsed, nil
+	}
+	for _, layout := range []string{"2006-01-02 15:04:05", "2006-01-02T15:04:05", "2006-01-02T15:04"} {
+		if parsed, err := time.ParseInLocation(layout, trimmed, time.UTC); err == nil {
+			return alignEdgeLocalTime(parsed, time.Now().UTC()), nil
+		}
+	}
+	if n, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+		switch {
+		case n > 1_000_000_000_000:
+			return time.UnixMilli(n).UTC(), nil
+		case n > 1_000_000_000:
+			return time.Unix(n, 0).UTC(), nil
+		}
+	}
+	return time.Time{}, errors.New("invalid time")
+}
+
+// alignEdgeLocalTime converts a zone-less edge wall-clock time to UTC. Edges report
+// in real time, so the gap to now, rounded to 15 minutes, is the edge's UTC offset.
+func alignEdgeLocalTime(wall, now time.Time) time.Time {
+	const step = 15 * time.Minute
+	skew := wall.Sub(now)
+	if skew > 14*time.Hour || skew < -14*time.Hour {
+		return wall
+	}
+	return wall.Add(-skew.Round(step))
 }
 
 func parseTimeValue(value string) (time.Time, error) {
@@ -3592,7 +3841,7 @@ type l4WhitelistPayload struct {
 	Reason    string `json:"reason"`
 }
 
-func serverBlacklistHandler(servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore) http.HandlerFunc {
+func serverBlacklistHandler(servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore, agentClient *AgentClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := strings.TrimPrefix(r.URL.Path, "/servers/blacklist")
 		if path == "" || path == "/" {
@@ -3622,6 +3871,16 @@ func serverBlacklistHandler(servers store.ServerStore, sites store.SiteStore, bl
 				if err != nil {
 					writeError(w, http.StatusInternalServerError, "failed to load blacklist entries")
 					return
+				}
+				if siteID == 0 {
+					live, err := blacklist.ListL4Temporary(r.Context(), serverID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to load blacklist entries")
+						return
+					}
+					if len(live) > 0 {
+						list = append(live, list...)
+					}
 				}
 				if viewer := viewerScopeFromContext(r.Context()); viewer.restricted {
 					visible := make([]store.BlacklistEntry, 0, len(list))
@@ -3753,6 +4012,37 @@ func serverBlacklistHandler(servers store.ServerStore, sites store.SiteStore, bl
 			serverID = parsed
 		}
 		stored, storedErr := blacklist.GetPayload(r.Context(), entryID)
+		if store.IsNotFound(storedErr) {
+			live, liveErr := blacklist.GetL4Temporary(r.Context(), entryID)
+			if liveErr != nil {
+				if store.IsNotFound(liveErr) {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				writeError(w, http.StatusInternalServerError, "failed to load blacklist entry")
+				return
+			}
+			if serverID == 0 {
+				serverID = live.ServerID
+			}
+			server, err := servers.GetView(r.Context(), serverID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load server data")
+				return
+			}
+			if agentClient != nil {
+				if err := agentClient.RemoveL4BlacklistIP(r.Context(), server.IP, server.Token, live.IP); err != nil {
+					writeError(w, http.StatusBadGateway, "failed to remove l4 blacklist ip from server agent")
+					return
+				}
+			}
+			if err := blacklist.DeleteL4Temporary(r.Context(), entryID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to delete blacklist entry")
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if serverID == 0 && storedErr == nil {
 			serverID = stored.ServerID
 		}
@@ -3771,7 +4061,7 @@ func serverBlacklistHandler(servers store.ServerStore, sites store.SiteStore, bl
 	}
 }
 
-func temporaryBlacklistAddedHandler(servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore) http.HandlerFunc {
+func temporaryBlacklistAddedHandler(servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore, l4 store.L4Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -3807,6 +4097,13 @@ func temporaryBlacklistAddedHandler(servers store.ServerStore, sites store.SiteS
 		if payload.SiteID == 0 {
 			payload.SiteID = resolveSiteIDFromURL(r.Context(), sites, server.ID, payload.URL)
 		}
+		// Angelos posts these L4 blocks with a 3600s ttl. The block duration the
+		// edge is actually using is l4_ddos_defense.black_ip_duration.
+		if isL4BlockRule(payload.TriggerRule) {
+			if cfg, cfgErr := l4.GetByServerID(r.Context(), server.ID); cfgErr == nil && cfg.BlackIPDuration > 0 {
+				payload.TTL = int64(cfg.BlackIPDuration)
+			}
+		}
 
 		created, err := blacklist.CreateFromPayload(r.Context(), payload)
 		if err != nil {
@@ -3815,6 +4112,11 @@ func temporaryBlacklistAddedHandler(servers store.ServerStore, sites store.SiteS
 		}
 		writeJSON(w, http.StatusCreated, created)
 	}
+}
+
+func isL4BlockRule(rule string) bool {
+	rule = strings.ToLower(strings.TrimSpace(rule))
+	return rule == "l4ddos" || strings.HasPrefix(rule, "l4")
 }
 
 func hostFromRequestURL(raw string) string {
@@ -4550,6 +4852,20 @@ func serverDetailHandler(
 			return
 		}
 
+		if strings.HasSuffix(r.URL.Path, "/sparta-log") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/sparta-log")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			handleServerSpartaLog(w, r, servers, serverID)
+			return
+		}
+
 		if strings.HasSuffix(r.URL.Path, "/host-metrics") {
 			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/host-metrics")
 			if !ok {
@@ -4741,6 +5057,7 @@ func serverDetailHandler(
 					writeError(w, http.StatusInternalServerError, "failed to load server data")
 					return
 				}
+				store.FillStompProtection(&payload)
 				if err := agentClient.PushL4(r.Context(), server.IP, server.Token, payload); err != nil {
 					var agentErr AgentResponseError
 					if errors.As(err, &agentErr) {

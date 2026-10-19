@@ -8,63 +8,74 @@ import (
 )
 
 type L4Config struct {
-	ID                      int64    `json:"id"`
-	Dev                     string   `json:"dev"`
-	AttachMode              string   `json:"attachMode"`
-	Sensitivity             string   `json:"sensitivity"`
-	ProtectionMode          string   `json:"protectionMode"`
-	BlackIPDuration         int      `json:"blackIpDuration"`
-	SynValid                bool     `json:"synValid"`
-	SynThreshold            int      `json:"synThreshold"`
-	SynBurstPkt             int      `json:"synBurstPkt"`
-	SynBurstCountPerSec     int      `json:"synBurstCountPerSec"`
-	SynFixedThreshold       int      `json:"synFixedThreshold"`
-	SynFixedCheckDuration   int      `json:"synFixedCheckDuration"`
-	ChallengeTimeout        int      `json:"challengeTimeout"`
-	SynProtectionDuration   int      `json:"synProtectionDuration"`
-	AckValid                bool     `json:"ackValid"`
-	AckThreshold            int      `json:"ackThreshold"`
-	AckBurstPkt             int      `json:"ackBurstPkt"`
-	AckBurstCountPerSec     int      `json:"ackBurstCountPerSec"`
-	AckFixedThreshold       int      `json:"ackFixedThreshold"`
-	AckFixedCheckDuration   int      `json:"ackFixedCheckDuration"`
-	AckProtectionDuration   int      `json:"ackProtectionDuration"`
-	RstValid                bool     `json:"rstValid"`
-	RstThreshold            int      `json:"rstThreshold"`
-	RstBurstPkt             int      `json:"rstBurstPkt"`
-	RstBurstCountPerSec     int      `json:"rstBurstCountPerSec"`
-	RstFixedThreshold       int      `json:"rstFixedThreshold"`
-	RstFixedCheckDuration   int      `json:"rstFixedCheckDuration"`
-	RstProtectionDuration   int      `json:"rstProtectionDuration"`
-	IcmpValid               bool     `json:"icmpValid"`
-	IcmpThreshold           int      `json:"icmpThreshold"`
-	IcmpBurstPkt            int      `json:"icmpBurstPkt"`
-	IcmpBurstCountPerSec    int      `json:"icmpBurstCountPerSec"`
-	IcmpFixedThreshold      int      `json:"icmpFixedThreshold"`
-	IcmpFixedCheckDuration  int      `json:"icmpFixedCheckDuration"`
-	IcmpProtectionDuration  int      `json:"icmpProtectionDuration"`
-	UdpValid                bool     `json:"udpValid"`
-	UdpThreshold            int      `json:"udpThreshold"`
-	UdpBurstPkt             int      `json:"udpBurstPkt"`
-	UdpBurstCountPerSec     int      `json:"udpBurstCountPerSec"`
-	UdpFixedThreshold       int      `json:"udpFixedThreshold"`
-	UdpFixedCheckDuration   int      `json:"udpFixedCheckDuration"`
-	UdpProtectionDuration   int      `json:"udpProtectionDuration"`
-	GreValid                bool     `json:"greValid"`
-	GreThreshold            int      `json:"greThreshold"`
-	GreBurstPkt             int      `json:"greBurstPkt"`
-	GreBurstCountPerSec     int      `json:"greBurstCountPerSec"`
-	GreFixedThreshold       int      `json:"greFixedThreshold"`
-	GreFixedCheckDuration   int      `json:"greFixedCheckDuration"`
-	GreProtectionDuration   int      `json:"greProtectionDuration"`
-	TcpSegCheck             bool     `json:"tcpSegCheck"`
-	GeoCheck                bool     `json:"geoCheck"`
-	GeoDbIpv4Path           string   `json:"geoDbIpv4Path"`
-	GeoDbLocationPath       string   `json:"geoDbLocationPath"`
-	GeoAllowCountries       []string `json:"geoAllowCountries"`
-	GeoCountriesBlockMode   bool     `json:"geoCountriesBlockMode"`
-	TcpConnectionLimitCheck bool     `json:"tcpConnectionLimitCheck"`
-	TcpConnectionLimitCnt   int      `json:"tcpConnectionLimitCnt"`
+	ID                       int64    `json:"id"`
+	Dev                      string   `json:"dev"`
+	AttachMode               string   `json:"attachMode"`
+	Sensitivity              string   `json:"sensitivity"`
+	ProtectionMode           string   `json:"protectionMode"`
+	BlackIPDuration          int      `json:"blackIpDuration"`
+	SynValid                 bool     `json:"synValid"`
+	SynThreshold             int      `json:"synThreshold"`
+	SynBurstPkt              int      `json:"synBurstPkt"`
+	SynBurstCountPerSec      int      `json:"synBurstCountPerSec"`
+	SynFixedThreshold        int      `json:"synFixedThreshold"`
+	SynFixedCheckDuration    int      `json:"synFixedCheckDuration"`
+	ChallengeTimeout         int      `json:"challengeTimeout"`
+	SynProtectionDuration    int      `json:"synProtectionDuration"`
+	AckValid                 bool     `json:"ackValid"`
+	AckThreshold             int      `json:"ackThreshold"`
+	AckBurstPkt              int      `json:"ackBurstPkt"`
+	AckBurstCountPerSec      int      `json:"ackBurstCountPerSec"`
+	AckFixedThreshold        int      `json:"ackFixedThreshold"`
+	AckFixedCheckDuration    int      `json:"ackFixedCheckDuration"`
+	AckProtectionDuration    int      `json:"ackProtectionDuration"`
+	RstValid                 bool     `json:"rstValid"`
+	RstThreshold             int      `json:"rstThreshold"`
+	RstBurstPkt              int      `json:"rstBurstPkt"`
+	RstBurstCountPerSec      int      `json:"rstBurstCountPerSec"`
+	RstFixedThreshold        int      `json:"rstFixedThreshold"`
+	RstFixedCheckDuration    int      `json:"rstFixedCheckDuration"`
+	RstProtectionDuration    int      `json:"rstProtectionDuration"`
+	StompValid               bool     `json:"stompValid"`
+	StompThreshold           int      `json:"stompThreshold"`
+	StompBurstPkt            int      `json:"stompBurstPkt"`
+	StompBurstCountPerSec    int      `json:"stompBurstCountPerSec"`
+	StompFixedThreshold      int      `json:"stompFixedThreshold"`
+	StompFixedCheckDuration  int      `json:"stompFixedCheckDuration"`
+	StompProtectionDuration  int      `json:"stompProtectionDuration"`
+	SocketValid              bool     `json:"socketValid"`
+	SocketFinThreshold       int      `json:"socketFinThreshold"`
+	SocketFixedThreshold     int      `json:"socketFixedThreshold"`
+	SocketFixedCheckDuration int      `json:"socketFixedCheckDuration"`
+	IcmpValid                bool     `json:"icmpValid"`
+	IcmpThreshold            int      `json:"icmpThreshold"`
+	IcmpBurstPkt             int      `json:"icmpBurstPkt"`
+	IcmpBurstCountPerSec     int      `json:"icmpBurstCountPerSec"`
+	IcmpFixedThreshold       int      `json:"icmpFixedThreshold"`
+	IcmpFixedCheckDuration   int      `json:"icmpFixedCheckDuration"`
+	IcmpProtectionDuration   int      `json:"icmpProtectionDuration"`
+	UdpValid                 bool     `json:"udpValid"`
+	UdpThreshold             int      `json:"udpThreshold"`
+	UdpBurstPkt              int      `json:"udpBurstPkt"`
+	UdpBurstCountPerSec      int      `json:"udpBurstCountPerSec"`
+	UdpFixedThreshold        int      `json:"udpFixedThreshold"`
+	UdpFixedCheckDuration    int      `json:"udpFixedCheckDuration"`
+	UdpProtectionDuration    int      `json:"udpProtectionDuration"`
+	GreValid                 bool     `json:"greValid"`
+	GreThreshold             int      `json:"greThreshold"`
+	GreBurstPkt              int      `json:"greBurstPkt"`
+	GreBurstCountPerSec      int      `json:"greBurstCountPerSec"`
+	GreFixedThreshold        int      `json:"greFixedThreshold"`
+	GreFixedCheckDuration    int      `json:"greFixedCheckDuration"`
+	GreProtectionDuration    int      `json:"greProtectionDuration"`
+	TcpSegCheck              bool     `json:"tcpSegCheck"`
+	GeoCheck                 bool     `json:"geoCheck"`
+	GeoDbIpv4Path            string   `json:"geoDbIpv4Path"`
+	GeoDbLocationPath        string   `json:"geoDbLocationPath"`
+	GeoAllowCountries        []string `json:"geoAllowCountries"`
+	GeoCountriesBlockMode    bool     `json:"geoCountriesBlockMode"`
+	TcpConnectionLimitCheck  bool     `json:"tcpConnectionLimitCheck"`
+	TcpConnectionLimitCnt    int      `json:"tcpConnectionLimitCnt"`
 }
 
 type L4Store interface {
@@ -122,6 +133,9 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 			ack_fixed_threshold, ack_fixed_check_duration, ack_protection_duration,
 			rst_valid, rst_threshold, rst_burst_pkt, rst_burst_count_per_sec,
 			rst_fixed_threshold, rst_fixed_check_duration, rst_protection_duration,
+			stomp_valid, stomp_threshold, stomp_burst_pkt, stomp_burst_count_per_sec,
+			stomp_fixed_threshold, stomp_fixed_check_duration, stomp_protection_duration,
+			socket_valid, socket_fin_threshold, socket_fixed_threshold, socket_fixed_check_duration,
 			icmp_valid, icmp_threshold, icmp_burst_pkt, icmp_burst_count_per_sec,
 			icmp_fixed_threshold, icmp_fixed_check_duration, icmp_protection_duration,
 			udp_valid, udp_threshold, udp_burst_pkt, udp_burst_count_per_sec,
@@ -171,6 +185,17 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 		&cfg.RstFixedThreshold,
 		&cfg.RstFixedCheckDuration,
 		&cfg.RstProtectionDuration,
+		&cfg.StompValid,
+		&cfg.StompThreshold,
+		&cfg.StompBurstPkt,
+		&cfg.StompBurstCountPerSec,
+		&cfg.StompFixedThreshold,
+		&cfg.StompFixedCheckDuration,
+		&cfg.StompProtectionDuration,
+		&cfg.SocketValid,
+		&cfg.SocketFinThreshold,
+		&cfg.SocketFixedThreshold,
+		&cfg.SocketFixedCheckDuration,
 		&cfg.IcmpValid,
 		&cfg.IcmpThreshold,
 		&cfg.IcmpBurstPkt,
@@ -229,6 +254,9 @@ func (store *l4Store) update(ctx context.Context, cfg L4Config) error {
 			ack_fixed_threshold = ?, ack_fixed_check_duration = ?, ack_protection_duration = ?,
 			rst_valid = ?, rst_threshold = ?, rst_burst_pkt = ?, rst_burst_count_per_sec = ?,
 			rst_fixed_threshold = ?, rst_fixed_check_duration = ?, rst_protection_duration = ?,
+			stomp_valid = ?, stomp_threshold = ?, stomp_burst_pkt = ?, stomp_burst_count_per_sec = ?,
+			stomp_fixed_threshold = ?, stomp_fixed_check_duration = ?, stomp_protection_duration = ?,
+			socket_valid = ?, socket_fin_threshold = ?, socket_fixed_threshold = ?, socket_fixed_check_duration = ?,
 			icmp_valid = ?, icmp_threshold = ?, icmp_burst_pkt = ?, icmp_burst_count_per_sec = ?,
 			icmp_fixed_threshold = ?, icmp_fixed_check_duration = ?, icmp_protection_duration = ?,
 			udp_valid = ?, udp_threshold = ?, udp_burst_pkt = ?, udp_burst_count_per_sec = ?,
@@ -265,6 +293,17 @@ func (store *l4Store) update(ctx context.Context, cfg L4Config) error {
 		cfg.RstFixedThreshold,
 		cfg.RstFixedCheckDuration,
 		cfg.RstProtectionDuration,
+		boolToInt(cfg.StompValid),
+		cfg.StompThreshold,
+		cfg.StompBurstPkt,
+		cfg.StompBurstCountPerSec,
+		cfg.StompFixedThreshold,
+		cfg.StompFixedCheckDuration,
+		cfg.StompProtectionDuration,
+		boolToInt(cfg.SocketValid),
+		cfg.SocketFinThreshold,
+		cfg.SocketFixedThreshold,
+		cfg.SocketFixedCheckDuration,
 		boolToInt(cfg.IcmpValid),
 		cfg.IcmpThreshold,
 		cfg.IcmpBurstPkt,
@@ -309,6 +348,22 @@ func splitCSV(value string) []string {
 		}
 	}
 	return out
+}
+
+// FillStompProtection keeps STOMP's block time aligned with the other flood rules.
+// A zero value is not a configured duration; it uses the RST duration, then SYN, then 120.
+func FillStompProtection(cfg *L4Config) {
+	if cfg == nil || cfg.StompProtectionDuration > 0 {
+		return
+	}
+	switch {
+	case cfg.RstProtectionDuration > 0:
+		cfg.StompProtectionDuration = cfg.RstProtectionDuration
+	case cfg.SynProtectionDuration > 0:
+		cfg.StompProtectionDuration = cfg.SynProtectionDuration
+	default:
+		cfg.StompProtectionDuration = 120
+	}
 }
 
 func boolToInt(value bool) int {

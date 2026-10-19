@@ -7,23 +7,24 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"vue-project-backend/internal/store"
 )
 
 type edgeConfigureReportPayload struct {
-	Token                   string                    `json:"token"`
-	Command                 string                    `json:"command"`
-	ReportedAt              int64                     `json:"reported_at"`
-	IncludeSSLPems          bool                      `json:"include_ssl_pems"`
-	WhitelistCount          int                       `json:"whitelist_count"`
-	BlocklistCount          int                       `json:"blocklist_count"`
-	SiteCount               int                       `json:"site_count"`
-	TemporaryBlacklistCount int                       `json:"temporaryblacklist_count"`
-	Whitelist               []edgeL4WhitelistEntry    `json:"whitelist"`
-	Blocklist               []edgeL4BlocklistEntry    `json:"blocklist"`
-	L4                      edgeL4ConfigureSection    `json:"l4"`
-	L7                      edgeL7ConfigureSection    `json:"l7"`
+	Token                   string                 `json:"token"`
+	Command                 string                 `json:"command"`
+	ReportedAt              int64                  `json:"reported_at"`
+	IncludeSSLPems          bool                   `json:"include_ssl_pems"`
+	WhitelistCount          int                    `json:"whitelist_count"`
+	BlocklistCount          int                    `json:"blocklist_count"`
+	SiteCount               int                    `json:"site_count"`
+	TemporaryBlacklistCount int                    `json:"temporaryblacklist_count"`
+	Whitelist               []edgeL4WhitelistEntry `json:"whitelist"`
+	Blocklist               []edgeL4BlocklistEntry `json:"blocklist"`
+	L4                      edgeL4ConfigureSection `json:"l4"`
+	L7                      edgeL7ConfigureSection `json:"l7"`
 }
 
 type edgeL4WhitelistEntry struct {
@@ -48,17 +49,17 @@ type edgeL4ConfigureSection struct {
 }
 
 type edgeL7ConfigureSection struct {
-	Edge  edgeL7EdgeSection             `json:"edge"`
-	Sites map[string]edgeL7SiteSection  `json:"sites"`
-	Files map[string]any                `json:"files"`
+	Edge  edgeL7EdgeSection            `json:"edge"`
+	Sites map[string]edgeL7SiteSection `json:"sites"`
+	Files map[string]any               `json:"files"`
 }
 
 type edgeL7EdgeSection struct {
-	ListeningPorts      []edgeListeningPortEntry        `json:"listeningports"`
-	TemporaryBlacklist  []edgeTemporaryBlacklistEntry   `json:"temporaryblacklist"`
-	ACLRules            []map[string]any                `json:"acl_rules"`
-	ACLApplyRules       []map[string]any                `json:"acl_apply_rules"`
-	LegacyGlobal        map[string]any                  `json:"legacy_global"`
+	ListeningPorts     []edgeListeningPortEntry      `json:"listeningports"`
+	TemporaryBlacklist []edgeTemporaryBlacklistEntry `json:"temporaryblacklist"`
+	ACLRules           []map[string]any              `json:"acl_rules"`
+	ACLApplyRules      []map[string]any              `json:"acl_apply_rules"`
+	LegacyGlobal       map[string]any                `json:"legacy_global"`
 }
 
 type edgeListeningPortEntry struct {
@@ -83,14 +84,14 @@ type edgeTemporaryBlacklistEntry struct {
 }
 
 type edgeL7SiteSection struct {
-	Domain          string                     `json:"domain"`
-	Domains         []string                   `json:"domains"`
-	WAF             map[string]any             `json:"waf"`
-	Cache           []map[string]any           `json:"cache"`
-	Listening       edgeL7SiteListening        `json:"listening"`
-	UpstreamServers []edgeUpstreamEntry        `json:"upstreamservers"`
-	Compress        map[string]any             `json:"compress"`
-	SSL             map[string]any             `json:"ssl"`
+	Domain          string              `json:"domain"`
+	Domains         []string            `json:"domains"`
+	WAF             map[string]any      `json:"waf"`
+	Cache           []map[string]any    `json:"cache"`
+	Listening       edgeL7SiteListening `json:"listening"`
+	UpstreamServers []edgeUpstreamEntry `json:"upstreamservers"`
+	Compress        map[string]any      `json:"compress"`
+	SSL             map[string]any      `json:"ssl"`
 }
 
 type edgeL7SiteListening struct {
@@ -105,15 +106,15 @@ type edgeUpstreamEntry struct {
 }
 
 type edgeConfigureSyncResult struct {
-	Status              string `json:"status"`
-	ServerID            int64  `json:"serverId"`
-	WhitelistSynced     int    `json:"whitelistSynced"`
-	BlocklistSynced     int    `json:"blocklistSynced"`
-	ListeningPorts      int    `json:"listeningPortsSynced"`
-	TemporaryBlacklist  int    `json:"temporaryBlacklistSynced"`
-	L4ConfigUpdated     bool   `json:"l4ConfigUpdated"`
-	SitesTouched        int    `json:"sitesTouched"`
-	ReportedAt          int64  `json:"reportedAt,omitempty"`
+	Status             string `json:"status"`
+	ServerID           int64  `json:"serverId"`
+	WhitelistSynced    int    `json:"whitelistSynced"`
+	BlocklistSynced    int    `json:"blocklistSynced"`
+	ListeningPorts     int    `json:"listeningPortsSynced"`
+	TemporaryBlacklist int    `json:"temporaryBlacklistSynced"`
+	L4ConfigUpdated    bool   `json:"l4ConfigUpdated"`
+	SitesTouched       int    `json:"sitesTouched"`
+	ReportedAt         int64  `json:"reportedAt,omitempty"`
 }
 
 func reportEdgeConfigureHandler(
@@ -191,31 +192,50 @@ func reportEdgeConfigureHandler(
 		}
 		result.WhitelistSynced = len(whitelistInputs)
 
+		// The edge blocklist snapshot is the live XDP block table. It is shown on
+		// the temporary-block page. l4_blacklist stays the permanent list.
 		blocklistEntries := payload.L4.Blocklist
 		if len(blocklistEntries) == 0 {
 			blocklistEntries = payload.Blocklist
 		}
-		blocklistInputs := make([]store.L4BlacklistInput, 0, len(blocklistEntries))
+		defaultTTL := configuredBlackIPDuration(payload.L4.FirewallConfig)
+		if defaultTTL <= 0 {
+			if cfg, err := l4.GetByServerID(r.Context(), server.ID); err == nil && cfg.BlackIPDuration > 0 {
+				defaultTTL = int64(cfg.BlackIPDuration)
+			}
+		}
+		liveBlocks := make([]store.TemporaryBlacklistPayload, 0, len(blocklistEntries))
 		for _, entry := range blocklistEntries {
 			ip := strings.TrimSpace(entry.IP)
 			if ip == "" {
 				continue
 			}
 			reason := strings.TrimSpace(entry.Reason)
-			if reason == "" && strings.TrimSpace(entry.Type) != "" {
+			if reason == "" {
 				reason = strings.TrimSpace(entry.Type)
 			}
-			blocklistInputs = append(blocklistInputs, store.L4BlacklistInput{
-				IPAddress: ip,
-				Reason:    reason,
+			// black_ip_duration is the TTL configured on the edge. The snapshot's
+			// per-IP duration is often the 3600s default, not that setting.
+			ttl := defaultTTL
+			if ttl <= 0 {
+				ttl = int64(entry.Duration)
+			}
+			liveBlocks = append(liveBlocks, store.TemporaryBlacklistPayload{
+				IP:          ip,
+				Reason:      reason,
+				BlockedAt:   blocklistBlockedAt(entry.Created),
+				TTL:         ttl,
+				TriggerRule: "l4ddos",
+				ServerID:    server.ID,
+				Server:      server.Name,
 			})
 		}
-		if err := l4Blacklist.ReplaceByServer(r.Context(), server.ID, blocklistInputs); err != nil {
-			log.Printf("[api] report_edge_configure serverID=%d blocklist sync failed: %v", server.ID, err)
-			writeError(w, http.StatusInternalServerError, "failed to sync L4 blocklist")
+		if err := blacklist.ReplaceL4Temporary(r.Context(), server.ID, liveBlocks); err != nil {
+			log.Printf("[api] report_edge_configure serverID=%d live block sync failed: %v", server.ID, err)
+			writeError(w, http.StatusInternalServerError, "failed to sync live blocks")
 			return
 		}
-		result.BlocklistSynced = len(blocklistInputs)
+		result.BlocklistSynced = len(liveBlocks)
 
 		if payload.L4.FirewallConfigError == nil && len(payload.L4.FirewallConfig) > 0 {
 			cfg, err := l4.GetByServerID(r.Context(), server.ID)
@@ -266,14 +286,19 @@ func reportEdgeConfigureHandler(
 			if siteID == 0 {
 				siteID = entry.SiteIDCamel
 			}
+			ttl := entry.TTL
+			trigger := strings.TrimSpace(entry.TriggerRule)
+			if isL4BlockRule(trigger) && defaultTTL > 0 {
+				ttl = defaultTTL
+			}
 			tempPayloads = append(tempPayloads, store.TemporaryBlacklistPayload{
 				IP:          ip,
 				URL:         strings.TrimSpace(entry.URL),
 				Country:     strings.TrimSpace(entry.Country),
 				City:        strings.TrimSpace(entry.City),
 				BlockedAt:   strings.TrimSpace(entry.BlockedAt),
-				TTL:         entry.TTL,
-				TriggerRule: strings.TrimSpace(entry.TriggerRule),
+				TTL:         ttl,
+				TriggerRule: trigger,
 				ServerID:    server.ID,
 				SiteID:      siteID,
 				Server:      server.Name,
@@ -333,6 +358,36 @@ func reportEdgeConfigureHandler(
 		)
 		writeJSON(w, http.StatusOK, result)
 	}
+}
+
+func configuredBlackIPDuration(raw map[string]string) int64 {
+	for _, key := range []string{"black_ip_duration", "blackIpDuration"} {
+		for existing, value := range raw {
+			if !strings.EqualFold(existing, key) {
+				continue
+			}
+			if parsed, ok := parseFlexibleInt(value); ok && parsed > 0 {
+				return int64(parsed)
+			}
+		}
+	}
+	return 0
+}
+
+func blocklistBlockedAt(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return strconv.FormatInt(time.Now().UTC().Unix(), 10)
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		if parsed, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
+			return strconv.FormatInt(parsed.Unix(), 10)
+		}
+	}
+	if sec, err := strconv.ParseInt(raw, 10, 64); err == nil && sec > 0 {
+		return strconv.FormatInt(sec, 10)
+	}
+	return strconv.FormatInt(time.Now().UTC().Unix(), 10)
 }
 
 func siteAssignedToServer(site store.Site, serverID int64) bool {
@@ -415,6 +470,19 @@ func applyFirewallConfigMap(cfg *store.L4Config, raw map[string]string) {
 	setInt(&cfg.RstFixedThreshold, "rst_fixed_threshold", "rstFixedThreshold")
 	setInt(&cfg.RstFixedCheckDuration, "rst_fixed_check_duration", "rstFixedCheckDuration")
 	setInt(&cfg.RstProtectionDuration, "rst_protection_duration", "rstProtectionDuration")
+
+	setBool(&cfg.StompValid, "stomp_valid", "stompValid", "psh_valid", "pshValid")
+	setInt(&cfg.StompThreshold, "stomp_threshold", "stompThreshold", "psh_threshold", "pshThreshold")
+	setInt(&cfg.StompBurstPkt, "stomp_burst_pkt", "stompBurstPkt", "psh_burst_pkt", "pshBurstPkt")
+	setInt(&cfg.StompBurstCountPerSec, "stomp_burst_count_per_sec", "stompBurstCountPerSec", "psh_burst_count_per_sec", "pshBurstCountPerSec")
+	setInt(&cfg.StompFixedThreshold, "stomp_fixed_threshold", "stompFixedThreshold", "psh_fixed_threshold", "pshFixedThreshold")
+	setInt(&cfg.StompFixedCheckDuration, "stomp_fixed_check_duration", "stompFixedCheckDuration", "psh_fixed_check_duration", "pshFixedCheckDuration")
+	setInt(&cfg.StompProtectionDuration, "stomp_protection_duration", "stompProtectionDuration", "psh_protection_duration", "pshProtectionDuration")
+
+	setBool(&cfg.SocketValid, "socket_valid", "socketValid")
+	setInt(&cfg.SocketFinThreshold, "socket_fin_threshold", "socketFinThreshold")
+	setInt(&cfg.SocketFixedThreshold, "socket_fixed_threshold", "socketFixedThreshold")
+	setInt(&cfg.SocketFixedCheckDuration, "socket_fixed_check_duration", "socketFixedCheckDuration")
 
 	setBool(&cfg.IcmpValid, "icmp_valid", "icmpValid")
 	setInt(&cfg.IcmpThreshold, "icmp_threshold", "icmpThreshold")

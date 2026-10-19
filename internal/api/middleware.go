@@ -145,4 +145,3 @@ func withRequestLogging(next http.Handler) http.Handler {
 		applog.Event(level, "api", "http_request", fields)
 	})
 }
-

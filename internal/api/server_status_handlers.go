@@ -20,10 +20,10 @@ const remoteHostPowerTimeout = 20 * time.Second
 
 func sshTargetFromView(view store.ServerView) remotesvc.SSHTarget {
 	return remotesvc.SSHTarget{
-		Host:     view.IP,
-		User:     view.SSHUser,
-		Password: view.SSHPassword,
-		Port:     view.SSHPort,
+		Host:          view.IP,
+		User:          view.SSHUser,
+		Password:      view.SSHPassword,
+		Port:          view.SSHPort,
 		PrivateKey:    view.SSHPrivateKey,
 		KeyPassphrase: view.SSHKeyPassphrase,
 	}

@@ -146,7 +146,6 @@ func clipDeployLog(s string, max int) string {
 	return s[:head] + "\n…[truncated]…\n" + s[len(s)-tail:]
 }
 
-
 func formatProbeHostOSError(sshUser, ip string, err error) string {
 	detail := strings.TrimSpace(err.Error())
 	lower := strings.ToLower(detail)

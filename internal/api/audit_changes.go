@@ -311,7 +311,7 @@ var auditFieldLabels = map[string]string{
 	"sshUser": "SSH user", "sshPort": "SSH port", "sshPassword": "SSH password",
 	"sshPrivateKey": "SSH private key", "sshKeyPassphrase": "SSH key passphrase",
 	"sshAuthType": "SSH authentication",
-	"serverIds": "Edges", "userIds": "Management users", "managedUserIds": "Management users",
+	"serverIds":   "Edges", "userIds": "Management users", "managedUserIds": "Management users",
 	"licenseType": "License", "license": "License", "billingPeriod": "Billing period",
 	"licenseFile": "License file", "expiredDate": "Expires", "version": "Version",
 	"versionUuid": "Version", "wafId": "WAF rule set", "sslType": "SSL type",

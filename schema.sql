@@ -212,6 +212,7 @@ CREATE TABLE IF NOT EXISTS `l4_attack_stats` (
   `tcp_syn` bigint(20) unsigned NOT NULL DEFAULT 0,
   `tcp_ack` bigint(20) unsigned NOT NULL DEFAULT 0,
   `tcp_rst` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `tcp_stomp` bigint(20) unsigned NOT NULL DEFAULT 0,
   PRIMARY KEY (`server_id`,`bucket_ts`),
   KEY `idx_bucket` (`bucket_ts`),
   CONSTRAINT `l4_attack_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
@@ -262,6 +263,17 @@ CREATE TABLE IF NOT EXISTS `l4_ddos_defense` (
   `rst_fixed_threshold` int(11) DEFAULT 2000,
   `rst_fixed_check_duration` int(11) DEFAULT 15,
   `rst_protection_duration` int(11) DEFAULT 60,
+  `stomp_valid` tinyint(1) DEFAULT 1,
+  `stomp_threshold` int(11) DEFAULT 200000,
+  `stomp_burst_pkt` int(11) DEFAULT 20,
+  `stomp_burst_count_per_sec` int(11) DEFAULT 10,
+  `stomp_fixed_threshold` int(11) DEFAULT 2000,
+  `stomp_fixed_check_duration` int(11) DEFAULT 15,
+  `stomp_protection_duration` int(11) DEFAULT 60,
+  `socket_valid` tinyint(1) DEFAULT 1,
+  `socket_fin_threshold` int(11) DEFAULT 100,
+  `socket_fixed_threshold` int(11) DEFAULT 500,
+  `socket_fixed_check_duration` int(11) DEFAULT 15,
   `icmp_valid` tinyint(1) DEFAULT 1,
   `icmp_threshold` int(11) DEFAULT 200000,
   `icmp_burst_pkt` int(11) DEFAULT 20,
@@ -303,10 +315,12 @@ CREATE TABLE IF NOT EXISTS `l4_live_attack` (
   `server_id` bigint(20) NOT NULL,
   `source_ip` varchar(500) NOT NULL,
   `attack_type` varchar(64) NOT NULL,
+  `req_id` varchar(128) NOT NULL DEFAULT '',
   `created_at` timestamp NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`) USING BTREE,
   KEY `server_id` (`server_id`) USING BTREE,
+  KEY `idx_l4_live_attack_req` (`req_id`,`created_at`),
   CONSTRAINT `l4_live_attack_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
@@ -379,10 +393,17 @@ CREATE TABLE IF NOT EXISTS `security_events` (
   `server_id` bigint(20) DEFAULT NULL,
   `title` varchar(255) NOT NULL,
   `description` varchar(255) NOT NULL,
+  `command` varchar(64) NOT NULL DEFAULT '',
+  `source_ip` varchar(64) NOT NULL DEFAULT '',
+  `ttl` varchar(32) NOT NULL DEFAULT '',
+  `attack_type` varchar(64) NOT NULL DEFAULT '',
+  `event_data` varchar(255) NOT NULL DEFAULT '',
+  `req_id` varchar(128) NOT NULL DEFAULT '',
   `created_at` timestamp NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`) USING BTREE,
-  KEY `idx_security_events_server_created` (`server_id`,`created_at`)
+  KEY `idx_security_events_server_created` (`server_id`,`created_at`),
+  KEY `idx_security_events_req` (`req_id`,`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
@@ -724,6 +745,29 @@ CREATE TABLE IF NOT EXISTS `useragent_request_stats` (
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `panel_notifications` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `user_id` bigint(20) NOT NULL,
+  `event_key` varchar(191) NOT NULL,
+  `kind` varchar(32) NOT NULL DEFAULT 'info',
+  `severity` varchar(32) NOT NULL DEFAULT 'warning',
+  `title` varchar(255) NOT NULL DEFAULT '',
+  `body` text NOT NULL,
+  `status` varchar(32) NOT NULL DEFAULT '',
+  `req_id` varchar(64) NOT NULL DEFAULT '',
+  `server_id` bigint(20) DEFAULT NULL,
+  `server_name` varchar(255) NOT NULL DEFAULT '',
+  `is_read` tinyint(1) NOT NULL DEFAULT 0,
+  `is_dismissed` tinyint(1) NOT NULL DEFAULT 0,
+  `event_at` datetime NOT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_panel_notifications_user_event` (`user_id`,`event_key`),
+  KEY `idx_panel_notifications_user_active` (`user_id`,`is_dismissed`,`event_at`),
+  CONSTRAINT `fk_panel_notifications_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS `users` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `name` varchar(255) NOT NULL,
@@ -1006,6 +1050,9 @@ BEGIN
         ack_fixed_threshold, ack_fixed_check_duration, ack_protection_duration,
         rst_valid, rst_threshold, rst_burst_pkt, rst_burst_count_per_sec,
         rst_fixed_threshold, rst_fixed_check_duration, rst_protection_duration,
+        stomp_valid, stomp_threshold, stomp_burst_pkt, stomp_burst_count_per_sec,
+        stomp_fixed_threshold, stomp_fixed_check_duration, stomp_protection_duration,
+        socket_valid, socket_fin_threshold, socket_fixed_threshold, socket_fixed_check_duration,
         icmp_valid, icmp_threshold, icmp_burst_pkt, icmp_burst_count_per_sec,
         icmp_fixed_threshold, icmp_fixed_check_duration, icmp_protection_duration,
         udp_valid, udp_threshold, udp_burst_pkt, udp_burst_count_per_sec,
@@ -1025,6 +1072,9 @@ BEGIN
         ack_fixed_threshold, ack_fixed_check_duration, ack_protection_duration,
         rst_valid, rst_threshold, rst_burst_pkt, rst_burst_count_per_sec,
         rst_fixed_threshold, rst_fixed_check_duration, rst_protection_duration,
+        stomp_valid, stomp_threshold, stomp_burst_pkt, stomp_burst_count_per_sec,
+        stomp_fixed_threshold, stomp_fixed_check_duration, stomp_protection_duration,
+        socket_valid, socket_fin_threshold, socket_fixed_threshold, socket_fixed_check_duration,
         icmp_valid, icmp_threshold, icmp_burst_pkt, icmp_burst_count_per_sec,
         icmp_fixed_threshold, icmp_fixed_check_duration, icmp_protection_duration,
         udp_valid, udp_threshold, udp_burst_pkt, udp_burst_count_per_sec,

@@ -940,6 +940,8 @@ type l4AttackStatsInner struct {
 	ICMP  int64 `json:"icmp"`
 	TCP   int64 `json:"tcp"`
 	Rst   int64 `json:"rst"`
+	Stomp int64 `json:"stomp"`
+	Psh   int64 `json:"psh"`
 }
 
 type l4AttackStatsBucketResponse struct {
@@ -1087,6 +1089,13 @@ func fetchL4AttackBucket(
 	return parsed, nil
 }
 
+func stompStat(stats l4AttackStatsInner) int64 {
+	if stats.Stomp != 0 {
+		return stats.Stomp
+	}
+	return stats.Psh
+}
+
 func insertL4AttackBucket(
 	ctx context.Context,
 	dbConn *sql.DB,
@@ -1110,9 +1119,10 @@ func insertL4AttackBucket(
 			other,
 			tcp_syn,
 			tcp_ack,
-			tcp_rst
+			tcp_rst,
+			tcp_stomp
 		) VALUES (
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		)
 		ON DUPLICATE KEY UPDATE
 			total_traffic = VALUES(total_traffic),
@@ -1125,7 +1135,8 @@ func insertL4AttackBucket(
 			other = VALUES(other),
 			tcp_syn = VALUES(tcp_syn),
 			tcp_ack = VALUES(tcp_ack),
-			tcp_rst = VALUES(tcp_rst)
+			tcp_rst = VALUES(tcp_rst),
+			tcp_stomp = VALUES(tcp_stomp)
 		`,
 		serverID,
 		bucket,
@@ -1140,6 +1151,7 @@ func insertL4AttackBucket(
 		data.Stats.Syn,
 		data.Stats.Ack,
 		data.Stats.Rst,
+		stompStat(data.Stats),
 	)
 	if err != nil {
 		return fmt.Errorf("insert l4_attack_stats: %w", err)
@@ -1685,8 +1697,8 @@ func insertSiteTrafficBucket(ctx context.Context, dbConn *sql.DB, serverID int64
 			p.TrafficL7Rx/1024,
 			p.TrafficL7Tx/1024,
 			// Angelos reports bandwidth as bytes/sec; store KB/s to match server_traffic_stats.
-			int64(math.Round(p.BandwidthL7Rx / 1024)),
-			int64(math.Round(p.BandwidthL7Tx / 1024)),
+			int64(math.Round(p.BandwidthL7Rx/1024)),
+			int64(math.Round(p.BandwidthL7Tx/1024)),
 			p.RequestCount,
 			p.ResponseCount,
 			p.BlockedRequestCount,
@@ -1873,8 +1885,8 @@ func insertDomainRequestBucket(ctx context.Context, dbConn *sql.DB, serverID int
 			row.RequestCount,
 			int64(row.TrafficL7Rx/1024),
 			int64(row.TrafficL7Tx/1024),
-			int64(math.Round(row.BandwidthL7Rx / 1024)),
-			int64(math.Round(row.BandwidthL7Tx / 1024)),
+			int64(math.Round(row.BandwidthL7Rx/1024)),
+			int64(math.Round(row.BandwidthL7Tx/1024)),
 		)
 	}
 

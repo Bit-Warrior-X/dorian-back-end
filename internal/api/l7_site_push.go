@@ -623,16 +623,16 @@ type l7SiteWafRulesPayload struct {
 
 // l7SiteConfigPayload is the full site configuration pushed to angelos on site create.
 type l7SiteConfigPayload struct {
-	ServerID           int64                      `json:"server_id"`
-	SiteID             int64                      `json:"site_id"`
-	Domain             string                     `json:"domain"`
-	SSL                l7SiteSSLPayload           `json:"ssl"`
-	WafRules           l7SiteWafRulesPayload      `json:"waf_rules"`
-	CompressSettings   compressPayloadL7          `json:"compress_settings"`
-	CacheRules      []cacheRulePayloadL7      `json:"cache_rules"`
-	HTTPPorts       []listeningPortPayloadL7  `json:"http_ports"`
-	HTTPSPorts      []listeningPortPayloadL7  `json:"https_ports"`
-	UpstreamServers []upstreamServerPayloadL7 `json:"upstream_servers"`
+	ServerID         int64                     `json:"server_id"`
+	SiteID           int64                     `json:"site_id"`
+	Domain           string                    `json:"domain"`
+	SSL              l7SiteSSLPayload          `json:"ssl"`
+	WafRules         l7SiteWafRulesPayload     `json:"waf_rules"`
+	CompressSettings compressPayloadL7         `json:"compress_settings"`
+	CacheRules       []cacheRulePayloadL7      `json:"cache_rules"`
+	HTTPPorts        []listeningPortPayloadL7  `json:"http_ports"`
+	HTTPSPorts       []listeningPortPayloadL7  `json:"https_ports"`
+	UpstreamServers  []upstreamServerPayloadL7 `json:"upstream_servers"`
 }
 
 type siteL7Stores struct {
@@ -1006,4 +1006,3 @@ func callL7UpdateDomain(
 	}
 	return classifyDomainEdgeReport(raw), nil
 }
-

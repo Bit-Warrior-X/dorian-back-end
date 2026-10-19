@@ -1490,6 +1490,29 @@ paths:
               schema:
                 type: object
 
+  /servers/{serverId}/sparta-log:
+    parameters:
+      - $ref: "#/components/parameters/ServerId"
+    get:
+      tags: [Servers]
+      summary: Tail the live Sparta counter log for one edge
+      responses:
+        "200":
+          description: Newest Sparta journal lines
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lines:
+                    type: array
+                    items:
+                      type: string
+                  error:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /servers/{serverId}/host-metrics:
     parameters:
       - $ref: "#/components/parameters/ServerId"

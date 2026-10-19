@@ -12,14 +12,14 @@ func TestApplyFirewallConfigMap(t *testing.T) {
 		SynThreshold: 1,
 	}
 	applyFirewallConfigMap(&cfg, map[string]string{
-		"dev":                       "eth0",
-		"attach_mode":               "native",
-		"syn_valid":                 "1",
-		"syn_threshold":             "100000",
-		"ackValid":                  "true",
-		"geo_allow_countries":       "US, CA;GB",
+		"dev":                        "eth0",
+		"attach_mode":                "native",
+		"syn_valid":                  "1",
+		"syn_threshold":              "100000",
+		"ackValid":                   "true",
+		"geo_allow_countries":        "US, CA;GB",
 		"tcp_connection_limit_check": "yes",
-		"tcp_connection_limit_cnt":  "5000",
+		"tcp_connection_limit_cnt":   "5000",
 	})
 
 	if cfg.Dev != "eth0" {

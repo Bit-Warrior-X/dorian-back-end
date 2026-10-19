@@ -72,7 +72,7 @@ paths:
 
         Dorian authenticates with the edge `token`, then reconciles panel DB:
 
-        - L4 whitelist / blocklist (replace for that edge)
+        - L4 whitelist. The edge blocklist snapshot is the live attack list: it is shown on Temporary blocks, not copied into l4_blacklist.
         - L4 `firewall.config` → `l4_ddos_defense`
         - Edge listening ports
         - Temporary blacklist (Redis)
@@ -949,6 +949,17 @@ paths:
               ackProtectionDuration: 300
               rstValid: false
               rstThreshold: 0
+              stompValid: true
+              stompThreshold: 200000
+              stompBurstPkt: 20
+              stompBurstCountPerSec: 10
+              stompFixedThreshold: 2000
+              stompFixedCheckDuration: 15
+              stompProtectionDuration: 60
+              socketValid: true
+              socketFinThreshold: 100
+              socketFixedThreshold: 500
+              socketFixedCheckDuration: 15
               icmpValid: true
               icmpThreshold: 500
               udpValid: true
@@ -1952,6 +1963,33 @@ components:
           type: integer
         rstProtectionDuration:
           type: integer
+        stompValid:
+          type: boolean
+          description: Enable STOMP (TCP PSH+ACK) flood defense
+        stompThreshold:
+          type: integer
+        stompBurstPkt:
+          type: integer
+        stompBurstCountPerSec:
+          type: integer
+        stompFixedThreshold:
+          type: integer
+        stompFixedCheckDuration:
+          type: integer
+        stompProtectionDuration:
+          type: integer
+        socketValid:
+          type: boolean
+          description: Enable SOCKET scan defense. NULL and XMAS scans are dropped immediately.
+        socketFinThreshold:
+          type: integer
+          description: FIN without acknowledgement, on a flow that is not established, blocks above this count.
+        socketFixedThreshold:
+          type: integer
+          description: Other unusual flag combinations block above this count in the fixed window.
+        socketFixedCheckDuration:
+          type: integer
+          description: Seconds in the fixed window for unusual flag combinations.
         icmpValid:
           type: boolean
         icmpThreshold:

@@ -225,14 +225,27 @@ func (store *serverTrafficStatsStore) ListBandwidth(ctx context.Context, start, 
 }
 
 func (store *serverTrafficStatsStore) ListNicRxBandwidthByServer(ctx context.Context, start, end time.Time, scope TrafficScope) ([]ServerBandwidthPoint, error) {
+	// NIC minute samples from the edge can under-count during XDP/Sparta floods
+	// (seen ~8× low vs l4_attack_stats). Prefer the higher of the NIC sample and
+	// the L4 per-second peak for that minute so Overview matches the attack view.
+	// Both sides use the panel unit: bits/s ÷ 1024.
 	query := `
-		SELECT server_id, bucket_ts, bandwidth_nic_rx
-		FROM server_traffic_stats
-		WHERE bucket_ts >= ? AND bucket_ts <= ?`
-	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+		SELECT s.server_id, s.bucket_ts,
+		       GREATEST(s.bandwidth_nic_rx, COALESCE(l.peak_rate, 0)) AS bandwidth_nic_rx
+		FROM server_traffic_stats s
+		LEFT JOIN (
+			SELECT server_id,
+			       FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(bucket_ts) / 60) * 60) AS minute_ts,
+			       CAST(MAX(total_traffic) * 8 / 1024 AS UNSIGNED) AS peak_rate
+			FROM l4_attack_stats
+			WHERE bucket_ts >= ? AND bucket_ts <= ?
+			GROUP BY server_id, minute_ts
+		) l ON l.server_id = s.server_id AND l.minute_ts = s.bucket_ts
+		WHERE s.bucket_ts >= ? AND s.bucket_ts <= ?`
+	args := []any{start, end, start, end}
+	query, args = appendServerScopePrefixed(query, args, scope, "s")
 	query += `
-		ORDER BY server_id, bucket_ts
+		ORDER BY s.server_id, s.bucket_ts
 		`
 	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -354,14 +367,23 @@ func (store *serverTrafficStatsStore) ListL7TxBandwidthByServer(ctx context.Cont
 
 func (store *serverTrafficStatsStore) ListNicRxBandwidthAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
 	query := `
-		SELECT bucket_ts, SUM(bandwidth_nic_rx) AS bandwidth_nic_rx	
-		FROM server_traffic_stats
-		WHERE bucket_ts >= ? AND bucket_ts <= ?`
-	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+		SELECT s.bucket_ts,
+		       SUM(GREATEST(s.bandwidth_nic_rx, COALESCE(l.peak_rate, 0))) AS bandwidth_nic_rx
+		FROM server_traffic_stats s
+		LEFT JOIN (
+			SELECT server_id,
+			       FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(bucket_ts) / 60) * 60) AS minute_ts,
+			       CAST(MAX(total_traffic) * 8 / 1024 AS UNSIGNED) AS peak_rate
+			FROM l4_attack_stats
+			WHERE bucket_ts >= ? AND bucket_ts <= ?
+			GROUP BY server_id, minute_ts
+		) l ON l.server_id = s.server_id AND l.minute_ts = s.bucket_ts
+		WHERE s.bucket_ts >= ? AND s.bucket_ts <= ?`
+	args := []any{start, end, start, end}
+	query, args = appendServerScopePrefixed(query, args, scope, "s")
 	query += `
-		GROUP BY bucket_ts
-		ORDER BY bucket_ts
+		GROUP BY s.bucket_ts
+		ORDER BY s.bucket_ts
 		`
 	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -1424,14 +1446,23 @@ func (store *serverTrafficStatsStore) LatestNicRxBandwidth(ctx context.Context, 
 	var bucket time.Time
 	var bandwidthNicRx int64
 	query := `
-		SELECT bucket_ts, SUM(bandwidth_nic_rx) AS bandwidth_nic_rx
-		FROM server_traffic_stats
-		WHERE bucket_ts >= ? AND bucket_ts <= ?`
-	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+		SELECT s.bucket_ts,
+		       SUM(GREATEST(s.bandwidth_nic_rx, COALESCE(l.peak_rate, 0))) AS bandwidth_nic_rx
+		FROM server_traffic_stats s
+		LEFT JOIN (
+			SELECT server_id,
+			       FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(bucket_ts) / 60) * 60) AS minute_ts,
+			       CAST(MAX(total_traffic) * 8 / 1024 AS UNSIGNED) AS peak_rate
+			FROM l4_attack_stats
+			WHERE bucket_ts >= ? AND bucket_ts <= ?
+			GROUP BY server_id, minute_ts
+		) l ON l.server_id = s.server_id AND l.minute_ts = s.bucket_ts
+		WHERE s.bucket_ts >= ? AND s.bucket_ts <= ?`
+	args := []any{start, end, start, end}
+	query, args = appendServerScopePrefixed(query, args, scope, "s")
 	query += `
-		GROUP BY bucket_ts
-		ORDER BY bucket_ts DESC
+		GROUP BY s.bucket_ts
+		ORDER BY s.bucket_ts DESC
 		LIMIT 1
 		`
 	row := store.db.QueryRowContext(ctx, query, args...)

@@ -41,6 +41,7 @@ func NewRouter(
 	auditLogs store.AuditLogStore,
 	apiTokens store.APITokenStore,
 	licensePlans store.LicensePlanStore,
+	notifications store.NotificationStore,
 	certIssuer *acme.Issuer,
 ) http.Handler {
 	mux := http.NewServeMux()
@@ -48,6 +49,7 @@ func NewRouter(
 	agentClient := NewAgentClient(cfg)
 	configureL7Edge(cfg)
 	registerRoutes(mux, cfg, agentClient, users, mfa, loginThrottle, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, certIssuer)
+	registerNotificationRoutes(mux, notifications)
 
 	auditResolver := &auditResolver{users: users, servers: servers, sites: sites, wafRules: wafRules}
 

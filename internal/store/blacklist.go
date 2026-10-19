@@ -14,6 +14,10 @@ import (
 const (
 	redisKeyBlacklistNext  = "temporaryblacklist_backend:id"
 	redisKeyBlacklistEntry = "temporaryblacklist_backend:entry:" // entry key: temporaryblacklist:entry:{id}; EXPIRE set so Redis deletes when TTL elapses
+	// Live L4 attack blocks shown on the temporary-block page. Kept apart from
+	// the L7 temporary list so a flush does not push them to the L7 agent.
+	redisKeyL4TempNext  = "l4temporaryblock:id"
+	redisKeyL4TempEntry = "l4temporaryblock:entry:"
 	// defaultExpireSeconds is used when ttl is 0 so the key still expires eventually
 	defaultExpireSeconds = 180 // 3 minutes
 )
@@ -27,6 +31,7 @@ type TemporaryBlacklistPayload struct {
 	BlockedAt   string `json:"blocked_at"`
 	TTL         int64  `json:"ttl"`
 	TriggerRule string `json:"trigger_rule"`
+	Reason      string `json:"reason,omitempty"`
 	ServerID    int64  `json:"server_id,omitempty"`
 	SiteID      int64  `json:"site_id,omitempty"`
 	Server      string `json:"server,omitempty"`
@@ -93,6 +98,12 @@ type BlacklistStore interface {
 	Delete(ctx context.Context, entryID int64) error
 	DeleteAll(ctx context.Context, serverID int64) error
 	ReplaceForServer(ctx context.Context, serverID int64, payloads []TemporaryBlacklistPayload) error
+	// ReplaceL4Temporary replaces the current live L4 blocks for one edge.
+	ReplaceL4Temporary(ctx context.Context, serverID int64, payloads []TemporaryBlacklistPayload) error
+	ListL4Temporary(ctx context.Context, serverID int64) ([]BlacklistEntry, error)
+	// GetL4Temporary returns the live L4 block for an entry id.
+	GetL4Temporary(ctx context.Context, entryID int64) (TemporaryBlacklistPayload, error)
+	DeleteL4Temporary(ctx context.Context, entryID int64) error
 }
 
 type blacklistStore struct {
@@ -130,6 +141,10 @@ func (s *blacklistStore) List(ctx context.Context, serverID, siteID int64) ([]Bl
 			continue
 		}
 		if siteID != 0 && p.SiteID != siteID {
+			continue
+		}
+		if _, active := blockLifetime(p, time.Now().UTC()); !active {
+			_ = s.rdb.Del(ctx, key)
 			continue
 		}
 		entries = append(entries, payloadToEntry(id, p))
@@ -187,30 +202,32 @@ func (s *blacklistStore) Create(ctx context.Context, serverID int64, input Black
 }
 
 func (s *blacklistStore) CreateFromPayload(ctx context.Context, p TemporaryBlacklistPayload) (BlacklistEntry, error) {
-	id, err := s.rdb.Incr(ctx, redisKeyBlacklistNext).Result()
-	if err != nil {
-		return BlacklistEntry{}, err
-	}
 	// Normalize payload
 	p.IP = strings.TrimSpace(p.IP)
 	p.URL = strings.TrimSpace(p.URL)
 	p.Country = strings.TrimSpace(p.Country)
 	p.City = strings.TrimSpace(p.City)
 	p.BlockedAt = strings.TrimSpace(p.BlockedAt)
+	now := time.Now().UTC()
 	if p.BlockedAt == "" {
-		p.BlockedAt = strconv.FormatInt(time.Now().UTC().Unix(), 10)
+		p.BlockedAt = strconv.FormatInt(now.Unix(), 10)
 	}
 	p.TriggerRule = strings.TrimSpace(p.TriggerRule)
+	p.Reason = strings.TrimSpace(p.Reason)
+	remaining, active := blockLifetime(p, now)
+	if !active {
+		return payloadToEntry(0, p), nil
+	}
+	id, err := s.rdb.Incr(ctx, redisKeyBlacklistNext).Result()
+	if err != nil {
+		return BlacklistEntry{}, err
+	}
 	raw, err := json.Marshal(p)
 	if err != nil {
 		return BlacklistEntry{}, err
 	}
 	entryKey := redisKeyBlacklistEntry + strconv.FormatInt(id, 10)
-	expireSec := p.TTL
-	if expireSec <= 0 {
-		expireSec = defaultExpireSeconds
-	}
-	if err := s.rdb.Set(ctx, entryKey, raw, time.Duration(expireSec)*time.Second).Err(); err != nil {
+	if err := s.rdb.Set(ctx, entryKey, raw, remaining).Err(); err != nil {
 		return BlacklistEntry{}, err
 	}
 	return payloadToEntry(id, p), nil
@@ -292,6 +309,149 @@ func (s *blacklistStore) ReplaceForServer(ctx context.Context, serverID int64, p
 	return nil
 }
 
+func (s *blacklistStore) l4TempKeys(ctx context.Context) ([]string, error) {
+	var keys []string
+	var cursor uint64
+	for {
+		batch, next, err := s.rdb.Scan(ctx, cursor, redisKeyL4TempEntry+"*", 100).Result()
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, batch...)
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return keys, nil
+}
+
+func (s *blacklistStore) ReplaceL4Temporary(ctx context.Context, serverID int64, payloads []TemporaryBlacklistPayload) error {
+	if serverID == 0 {
+		return errNotFound
+	}
+	keys, err := s.l4TempKeys(ctx)
+	if err != nil {
+		return err
+	}
+	var stale []string
+	for _, key := range keys {
+		raw, err := s.rdb.Get(ctx, key).Result()
+		if err != nil {
+			if err == redis.Nil {
+				continue
+			}
+			return err
+		}
+		var existing TemporaryBlacklistPayload
+		if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+			stale = append(stale, key)
+			continue
+		}
+		if existing.ServerID == serverID {
+			stale = append(stale, key)
+		}
+	}
+	if len(stale) > 0 {
+		if err := s.rdb.Del(ctx, stale...).Err(); err != nil {
+			return err
+		}
+	}
+	seen := make(map[string]struct{}, len(payloads))
+	for _, payload := range payloads {
+		ip := strings.TrimSpace(payload.IP)
+		if ip == "" {
+			continue
+		}
+		if _, ok := seen[strings.ToLower(ip)]; ok {
+			continue
+		}
+		seen[strings.ToLower(ip)] = struct{}{}
+		payload.ServerID = serverID
+		payload.IP = ip
+		payload.TriggerRule = "l4ddos"
+		if _, active := blockLifetime(payload, time.Now().UTC()); !active {
+			continue
+		}
+		id, err := s.rdb.Incr(ctx, redisKeyL4TempNext).Result()
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		remaining, _ := blockLifetime(payload, time.Now().UTC())
+		if err := s.rdb.Set(ctx, redisKeyL4TempEntry+strconv.FormatInt(id, 10), raw, remaining).Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *blacklistStore) ListL4Temporary(ctx context.Context, serverID int64) ([]BlacklistEntry, error) {
+	keys, err := s.l4TempKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var entries []BlacklistEntry
+	for _, key := range keys {
+		raw, err := s.rdb.Get(ctx, key).Result()
+		if err != nil {
+			if err == redis.Nil {
+				continue
+			}
+			return nil, err
+		}
+		id, err := strconv.ParseInt(strings.TrimPrefix(key, redisKeyL4TempEntry), 10, 64)
+		if err != nil {
+			continue
+		}
+		var payload TemporaryBlacklistPayload
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			continue
+		}
+		if serverID != 0 && payload.ServerID != serverID {
+			continue
+		}
+		if _, active := blockLifetime(payload, time.Now().UTC()); !active {
+			_ = s.rdb.Del(ctx, key)
+			continue
+		}
+		if strings.TrimSpace(payload.TriggerRule) == "" {
+			payload.TriggerRule = "l4ddos"
+		}
+		entries = append(entries, payloadToEntry(id, payload))
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].ID > entries[j].ID })
+	return entries, nil
+}
+
+func (s *blacklistStore) GetL4Temporary(ctx context.Context, entryID int64) (TemporaryBlacklistPayload, error) {
+	var payload TemporaryBlacklistPayload
+	if entryID <= 0 {
+		return payload, errNotFound
+	}
+	raw, err := s.rdb.Get(ctx, redisKeyL4TempEntry+strconv.FormatInt(entryID, 10)).Result()
+	if err != nil {
+		if err == redis.Nil {
+			return payload, errNotFound
+		}
+		return payload, err
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return payload, err
+	}
+	return payload, nil
+}
+
+func (s *blacklistStore) DeleteL4Temporary(ctx context.Context, entryID int64) error {
+	if entryID <= 0 {
+		return nil
+	}
+	return s.rdb.Del(ctx, redisKeyL4TempEntry+strconv.FormatInt(entryID, 10)).Err()
+}
+
 // ListPayloadsByServer returns the raw temporary blacklist payloads stored in
 // Redis, optionally filtered by serverID. If serverID is 0, payloads for all
 // servers are returned.
@@ -316,6 +476,10 @@ func (s *blacklistStore) ListPayloadsByServer(ctx context.Context, serverID int6
 			continue
 		}
 		if serverID != 0 && p.ServerID != serverID {
+			continue
+		}
+		if _, active := blockLifetime(p, time.Now().UTC()); !active {
+			_ = s.rdb.Del(ctx, key)
 			continue
 		}
 		payloads = append(payloads, p)
@@ -362,7 +526,7 @@ func payloadToEntry(id int64, p TemporaryBlacklistPayload) BlacklistEntry {
 		SiteID:      p.SiteID,
 		IPAddress:   p.IP,
 		Geolocation: geolocation,
-		Reason:      "",
+		Reason:      strings.TrimSpace(p.Reason),
 		URL:         p.URL,
 		Server:      p.Server,
 		TTL:         ttlStr,
@@ -371,6 +535,39 @@ func payloadToEntry(id int64, p TemporaryBlacklistPayload) BlacklistEntry {
 		ExpireAt:    "",
 		UpdatedAt:   createdAt,
 	}
+}
+
+// blockLifetime is how long the block should remain stored and visible.
+// A positive TTL is measured from blocked_at, not from when the report arrived.
+func blockLifetime(p TemporaryBlacklistPayload, now time.Time) (time.Duration, bool) {
+	if p.TTL <= 0 {
+		return time.Duration(defaultExpireSeconds) * time.Second, true
+	}
+	started, ok := parseBlockTime(p.BlockedAt)
+	if !ok {
+		return time.Duration(p.TTL) * time.Second, true
+	}
+	expires := started.Add(time.Duration(p.TTL) * time.Second)
+	if !expires.After(now) {
+		return 0, false
+	}
+	return expires.Sub(now), true
+}
+
+func parseBlockTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if sec, err := strconv.ParseInt(raw, 10, 64); err == nil && sec > 0 {
+		return time.Unix(sec, 0).UTC(), true
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04:05"} {
+		if parsed, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 
 func formatUnixTimestamp(s string) string {
