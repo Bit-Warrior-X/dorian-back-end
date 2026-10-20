@@ -336,8 +336,8 @@ func registerRoutes(
 	mux.HandleFunc("/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts))
 	mux.HandleFunc("/api/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts))
 	mux.HandleFunc("/api/v1/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts))
-	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, l4LiveAttack, serverTrafficStats))
-	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, l4LiveAttack, serverTrafficStats))
+	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, securityEvents, serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, securityEvents, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/api/v1/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats))
@@ -925,7 +925,7 @@ type dashboardSummaryResponse struct {
 	L7ThreatsPreviousMonth int64 `json:"l7ThreatsPreviousMonth"`
 }
 
-func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore, l4LiveAttack store.L4LiveAttackStore, trafficStats store.ServerTrafficStatsStore) http.HandlerFunc {
+func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore, securityEvents store.SecurityEventStore, trafficStats store.ServerTrafficStatsStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -991,10 +991,7 @@ func dashboardSummaryHandler(users store.UserStore, servers store.ServerStore, s
 		startOfPreviousMonth := startOfMonth.AddDate(0, -1, 0)
 
 		countL4 := func(start, end time.Time) (int64, error) {
-			if viewer.restricted {
-				return l4LiveAttack.CountBetweenForServers(ctx, start, end, viewer.serverIDs)
-			}
-			return l4LiveAttack.CountBetween(ctx, start, end)
+			return securityEvents.CountPeriodsStarted(ctx, start, end, trafficScope)
 		}
 
 		l4ThisMonth, err := countL4(startOfMonth, startOfNextMonth)
@@ -1051,8 +1048,21 @@ func dashboardSecurityEventsHandler(securityEvents store.SecurityEventStore) htt
 		}
 
 		viewer := viewerScopeFromContext(r.Context())
-		events, err := securityEvents.ListPeriods(r.Context(), limit,
-			store.TrafficScope{ServerIDs: viewer.serverIDs, Restricted: viewer.restricted})
+		scope := store.TrafficScope{ServerIDs: viewer.serverIDs, Restricted: viewer.restricted}
+		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid serverId")
+			return
+		}
+		if serverID > 0 {
+			if !viewer.canSeeServer(serverID) {
+				writeError(w, http.StatusNotFound, "server not found")
+				return
+			}
+			scope = store.TrafficScope{ServerID: serverID, Restricted: viewer.restricted}
+		}
+
+		events, err := securityEvents.ListPeriods(r.Context(), limit, scope)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load security events")
 			return

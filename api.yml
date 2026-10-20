@@ -171,6 +171,7 @@ paths:
       summary: Recent security events
       parameters:
         - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/ServerIdQuery"
       responses:
         "200":
           description: Security events

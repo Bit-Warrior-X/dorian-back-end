@@ -79,6 +79,8 @@ type SecurityEventStore interface {
 	Create(ctx context.Context, serverID int64, title, description string, occurredAt time.Time, report SecurityEventReport) error
 	// ListBlockedSources returns one row per source IP blocked under req_id.
 	ListBlockedSources(ctx context.Context, serverID int64, reqID string) ([]BlockedSource, error)
+	// CountPeriodsStarted counts attack windows (same grouping as ListPeriods) that began in [start, end).
+	CountPeriodsStarted(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, error)
 }
 
 // BlockedSource is a source IP blocked during one attack. LastBlockedAt plus TTL is
@@ -90,6 +92,22 @@ type BlockedSource struct {
 	FirstBlocked  time.Time
 	LastBlockedAt time.Time
 	Blocks        int
+}
+
+func (store *securityEventStore) CountPeriodsStarted(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, error) {
+	// Look back one day so a window already open at start keeps its real first report.
+	inner, args := appendServerScope(`
+		SELECT IF(req_id = '', CONCAT('event:', id), req_id) AS period_key, MIN(created_at) AS started_at
+		FROM security_events
+		WHERE (req_id <> '' OR event_data = 'attack_start')
+		  AND created_at >= ? AND created_at < ?`, []any{start.Add(-24 * time.Hour), end}, scope)
+	query := `SELECT COUNT(*) FROM (` + inner + ` GROUP BY period_key) p WHERE p.started_at >= ? AND p.started_at < ?`
+	args = append(args, start, end)
+	var total int64
+	if err := store.db.QueryRowContext(ctx, query, args...).Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 func (store *securityEventStore) ListBlockedSources(ctx context.Context, serverID int64, reqID string) ([]BlockedSource, error) {
@@ -224,8 +242,9 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 	if limit <= 0 {
 		limit = 6
 	}
-	if limit > 40 {
-		limit = 40
+	// Detection can request the full attack history; keep a hard ceiling for safety.
+	if limit > 5000 {
+		limit = 5000
 	}
 	// Prefer real attack windows (shared req_id). Orphan per-IP block rows without
 	// req_id (e.g. EVENT_IP_FRAG_MIDDLE_BLOCK) used to flood the newest-N list and
