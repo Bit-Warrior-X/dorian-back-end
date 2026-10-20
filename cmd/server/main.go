@@ -113,6 +113,19 @@ func main() {
 		applog.Errorf("api", "startup_failed", map[string]any{"step": "panel_notifications_schema", "error": err.Error()})
 		os.Exit(1)
 	}
+	authSessionStore := store.NewAuthSessionStore(connection)
+	panelSettingsStore := store.NewPanelSettingsStore(connection)
+	userTokenStore := store.NewUserTokenStore(connection)
+	for step, ensure := range map[string]func(context.Context) error{
+		"user_sessions_schema":  authSessionStore.EnsureSchema,
+		"panel_settings_schema": panelSettingsStore.EnsureSchema,
+		"user_tokens_schema":    userTokenStore.EnsureSchema,
+	} {
+		if err := ensure(ctx); err != nil {
+			applog.Errorf("api", "startup_failed", map[string]any{"step": step, "error": err.Error()})
+			os.Exit(1)
+		}
+	}
 	mfaStore := store.NewMFAStore(connection)
 	loginThrottleStore := store.NewLoginThrottleStore(redisClient, store.LoginThrottleConfig{
 		MaxAccountFailures: cfg.LoginMaxAccountFailures,
@@ -121,7 +134,7 @@ func main() {
 		Lockout:            time.Duration(cfg.LoginLockoutMinutes) * time.Minute,
 	})
 	certIssuer := acme.NewIssuer(cfg, siteStore)
-	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore, apiTokenStore, licensePlanStore, notificationStore, certIssuer)
+	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore, apiTokenStore, licensePlanStore, notificationStore, authSessionStore, panelSettingsStore, userTokenStore, certIssuer)
 
 	// Start background worker to periodically collect IP request statistics
 	// from each server and store them into the database.

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"vue-project-backend/internal/store"
 )
@@ -324,6 +325,21 @@ func auditLogsHandler(audit store.AuditLogStore) http.HandlerFunc {
 				filter.ActorUserID = parsed
 			}
 		}
+		for _, bound := range []struct {
+			key    string
+			target **time.Time
+		}{{"from", &filter.From}, {"to", &filter.To}} {
+			raw := strings.TrimSpace(r.URL.Query().Get(bound.key))
+			if raw == "" {
+				continue
+			}
+			parsed, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, bound.key+" must be an RFC3339 time")
+				return
+			}
+			*bound.target = &parsed
+		}
 
 		items, err := audit.List(r.Context(), filter)
 		if err != nil {
@@ -337,7 +353,7 @@ func auditLogsHandler(audit store.AuditLogStore) http.HandlerFunc {
 	}
 }
 
-func logoutHandler(audit store.AuditLogStore) http.HandlerFunc {
+func logoutHandler(account *accountServices, audit store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -365,6 +381,12 @@ func logoutHandler(audit store.AuditLogStore) http.HandlerFunc {
 			ResourceType: "session",
 			Details:      details,
 		}, actor))
+
+		if principal, ok := AuthPrincipalFromContext(r.Context()); ok && principal.SessionID != "" && account != nil {
+			if _, err := account.sessions.Revoke(r.Context(), principal.UserID, principal.SessionID); err != nil {
+				log.Printf("[auth] revoke session on logout user=%d: %v", principal.UserID, err)
+			}
+		}
 
 		w.WriteHeader(http.StatusNoContent)
 	}

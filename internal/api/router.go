@@ -42,21 +42,26 @@ func NewRouter(
 	apiTokens store.APITokenStore,
 	licensePlans store.LicensePlanStore,
 	notifications store.NotificationStore,
+	sessions store.AuthSessionStore,
+	panelSettings store.PanelSettingsStore,
+	userTokens store.UserTokenStore,
 	certIssuer *acme.Issuer,
 ) http.Handler {
 	mux := http.NewServeMux()
 
 	agentClient := NewAgentClient(cfg)
 	configureL7Edge(cfg)
-	registerRoutes(mux, cfg, agentClient, users, mfa, loginThrottle, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, certIssuer)
+	account := newAccountServices(cfg, users, mfa, sessions, panelSettings, userTokens, auditLogs)
+	registerRoutes(mux, cfg, agentClient, account, users, mfa, loginThrottle, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, certIssuer)
 	registerNotificationRoutes(mux, notifications)
+	registerAccountRoutes(mux, account)
 
-	auditResolver := &auditResolver{users: users, servers: servers, sites: sites, wafRules: wafRules}
+	auditResolver := &auditResolver{users: users, servers: servers, sites: sites, wafRules: wafRules, tokens: apiTokens}
 
 	handler := http.Handler(mux)
 	handler = withAuditLogging(auditLogs, auditResolver, handler)
 	handler = withViewerScope(users, handler)
-	handler = withAuth(cfg, apiTokens, handler)
+	handler = withAuth(cfg, apiTokens, sessions, panelSettings, handler)
 	handler = withCORS(cfg, handler)
 	handler = withRequestLogging(handler)
 

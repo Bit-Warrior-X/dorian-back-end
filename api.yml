@@ -6,6 +6,22 @@ info:
     WAF/L4 rules, traffic settings, analytics, audit logs, and agent communication.
 
     Most endpoints require a bearer token obtained from `POST /auth/login`.
+
+    **Authentication**
+
+    - *Console sessions.* `POST /auth/login` returns a JWT bound to a server-side
+      session (24 h, or 30 days with `remember: true`). Every request re-checks the
+      session and the user, so signing out, blocking, demoting, or deleting a user
+      takes effect immediately. Errors: `401 session_ended`, `401 account_inactive`,
+      `403 mfa_setup_required` (the sign-in policy requires 2FA and the user has not
+      turned it on yet; only Profile and 2FA setup endpoints are reachable).
+    - *API tokens.* Personal access tokens (`dorian_pat_…`) created under
+      `/auth/api-tokens`. Send them as `Authorization: Bearer <token>` or
+      `X-API-Key: <token>`. A token acts as its owner and is limited by its scopes:
+      `*` (full access), `read` (GET on edges, sites, WAF, analytics), or per-area
+      `analytics:read`, `edges:read|write`, `sites:read|write`, `waf:read|write`
+      (write implies read). Account endpoints (tokens, sessions, 2FA, users, audit,
+      settings) need `*`. A request outside the scopes returns `403 insufficient_scope`.
     Traffic mutations (cache rules, upstream servers, listening ports, compress)
     sync to the edge L7 agent (angelos) on port 5000; failures return HTTP 502.
 
@@ -21,7 +37,8 @@ info:
     Time windows use either `range` (e.g. `30m`, `24h`, `7d`, `today`, `yesterday`)
     or explicit `start` / `end` (RFC3339 or `2006-01-02 15:04:05`).
 
-    Duplicate routes under `/api/v1/...` mirror the root paths listed below.
+    The root paths listed below always work. Some groups (auth, users, audit logs,
+    analytics, dashboard) also answer under `/api/v1/...`; prefer the root paths.
 
     **Site and WAF rule sub-resources**
 
@@ -30,7 +47,7 @@ info:
     `anti-header`, `interval-freq-limit`, `second-freq-limit`, `response-freq`,
     or `user-agent`. Predefined templates use the same pattern under
     `/waf-rules/{wafRuleId}/waf/{resource}`.
-  version: 1.1.0
+  version: 1.2.0
 
 servers:
   - url: http://localhost:8080
@@ -39,6 +56,8 @@ servers:
 tags:
   - name: Health
   - name: Auth
+  - name: Account
+  - name: Team
   - name: Audit Logs
   - name: Dashboard
   - name: Analytics
@@ -118,6 +137,409 @@ paths:
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
 
+  /auth/login/mfa:
+    post:
+      tags: [Auth]
+      summary: Complete a sign-in that requires a 2FA code
+      description: |
+        Called after `POST /auth/login` returned `{"mfaRequired": true, "mfaToken": "..."}`.
+        `code` is a 6-digit authenticator code or a recovery code.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mfaToken, code]
+              properties:
+                mfaToken:
+                  type: string
+                code:
+                  type: string
+      responses:
+        "200":
+          description: Signed in
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/me:
+    get:
+      tags: [Account]
+      summary: Current user and session
+      responses:
+        "200":
+          description: The signed-in user
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/options:
+    get:
+      tags: [Auth]
+      summary: Public sign-in options
+      security: []
+      responses:
+        "200":
+          description: What the sign-in page can offer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  emailDelivery:
+                    type: boolean
+                    description: Whether "forgot password" emails can be sent
+                  sessionHours:
+                    type: integer
+                    example: 24
+                  rememberMeDays:
+                    type: integer
+                    example: 30
+
+  /auth/sessions:
+    get:
+      tags: [Account]
+      summary: List your active sessions
+      description: Console sessions only; API tokens cannot call this endpoint.
+      responses:
+        "200":
+          description: Active sessions, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuthSession"
+
+  /auth/sessions/{sessionId}:
+    delete:
+      tags: [Account]
+      summary: Sign out one of your sessions
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Session ended
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /auth/sessions/revoke-others:
+    post:
+      tags: [Account]
+      summary: Sign out every session except this one
+      responses:
+        "200":
+          description: Number of sessions ended
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokedCount"
+
+  /auth/api-tokens:
+    get:
+      tags: [Account]
+      summary: List your API tokens
+      responses:
+        "200":
+          description: Active (not revoked) tokens. Secrets are never returned.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/APIToken"
+    post:
+      tags: [Account]
+      summary: Create an API token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, scopes]
+              properties:
+                name:
+                  type: string
+                  example: CI deploy
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                  example: [read]
+                expiresAt:
+                  type: string
+                  format: date-time
+                  nullable: true
+                  description: Must be in the future. Omit or null for no expiry.
+      responses:
+        "201":
+          description: Created. `secret` is shown only in this response.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    $ref: "#/components/schemas/APIToken"
+                  secret:
+                    type: string
+                    example: dorian_pat_0123abcd...
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /auth/api-tokens/{tokenId}:
+    delete:
+      tags: [Account]
+      summary: Revoke an API token
+      parameters:
+        - name: tokenId
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "204":
+          description: Revoked
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /auth/api-token-scopes:
+    get:
+      tags: [Account]
+      summary: Scopes an API token can carry
+      responses:
+        "200":
+          description: Scope catalog
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      example: sites:write
+                    label:
+                      type: string
+                    description:
+                      type: string
+
+  /auth/password/forgot:
+    post:
+      tags: [Auth]
+      summary: Email a password reset link
+      description: |
+        Always returns 202 so the response does not reveal whether an account exists.
+        Sends mail only when SMTP and `FRONTEND_URL` are configured. Limited to one
+        request per address every 2 minutes and 10 per IP per hour.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  emailDelivery:
+                    type: boolean
+
+  /auth/password/token:
+    post:
+      tags: [Auth]
+      summary: Check an invite or reset link without using it
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordLinkToken"
+      responses:
+        "200":
+          description: Link is valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  purpose:
+                    type: string
+                    enum: [invite, reset]
+                  email:
+                    type: string
+                  name:
+                    type: string
+                  expiresAt:
+                    type: string
+                    format: date-time
+        "410":
+          description: "`link_invalid`: expired or already used"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /auth/password/complete:
+    post:
+      tags: [Auth]
+      summary: Set a password with an invite or reset link
+      description: |
+        Uses the link once. Accepting an invite also activates the account. All of the
+        user's existing sessions are signed out.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/PasswordLinkToken"
+                - type: object
+                  required: [password]
+                  properties:
+                    password:
+                      type: string
+                      format: password
+                      minLength: 8
+      responses:
+        "204":
+          description: Password set
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "410":
+          description: "`link_invalid`: expired or already used"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /settings/security:
+    get:
+      tags: [Team]
+      summary: Sign-in policy (Admin)
+      responses:
+        "200":
+          description: Current policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecuritySettings"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      tags: [Team]
+      summary: Update the sign-in policy (Admin)
+      description: Requiring 2FA needs 2FA turned on for your own account first (`409 mfa_not_enabled`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [requireMfa]
+              properties:
+                requireMfa:
+                  type: string
+                  enum: [off, admins, all]
+      responses:
+        "200":
+          description: Saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecuritySettings"
+        "409":
+          description: "`mfa_not_enabled`"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /users/{userId}/sessions:
+    get:
+      tags: [Team]
+      summary: A member's active sessions (Admin)
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Active sessions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuthSession"
+
+  /users/{userId}/sessions/revoke:
+    post:
+      tags: [Team]
+      summary: Sign a member out everywhere (Admin)
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Number of sessions ended
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokedCount"
+
+  /users/{userId}/invite:
+    post:
+      tags: [Team]
+      summary: Create a new invite link (Admin)
+      description: For members who have not set a password yet. Valid for 7 days; emailed when SMTP is configured.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Link created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasswordLink"
+        "409":
+          description: Member is blocked or already has a password
+
+  /users/{userId}/password-reset:
+    post:
+      tags: [Team]
+      summary: Create a password reset link (Admin)
+      description: Valid for 24 hours; emailed when SMTP is configured.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Link created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PasswordLink"
+
   /audit-logs:
     get:
       tags: [Audit Logs]
@@ -141,6 +563,18 @@ paths:
           schema:
             type: integer
             format: int64
+        - name: from
+          in: query
+          description: Only entries at or after this time (RFC3339)
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: Only entries before this time (RFC3339)
+          schema:
+            type: string
+            format: date-time
       responses:
         "200":
           description: Audit log entries (newest first)
@@ -2095,6 +2529,14 @@ components:
         type: integer
         default: 200
 
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+
   responses:
     BadRequest:
       description: Invalid request
@@ -2161,12 +2603,26 @@ components:
         password:
           type: string
           format: password
+        remember:
+          type: boolean
+          description: Keep the session for 30 days instead of 24 hours
 
     LoginResponse:
       type: object
+      description: |
+        When the account has 2FA turned on, the response is
+        `{"mfaRequired": true, "mfaToken": "..."}` instead; finish with `POST /auth/login/mfa`.
       properties:
         token:
           type: string
+        remember:
+          type: boolean
+        expiresAt:
+          type: string
+          format: date-time
+        mfaSetupRequired:
+          type: boolean
+          description: The sign-in policy requires 2FA and this user must set it up first
         user:
           type: object
           properties:
@@ -2381,6 +2837,110 @@ components:
           type: boolean
         applications:
           type: boolean
+
+    AuthSession:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: integer
+          format: int64
+        method:
+          type: string
+          example: password+2fa
+        remember:
+          type: boolean
+        ipAddress:
+          type: string
+        userAgent:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        current:
+          type: boolean
+          description: The session making this request
+
+    RevokedCount:
+      type: object
+      properties:
+        revoked:
+          type: integer
+
+    APIToken:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        userId:
+          type: integer
+          format: int64
+        name:
+          type: string
+        tokenPrefix:
+          type: string
+          example: dorian_pat_0123abcd
+        scopes:
+          type: array
+          items:
+            type: string
+        expiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        lastUsedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    PasswordLinkToken:
+      type: object
+      required: [token, purpose]
+      properties:
+        token:
+          type: string
+          description: The value after `#token=` in the link
+        purpose:
+          type: string
+          enum: [invite, reset]
+
+    PasswordLink:
+      type: object
+      properties:
+        link:
+          type: string
+          description: Share this with the member; it works once
+        emailed:
+          type: boolean
+        emailError:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+    SecuritySettings:
+      type: object
+      properties:
+        requireMfa:
+          type: string
+          enum: [off, admins, all]
+        emailDelivery:
+          type: boolean
+        sessionHours:
+          type: integer
+        rememberMeDays:
+          type: integer
 
     AuditLog:
       type: object
@@ -2625,9 +3185,19 @@ components:
       properties:
         timestamp:
           type: string
+          format: date-time
         sourceIp:
           type: string
         attackType:
+          type: string
+        serverId:
+          type: integer
+          format: int64
+        serverName:
+          type: string
+        serverIp:
+          type: string
+        reqId:
           type: string
 
     L4TopIpRow:
@@ -2638,8 +3208,23 @@ components:
         count:
           type: integer
           format: int64
+        firstSeen:
+          type: string
+          format: date-time
         lastSeen:
           type: string
+          format: date-time
+        serverId:
+          type: integer
+          format: int64
+        serverName:
+          type: string
+        serverIp:
+          type: string
+        attackTypes:
+          type: array
+          items:
+            type: string
 
     Site:
       type: object

@@ -26,12 +26,21 @@ type L4AttackRow struct {
 	Timestamp  string `json:"timestamp"`
 	SourceIP   string `json:"sourceIp"`
 	AttackType string `json:"attackType"`
+	ServerID   int64  `json:"serverId"`
+	ServerName string `json:"serverName,omitempty"`
+	ServerIP   string `json:"serverIp,omitempty"`
+	ReqID      string `json:"reqId,omitempty"`
 }
 
 type L4TopIpRow struct {
-	IP       string `json:"ip"`
-	Count    int64  `json:"count"`
-	LastSeen string `json:"lastSeen"`
+	IP          string   `json:"ip"`
+	Count       int64    `json:"count"`
+	FirstSeen   string   `json:"firstSeen,omitempty"`
+	LastSeen    string   `json:"lastSeen"`
+	ServerID    int64    `json:"serverId"`
+	ServerName  string   `json:"serverName,omitempty"`
+	ServerIP    string   `json:"serverIp,omitempty"`
+	AttackTypes []string `json:"attackTypes,omitempty"`
 }
 
 type L4AttackStatsStore interface {
@@ -147,12 +156,14 @@ func (store *l4AttackStatsStore) ListRecentAttacks(ctx context.Context, start, e
 		limit = 10
 	}
 	query := `
-		SELECT source_ip, attack_type, created_at
-		FROM l4_live_attack
-		WHERE created_at >= ? AND created_at <= ?`
+		SELECT a.source_ip, a.attack_type, a.created_at, a.server_id,
+		       COALESCE(s.name, ''), COALESCE(s.ip, ''), COALESCE(a.req_id, '')
+		FROM l4_live_attack a
+		LEFT JOIN servers s ON s.id = a.server_id
+		WHERE a.created_at >= ? AND a.created_at <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
-	query += ` ORDER BY created_at DESC LIMIT ?`
+	query, args = appendServerScopePrefixed(query, args, scope, "a")
+	query += ` ORDER BY a.created_at DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -164,7 +175,7 @@ func (store *l4AttackStatsStore) ListRecentAttacks(ctx context.Context, start, e
 	for rows.Next() {
 		var row L4AttackRow
 		var created time.Time
-		if err := rows.Scan(&row.SourceIP, &row.AttackType, &created); err != nil {
+		if err := rows.Scan(&row.SourceIP, &row.AttackType, &created, &row.ServerID, &row.ServerName, &row.ServerIP, &row.ReqID); err != nil {
 			return nil, err
 		}
 		row.Timestamp = created.Format(time.RFC3339)
@@ -181,16 +192,22 @@ func (store *l4AttackStatsStore) ListTopAttackIPs(ctx context.Context, start, en
 		limit = 10
 	}
 	query := `
-		SELECT source_ip,
+		SELECT a.source_ip,
+		       a.server_id,
+		       COALESCE(s.name, ''),
+		       COALESCE(s.ip, ''),
 		       COUNT(*) AS seen_count,
-		       MAX(created_at) AS last_seen
-		FROM l4_live_attack
-		WHERE created_at >= ? AND created_at <= ?`
+		       MIN(a.created_at) AS first_seen,
+		       MAX(a.created_at) AS last_seen,
+		       GROUP_CONCAT(DISTINCT a.attack_type ORDER BY a.attack_type SEPARATOR ',')
+		FROM l4_live_attack a
+		LEFT JOIN servers s ON s.id = a.server_id
+		WHERE a.created_at >= ? AND a.created_at <= ?`
 	args := []any{start, end}
-	query, args = appendServerScope(query, args, scope)
+	query, args = appendServerScopePrefixed(query, args, scope, "a")
 	query += `
-		GROUP BY source_ip
-		ORDER BY seen_count DESC
+		GROUP BY a.source_ip, a.server_id, s.name, s.ip
+		ORDER BY seen_count DESC, last_seen DESC
 		LIMIT ?`
 	args = append(args, limit)
 	rows, err := store.db.QueryContext(ctx, query, args...)
@@ -202,11 +219,16 @@ func (store *l4AttackStatsStore) ListTopAttackIPs(ctx context.Context, start, en
 	var rowsOut []L4TopIpRow
 	for rows.Next() {
 		var row L4TopIpRow
-		var lastSeen time.Time
-		if err := rows.Scan(&row.IP, &row.Count, &lastSeen); err != nil {
+		var firstSeen, lastSeen time.Time
+		var typesRaw sql.NullString
+		if err := rows.Scan(&row.IP, &row.ServerID, &row.ServerName, &row.ServerIP, &row.Count, &firstSeen, &lastSeen, &typesRaw); err != nil {
 			return nil, err
 		}
+		row.FirstSeen = firstSeen.Format(time.RFC3339)
 		row.LastSeen = lastSeen.Format(time.RFC3339)
+		if typesRaw.Valid && typesRaw.String != "" {
+			row.AttackTypes = splitCSV(typesRaw.String)
+		}
 		rowsOut = append(rowsOut, row)
 	}
 	if err := rows.Err(); err != nil {

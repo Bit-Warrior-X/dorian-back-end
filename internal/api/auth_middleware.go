@@ -19,12 +19,14 @@ const (
 )
 
 type AuthPrincipal struct {
-	UserID   int64
-	Email    string
-	Name     string
-	Role     string
-	AuthKind authKind
-	TokenID  int64
+	UserID     int64
+	Email      string
+	Name       string
+	Role       string
+	AuthKind   authKind
+	TokenID    int64
+	SessionID  string
+	MFAEnabled bool
 }
 
 type authPrincipalContextKey struct{}
@@ -50,7 +52,12 @@ func isPublicAuthPath(method, path string) bool {
 	case "/auth/login", "/api/v1/auth/login",
 		"/auth/login/mfa", "/api/v1/auth/login/mfa":
 		return method == http.MethodPost
-	case "/auth/oauth/providers", "/api/v1/auth/oauth/providers":
+	case "/auth/password/forgot", "/api/v1/auth/password/forgot",
+		"/auth/password/token", "/api/v1/auth/password/token",
+		"/auth/password/complete", "/api/v1/auth/password/complete":
+		return method == http.MethodPost
+	case "/auth/oauth/providers", "/api/v1/auth/oauth/providers",
+		"/auth/options", "/api/v1/auth/options":
 		return method == http.MethodGet || method == http.MethodHead
 	case "/auth/oauth/google/start", "/api/v1/auth/oauth/google/start",
 		"/auth/oauth/google/callback", "/api/v1/auth/oauth/google/callback",
@@ -100,7 +107,44 @@ func isWebSocketUpgrade(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket")
 }
 
-func withAuth(cfg config.Config, apiTokens store.APITokenStore, next http.Handler) http.Handler {
+// mfaSetupAllowed lists what a user who must enroll in 2FA can still reach:
+// enough of the Profile page to finish setup, plus sign-out.
+func mfaSetupAllowed(method, path string, userID int64) bool {
+	p := strings.TrimSuffix(strings.TrimPrefix(path, "/api/v1"), "/")
+	switch p {
+	case "/auth/logout", "/auth/mfa/setup", "/auth/mfa/enable":
+		return true
+	case "/auth/mfa", "/auth/me", "/auth/sessions", "/audit-logs", "/auth/api-tokens", "/notifications", "/license-plans":
+		return isReadMethod(method)
+	}
+	if strings.HasPrefix(p, "/auth/sessions/") {
+		return true
+	}
+	if id, ok := parseID(p, "/users/"); ok && id == userID {
+		return isReadMethod(method)
+	}
+	return false
+}
+
+func writeMFASetupRequired(w http.ResponseWriter) {
+	writeJSON(w, http.StatusForbidden, errorResponse{
+		Error:   "mfa_setup_required",
+		Message: "Your organization requires two-factor authentication. Set it up on your Profile to continue.",
+	})
+}
+
+func requireMFAPolicy(r *http.Request, settings store.PanelSettingsStore) string {
+	if settings == nil {
+		return store.RequireMFAOff
+	}
+	value, err := settings.Get(r.Context(), store.SettingRequireMFA)
+	if err != nil {
+		return store.RequireMFAOff
+	}
+	return store.NormalizeRequireMFA(value)
+}
+
+func withAuth(cfg config.Config, apiTokens store.APITokenStore, sessions store.AuthSessionStore, settings store.PanelSettingsStore, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodOptions || isPublicAuthPath(r.Method, r.URL.Path) {
 			next.ServeHTTP(w, r)
@@ -132,14 +176,29 @@ func withAuth(cfg config.Config, apiTokens store.APITokenStore, next http.Handle
 				})
 				return
 			}
+			if !apiTokenAllows(lookup.Token.Scopes, r.Method, r.URL.Path) {
+				writeJSON(w, http.StatusForbidden, errorResponse{
+					Error:   "insufficient_scope",
+					Message: "This API token's scopes do not allow this request.",
+				})
+				return
+			}
+			if store.RequireMFAApplies(requireMFAPolicy(r, settings), lookup.User.Role) && !lookup.User.MFAEnabled {
+				writeJSON(w, http.StatusForbidden, errorResponse{
+					Error:   "mfa_setup_required",
+					Message: "Two-factor authentication is required for this account. API tokens are paused until it is enabled.",
+				})
+				return
+			}
 			_ = apiTokens.TouchLastUsed(r.Context(), lookup.Token.ID)
 			principal := AuthPrincipal{
-				UserID:   lookup.User.ID,
-				Email:    lookup.User.Email,
-				Name:     lookup.User.Name,
-				Role:     lookup.User.Role,
-				AuthKind: authKindAPIToken,
-				TokenID:  lookup.Token.ID,
+				UserID:     lookup.User.ID,
+				Email:      lookup.User.Email,
+				Name:       lookup.User.Name,
+				Role:       lookup.User.Role,
+				AuthKind:   authKindAPIToken,
+				TokenID:    lookup.Token.ID,
+				MFAEnabled: lookup.User.MFAEnabled,
 			}
 			next.ServeHTTP(w, r.WithContext(contextWithAuthPrincipal(r.Context(), principal)))
 			return
@@ -159,11 +218,43 @@ func withAuth(cfg config.Config, apiTokens store.APITokenStore, next http.Handle
 		}
 
 		principal := AuthPrincipal{
-			UserID:   claims.UserID,
-			Email:    claims.Email,
-			Name:     claims.Name,
-			Role:     claims.Role,
-			AuthKind: authKindJWT,
+			UserID:    claims.UserID,
+			Email:     claims.Email,
+			Name:      claims.Name,
+			Role:      claims.Role,
+			AuthKind:  authKindJWT,
+			SessionID: claims.ID,
+		}
+		if sessions != nil {
+			lookup, err := sessions.LookupActive(r.Context(), claims.ID)
+			if err != nil || lookup.UserID != claims.UserID {
+				if err != nil && !store.IsNotFound(err) {
+					writeError(w, http.StatusInternalServerError, "failed to verify session")
+					return
+				}
+				writeJSON(w, http.StatusUnauthorized, errorResponse{
+					Error:   "session_ended",
+					Message: "Your session has ended. Please sign in again.",
+				})
+				return
+			}
+			if !strings.EqualFold(lookup.Status, "Active") {
+				writeJSON(w, http.StatusUnauthorized, errorResponse{
+					Error:   "account_inactive",
+					Message: "Your account is not active. Please contact an administrator.",
+				})
+				return
+			}
+			_ = sessions.Touch(r.Context(), lookup.Session.ID)
+			principal.Email = lookup.Email
+			principal.Name = lookup.Name
+			principal.Role = lookup.Role
+			principal.MFAEnabled = lookup.MFAEnabled
+			if store.RequireMFAApplies(requireMFAPolicy(r, settings), lookup.Role) && !lookup.MFAEnabled &&
+				!mfaSetupAllowed(r.Method, r.URL.Path, lookup.UserID) {
+				writeMFASetupRequired(w)
+				return
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(contextWithAuthPrincipal(r.Context(), principal)))
 	})

@@ -57,7 +57,17 @@ func apiTokensHandler(apiTokens store.APITokenStore) http.HandlerFunc {
 					return
 				}
 				utc := parsed.UTC()
+				if !utc.After(time.Now()) {
+					writeError(w, http.StatusBadRequest, "expiresAt must be in the future")
+					return
+				}
 				expiresAt = &utc
+			}
+			for _, scope := range payload.Scopes {
+				if !isKnownAPITokenScope(scope) {
+					writeError(w, http.StatusBadRequest, "unknown scope: "+scope)
+					return
+				}
 			}
 			created, err := apiTokens.Create(r.Context(), store.APITokenCreateInput{
 				UserID:    principal.UserID,

@@ -62,6 +62,13 @@ type Config struct {
 	AcmeRFC2136Zone             string
 	JWTSecret                   string
 	JWTTTLHours                 int
+	RememberMeTTLDays           int
+	SMTPHost                    string
+	SMTPPort                    string
+	SMTPUser                    string
+	SMTPPassword                string
+	SMTPFrom                    string
+	SMTPTLSMode                 string
 	LoginMaxAccountFailures     int
 	LoginMaxIPFailures          int
 	LoginFailureWindowMinutes   int
@@ -120,6 +127,9 @@ func Load() Config {
 		AcmeRenewIntervalHours:      12,
 		AcmeRFC2136TSIGAlgorithm:    "hmac-sha256",
 		JWTTTLHours:                 24,
+		RememberMeTTLDays:           30,
+		SMTPPort:                    "587",
+		SMTPTLSMode:                 "starttls",
 		LoginMaxAccountFailures:     10,
 		LoginMaxIPFailures:          30,
 		LoginFailureWindowMinutes:   15,
@@ -303,6 +313,25 @@ func Load() Config {
 	}
 	if cfg.JWTTTLHours <= 0 {
 		cfg.JWTTTLHours = 24
+	}
+	if raw := strings.TrimSpace(os.Getenv("REMEMBER_ME_TTL_DAYS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			cfg.RememberMeTTLDays = parsed
+		}
+	}
+	for env, target := range map[string]*string{
+		"SMTP_HOST":     &cfg.SMTPHost,
+		"SMTP_PORT":     &cfg.SMTPPort,
+		"SMTP_USER":     &cfg.SMTPUser,
+		"SMTP_FROM":     &cfg.SMTPFrom,
+		"SMTP_TLS_MODE": &cfg.SMTPTLSMode,
+	} {
+		if raw := strings.TrimSpace(os.Getenv(env)); raw != "" {
+			*target = raw
+		}
+	}
+	if os.Getenv("SMTP_PASSWORD") != "" {
+		cfg.SMTPPassword = os.Getenv("SMTP_PASSWORD")
 	}
 	for env, target := range map[string]*int{
 		"LOGIN_MAX_ACCOUNT_FAILURES":   &cfg.LoginMaxAccountFailures,

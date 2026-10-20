@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 )
@@ -24,6 +25,8 @@ type User struct {
 	ServerIDs   []int64  `json:"serverIds"`
 	Servers     []string `json:"servers"`
 	MFAEnabled  bool     `json:"mfaEnabled"`
+	// LastSignInAt is filled by the users list from user_sessions.
+	LastSignInAt *time.Time `json:"lastSignInAt,omitempty"`
 }
 
 type UserInput struct {
@@ -59,6 +62,7 @@ type UserStore interface {
 	Create(ctx context.Context, input UserInput) (User, error)
 	Update(ctx context.Context, id int64, input UserInput) (User, error)
 	Delete(ctx context.Context, id int64) error
+	SetPassword(ctx context.Context, id int64, password string, activate bool) error
 	UpdateUserServers(ctx context.Context, userID int64, serverIDs []int64) error
 	MigrateLegacyPasswords(ctx context.Context) (int, error)
 }
@@ -355,6 +359,36 @@ func (store *userStore) Update(ctx context.Context, id int64, input UserInput) (
 		Role:   coalesce(input.Role, "User"),
 		Status: coalesce(input.Status, "Waiting"),
 	}, nil
+}
+
+// SetPassword replaces the password; activate also moves a Waiting (invited)
+// account to Active. Blocked accounts stay blocked.
+func (store *userStore) SetPassword(ctx context.Context, id int64, password string, activate bool) error {
+	hashed, err := hashedPasswordValue(password)
+	if err != nil {
+		return err
+	}
+	if !hashed.Valid {
+		return errors.New("password is required")
+	}
+	query := `UPDATE users SET password = ? WHERE id = ?`
+	if activate {
+		query = `UPDATE users SET password = ?, status = IF(status = 'Waiting', 'Active', status) WHERE id = ?`
+	}
+	result, err := store.db.ExecContext(ctx, query, hashed, id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		exists, err := store.userExists(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return errNotFound
+		}
+	}
+	return nil
 }
 
 func (store *userStore) Delete(ctx context.Context, id int64) error {

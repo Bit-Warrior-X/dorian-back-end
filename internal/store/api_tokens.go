@@ -46,6 +46,7 @@ type APITokenLookup struct {
 
 type APITokenStore interface {
 	ListByUser(ctx context.Context, userID int64) ([]APIToken, error)
+	Get(ctx context.Context, tokenID int64) (APIToken, error)
 	Create(ctx context.Context, input APITokenCreateInput) (APITokenCreateResult, error)
 	Revoke(ctx context.Context, userID, tokenID int64) error
 	LookupActiveBySecret(ctx context.Context, secret string) (APITokenLookup, error)
@@ -85,6 +86,13 @@ func (store *apiTokenStore) ListByUser(ctx context.Context, userID int64) ([]API
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+func (store *apiTokenStore) Get(ctx context.Context, tokenID int64) (APIToken, error) {
+	return scanAPIToken(store.db.QueryRowContext(ctx, `
+		SELECT id, user_id, name, token_prefix, scopes, expires_at, last_used_at, created_at, revoked_at
+		FROM api_tokens
+		WHERE id = ?`, tokenID))
 }
 
 func (store *apiTokenStore) Create(ctx context.Context, input APITokenCreateInput) (APITokenCreateResult, error) {
@@ -162,7 +170,7 @@ func (store *apiTokenStore) LookupActiveBySecret(ctx context.Context, secret str
 	row := store.db.QueryRowContext(ctx, `
 		SELECT
 			t.id, t.user_id, t.name, t.token_prefix, t.scopes, t.expires_at, t.last_used_at, t.created_at, t.revoked_at,
-			u.id, u.name, u.email, COALESCE(u.password, ''), u.role, u.status
+			u.id, u.name, u.email, COALESCE(u.password, ''), u.role, u.status, u.totp_enabled_at IS NOT NULL
 		FROM api_tokens t
 		INNER JOIN users u ON u.id = t.user_id
 		WHERE t.token_hash = ? AND t.revoked_at IS NULL
@@ -174,7 +182,7 @@ func (store *apiTokenStore) LookupActiveBySecret(ctx context.Context, secret str
 	var user User
 	if err := row.Scan(
 		&token.ID, &token.UserID, &token.Name, &token.TokenPrefix, &scopesRaw, &expiresAt, &lastUsedAt, &token.CreatedAt, &revokedAt,
-		&user.ID, &user.Name, &user.Email, &user.Password, &user.Role, &user.Status,
+		&user.ID, &user.Name, &user.Email, &user.Password, &user.Role, &user.Status, &user.MFAEnabled,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return APITokenLookup{}, errNotFound

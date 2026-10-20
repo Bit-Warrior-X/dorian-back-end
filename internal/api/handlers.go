@@ -31,11 +31,15 @@ import (
 type loginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+	Remember bool   `json:"remember"`
 }
 
 type loginResponse struct {
-	Token string    `json:"token"`
-	User  userShape `json:"user"`
+	Token            string    `json:"token"`
+	User             userShape `json:"user"`
+	Remember         bool      `json:"remember"`
+	ExpiresAt        time.Time `json:"expiresAt"`
+	MFASetupRequired bool      `json:"mfaSetupRequired,omitempty"`
 }
 
 type userShape struct {
@@ -295,6 +299,7 @@ func registerRoutes(
 	mux *http.ServeMux,
 	cfg config.Config,
 	agentClient *AgentClient,
+	account *accountServices,
 	users store.UserStore,
 	mfa store.MFAStore,
 	loginThrottle store.LoginThrottleStore,
@@ -428,38 +433,38 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/analytics/l4/attacks/recent", l4AnalyticsRecentAttacksHandler(l4AttackStats, sites))
 	mux.HandleFunc("/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats, sites))
 	mux.HandleFunc("/api/v1/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats, sites))
-	mux.HandleFunc("/auth/login", loginHandler(cfg, users, mfa, loginThrottle, auditLogs))
-	mux.HandleFunc("/api/v1/auth/login", loginHandler(cfg, users, mfa, loginThrottle, auditLogs))
-	mux.HandleFunc("/auth/login/mfa", loginMFAHandler(cfg, users, mfa, loginThrottle, auditLogs))
-	mux.HandleFunc("/api/v1/auth/login/mfa", loginMFAHandler(cfg, users, mfa, loginThrottle, auditLogs))
+	mux.HandleFunc("/auth/login", loginHandler(cfg, account, users, mfa, loginThrottle, auditLogs))
+	mux.HandleFunc("/api/v1/auth/login", loginHandler(cfg, account, users, mfa, loginThrottle, auditLogs))
+	mux.HandleFunc("/auth/login/mfa", loginMFAHandler(cfg, account, users, mfa, loginThrottle, auditLogs))
+	mux.HandleFunc("/api/v1/auth/login/mfa", loginMFAHandler(cfg, account, users, mfa, loginThrottle, auditLogs))
 	mux.HandleFunc("/auth/mfa", mfaStatusHandler(mfa))
 	mux.HandleFunc("/api/v1/auth/mfa", mfaStatusHandler(mfa))
 	mux.HandleFunc("/auth/mfa/setup", mfaSetupHandler(mfa))
 	mux.HandleFunc("/api/v1/auth/mfa/setup", mfaSetupHandler(mfa))
 	mux.HandleFunc("/auth/mfa/enable", mfaEnableHandler(mfa))
 	mux.HandleFunc("/api/v1/auth/mfa/enable", mfaEnableHandler(mfa))
-	mux.HandleFunc("/auth/mfa/disable", mfaDisableHandler(mfa, loginThrottle))
-	mux.HandleFunc("/api/v1/auth/mfa/disable", mfaDisableHandler(mfa, loginThrottle))
+	mux.HandleFunc("/auth/mfa/disable", mfaDisableHandler(account, mfa, loginThrottle))
+	mux.HandleFunc("/api/v1/auth/mfa/disable", mfaDisableHandler(account, mfa, loginThrottle))
 	mux.HandleFunc("/auth/mfa/recovery-codes", mfaRecoveryCodesHandler(mfa, loginThrottle))
 	mux.HandleFunc("/api/v1/auth/mfa/recovery-codes", mfaRecoveryCodesHandler(mfa, loginThrottle))
 	mux.HandleFunc("DELETE /users/{id}/mfa", requireAdmin(adminResetMFAHandler(mfa)))
 	mux.HandleFunc("DELETE /api/v1/users/{id}/mfa", requireAdmin(adminResetMFAHandler(mfa)))
-	mux.HandleFunc("/auth/logout", logoutHandler(auditLogs))
-	mux.HandleFunc("/api/v1/auth/logout", logoutHandler(auditLogs))
+	mux.HandleFunc("/auth/logout", logoutHandler(account, auditLogs))
+	mux.HandleFunc("/api/v1/auth/logout", logoutHandler(account, auditLogs))
 	mux.HandleFunc("/auth/oauth/providers", oauthProvidersHandler(cfg))
 	mux.HandleFunc("/api/v1/auth/oauth/providers", oauthProvidersHandler(cfg))
 	mux.HandleFunc("/auth/oauth/google/start", googleOAuthStartHandler(cfg))
 	mux.HandleFunc("/api/v1/auth/oauth/google/start", googleOAuthStartHandler(cfg))
-	mux.HandleFunc("/auth/oauth/google/callback", googleOAuthCallbackHandler(cfg, users, mfa, auditLogs))
-	mux.HandleFunc("/api/v1/auth/oauth/google/callback", googleOAuthCallbackHandler(cfg, users, mfa, auditLogs))
+	mux.HandleFunc("/auth/oauth/google/callback", googleOAuthCallbackHandler(cfg, account, users, auditLogs))
+	mux.HandleFunc("/api/v1/auth/oauth/google/callback", googleOAuthCallbackHandler(cfg, account, users, auditLogs))
 	mux.HandleFunc("/auth/oauth/github/start", githubOAuthStartHandler(cfg))
 	mux.HandleFunc("/api/v1/auth/oauth/github/start", githubOAuthStartHandler(cfg))
-	mux.HandleFunc("/auth/oauth/github/callback", githubOAuthCallbackHandler(cfg, users, mfa, auditLogs))
-	mux.HandleFunc("/api/v1/auth/oauth/github/callback", githubOAuthCallbackHandler(cfg, users, mfa, auditLogs))
+	mux.HandleFunc("/auth/oauth/github/callback", githubOAuthCallbackHandler(cfg, account, users, auditLogs))
+	mux.HandleFunc("/api/v1/auth/oauth/github/callback", githubOAuthCallbackHandler(cfg, account, users, auditLogs))
 	mux.HandleFunc("/auth/oauth/sso/start", ssoOAuthStartHandler(cfg))
 	mux.HandleFunc("/api/v1/auth/oauth/sso/start", ssoOAuthStartHandler(cfg))
-	mux.HandleFunc("/auth/oauth/sso/callback", ssoOAuthCallbackHandler(cfg, users, mfa, auditLogs))
-	mux.HandleFunc("/api/v1/auth/oauth/sso/callback", ssoOAuthCallbackHandler(cfg, users, mfa, auditLogs))
+	mux.HandleFunc("/auth/oauth/sso/callback", ssoOAuthCallbackHandler(cfg, account, users, auditLogs))
+	mux.HandleFunc("/api/v1/auth/oauth/sso/callback", ssoOAuthCallbackHandler(cfg, account, users, auditLogs))
 	mux.HandleFunc("/auth/api-tokens", apiTokensHandler(apiTokens))
 	mux.HandleFunc("/api/v1/auth/api-tokens", apiTokensHandler(apiTokens))
 	mux.HandleFunc("/auth/api-tokens/", apiTokenDetailHandler(apiTokens))
@@ -481,10 +486,10 @@ func registerRoutes(
 	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4))
 	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4))
 	mux.HandleFunc("/servers/", restrictServerDetail(serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings)))
-	mux.HandleFunc("/users", requireAdmin(usersHandler(users, mfa)))
-	mux.HandleFunc("/users/", requireAdminOrSelfUser(userHandler(users)))
-	mux.HandleFunc("/api/v1/users", requireAdmin(usersHandler(users, mfa)))
-	mux.HandleFunc("/api/v1/users/", requireAdminOrSelfUser(userHandler(users)))
+	mux.HandleFunc("/users", requireAdmin(usersHandler(account, users, mfa)))
+	mux.HandleFunc("/users/", requireAdminOrSelfUser(userHandler(account, users)))
+	mux.HandleFunc("/api/v1/users", requireAdmin(usersHandler(account, users, mfa)))
+	mux.HandleFunc("/api/v1/users/", requireAdminOrSelfUser(userHandler(account, users)))
 	l7Deps := siteL7Stores{
 		wafWhitelist:       wafWhitelist,
 		wafBlacklist:       wafBlacklist,
@@ -2607,7 +2612,7 @@ func parseTimeValue(value string) (time.Time, error) {
 	return time.Time{}, errors.New("invalid time format")
 }
 
-func loginHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, throttle store.LoginThrottleStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func loginHandler(cfg config.Config, account *accountServices, users store.UserStore, mfa store.MFAStore, throttle store.LoginThrottleStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2674,7 +2679,7 @@ func loginHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, 
 			return
 		}
 		if needsMFA {
-			challenge, err := auth.IssueMFAChallengeToken(user.ID, cfg.JWTSecret, mfaChallengeTTL)
+			challenge, err := auth.IssueMFAChallenge(auth.MFAChallenge{UserID: user.ID, Remember: payload.Remember, Method: "password"}, cfg.JWTSecret, mfaChallengeTTL)
 			if err != nil {
 				log.Printf("[auth] failed to issue 2fa challenge for user=%d: %v", user.ID, err)
 				writeError(w, http.StatusInternalServerError, "failed to authenticate")
@@ -2684,7 +2689,7 @@ func loginHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, 
 			return
 		}
 
-		if issueSessionResponse(w, cfg, user) {
+		if account.writeSessionResponse(w, r, user, "password", payload.Remember) {
 			recordLoginSuccess(r.Context(), throttle, email)
 			logLoginAttempt(r.Context(), auditLogs, r, user, true, http.StatusOK, "Successful login")
 		}
@@ -3557,6 +3562,13 @@ type serverUpgradeLicenseRequestBody struct {
 }
 
 func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg config.Config, servers store.ServerStore, serverID int64) {
+	if principal, ok := AuthPrincipalFromContext(r.Context()); ok && !strings.EqualFold(principal.Role, "Admin") {
+		writeJSON(w, http.StatusForbidden, errorResponse{
+			Error:   "admin_required",
+			Message: "Only an Admin can change a server's license tier.",
+		})
+		return
+	}
 	var body serverUpgradeLicenseRequestBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
@@ -6010,7 +6022,7 @@ func parseUpstreamPath(path string) (siteID int64, upstreamID int64, isBatch boo
 	return 0, 0, false, false
 }
 
-func usersHandler(users store.UserStore, mfa store.MFAStore) http.HandlerFunc {
+func usersHandler(account *accountServices, users store.UserStore, mfa store.MFAStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -6024,20 +6036,40 @@ func usersHandler(users store.UserStore, mfa store.MFAStore) http.HandlerFunc {
 				writeError(w, http.StatusInternalServerError, "failed to load users")
 				return
 			}
+			lastSignIns, err := account.sessions.LastSignIns(r.Context())
+			if err != nil {
+				log.Printf("[api] GET /users: last sign-ins: %v", err)
+			}
 			for i := range list {
 				list[i].MFAEnabled = enabled[list[i].ID]
+				if at, ok := lastSignIns[list[i].ID]; ok {
+					value := at
+					list[i].LastSignInAt = &value
+				}
 			}
 			writeJSON(w, http.StatusOK, list)
 		case http.MethodPost:
-			var payload store.UserInput
-			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			var body struct {
+				store.UserInput
+				SendInvite bool `json:"sendInvite"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				writeError(w, http.StatusBadRequest, "invalid JSON body")
 				return
 			}
-			payload = payload.Normalize()
+			payload := body.UserInput.Normalize()
 			if payload.Name == "" || payload.Email == "" {
 				writeError(w, http.StatusBadRequest, "name and email are required")
 				return
+			}
+			if body.SendInvite {
+				payload.Password = ""
+				payload.Status = "Waiting"
+			} else if payload.Password != "" {
+				if err := validNewPassword(payload.Password); err != nil {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
 			}
 			if !strings.EqualFold(payload.Role, "User") {
 				payload.ServerIDs = nil
@@ -6060,14 +6092,26 @@ func usersHandler(users store.UserStore, mfa store.MFAStore) http.HandlerFunc {
 				return
 			}
 			created.ServerIDs = payload.ServerIDs
-			writeJSON(w, http.StatusCreated, created)
+			out := struct {
+				store.User
+				Invite *passwordLinkResponse `json:"invite,omitempty"`
+			}{User: created}
+			if body.SendInvite {
+				invite, err := account.createLink(r, created, store.UserTokenInvite, inviteLinkTTL)
+				if err != nil {
+					log.Printf("[api] POST /users: invite link for user=%d: %v", created.ID, err)
+				} else {
+					out.Invite = &invite
+				}
+			}
+			writeJSON(w, http.StatusCreated, out)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
 	}
 }
 
-func userHandler(users store.UserStore) http.HandlerFunc {
+func userHandler(account *accountServices, users store.UserStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		id, ok := parseID(r.URL.Path, "/users/")
 		if !ok {
@@ -6149,8 +6193,25 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 					return
 				}
 			}
+			if payload.Password != "" {
+				if err := validNewPassword(payload.Password); err != nil {
+					writeError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+			}
 			if !strings.EqualFold(payload.Role, "User") {
 				payload.ServerIDs = nil
+			}
+			if target, err := users.FindByID(r.Context(), id); err == nil {
+				last, err := account.lastActiveAdminChange(r.Context(), target, payload.Role, payload.Status, false)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to update user")
+					return
+				}
+				if last {
+					writeLastAdminConflict(w)
+					return
+				}
 			}
 			updated, err := users.Update(r.Context(), id, payload)
 			if err != nil {
@@ -6177,8 +6238,28 @@ func userHandler(users store.UserStore) http.HandlerFunc {
 			if fresh, err := users.FindByID(r.Context(), id); err == nil {
 				updated = fresh
 			}
+			if payload.Password != "" {
+				except := ""
+				if hasPrincipal && principal.UserID == id {
+					except = principal.SessionID
+				}
+				if _, err := account.sessions.RevokeAllForUser(r.Context(), id, except); err != nil {
+					log.Printf("[api] revoke sessions after password change user=%d: %v", id, err)
+				}
+			}
 			writeJSON(w, http.StatusOK, updated)
 		case http.MethodDelete:
+			if target, err := users.FindByID(r.Context(), id); err == nil {
+				last, err := account.lastActiveAdminChange(r.Context(), target, "", "", true)
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "failed to delete user")
+					return
+				}
+				if last {
+					writeLastAdminConflict(w)
+					return
+				}
+			}
 			if err := users.Delete(r.Context(), id); err != nil {
 				if store.IsNotFound(err) {
 					writeError(w, http.StatusNotFound, "user not found")

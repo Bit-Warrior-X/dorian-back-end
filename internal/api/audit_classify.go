@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"vue-project-backend/internal/store"
 )
 
 // auditClassification describes how a mutating request is recorded.
@@ -82,6 +84,23 @@ func classifyAuditRequest(method, path string) auditClassification {
 		return classifySiteAudit(method, segs)
 	case "waf-rules":
 		return classifyWafRuleAudit(method, segs)
+	case "settings":
+		if len(segs) == 2 && segs[1] == "security" && method == http.MethodPut {
+			return auditClassification{
+				ShouldLog: true, Category: "auth", ResourceType: "settings", Action: "settings_update",
+				BodyValues: true,
+				Describe: func(body map[string]any) string {
+					switch auditBodyString(body, "requireMfa") {
+					case store.RequireMFAAll:
+						return "Require two-factor authentication for everyone"
+					case store.RequireMFAAdmins:
+						return "Require two-factor authentication for Admins"
+					default:
+						return "Stop requiring two-factor authentication"
+					}
+				},
+			}
+		}
 	}
 	return auditClassification{}
 }
@@ -103,6 +122,19 @@ func classifyUserAudit(method string, segs []string) auditClassification {
 	if len(segs) == 3 && segs[2] == "mfa" && method == http.MethodDelete {
 		base.Action, base.Category, base.Summary = "mfa_reset", "auth", "Reset two-factor authentication for user {target}"
 		return base
+	}
+	if method == http.MethodPost && len(segs) >= 3 {
+		switch strings.Join(segs[2:], "/") {
+		case "invite":
+			base.Action, base.Summary = "invite", "Send invite link to user {target}"
+			return base
+		case "password-reset":
+			base.Action, base.Category, base.Summary = "reset_link", "auth", "Create password reset link for user {target}"
+			return base
+		case "sessions/revoke":
+			base.Action, base.Category, base.Summary = "session_revoke", "auth", "Sign out user {target} everywhere"
+			return base
+		}
 	}
 	if len(segs) > 2 {
 		return auditClassification{}
@@ -139,6 +171,16 @@ func classifyAuthAudit(method string, segs []string) auditClassification {
 			return auditClassification{}
 		}
 		return class
+	case "sessions":
+		class := auditClassification{ShouldLog: true, Category: "auth", ResourceType: "user", SelfTarget: true}
+		if len(segs) == 3 && segs[2] == "revoke-others" && method == http.MethodPost {
+			class.Action, class.Summary = "session_revoke", "Sign out of all other sessions"
+			return class
+		}
+		if len(segs) == 3 && method == http.MethodDelete {
+			class.Action, class.Summary = "session_revoke", "Sign out a session"
+			return class
+		}
 	case "api-tokens":
 		class := auditClassification{ShouldLog: true, Category: "api_token", ResourceType: "api_token"}
 		if len(segs) == 2 && method == http.MethodPost {

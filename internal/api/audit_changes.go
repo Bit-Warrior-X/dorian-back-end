@@ -23,6 +23,7 @@ type auditResolver struct {
 	servers  store.ServerStore
 	sites    store.SiteStore
 	wafRules store.WafRuleStore
+	tokens   store.APITokenStore
 }
 
 type auditTarget struct {
@@ -71,6 +72,15 @@ func (res *auditResolver) loadTarget(ctx context.Context, resourceType string, i
 			return auditTarget{}, false
 		}
 		return auditTarget{Label: rule.Name, State: auditStateOf(rule)}, true
+	case "api_token":
+		if res.tokens == nil {
+			return auditTarget{}, false
+		}
+		token, err := res.tokens.Get(ctx, id)
+		if err != nil {
+			return auditTarget{}, false
+		}
+		return auditTarget{Label: token.Name}, true
 	}
 	return auditTarget{}, false
 }

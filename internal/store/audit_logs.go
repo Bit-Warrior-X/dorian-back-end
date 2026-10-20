@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"strings"
+	"time"
 )
 
 type AuditLog struct {
@@ -51,6 +52,8 @@ type AuditLogFilter struct {
 	ActorUserID int64
 	Search      string
 	IPAddress   string
+	From        *time.Time
+	To          *time.Time
 }
 
 type AuditLogStore interface {
@@ -129,6 +132,24 @@ func (store *auditLogStore) List(ctx context.Context, filter AuditLogFilter) ([]
 		like := "%" + search + "%"
 		query += " AND (actor_name LIKE ? OR actor_email LIKE ? OR resource_name LIKE ? OR details LIKE ? OR path LIKE ? OR ip_address LIKE ?)"
 		args = append(args, like, like, like, like, like, like)
+	}
+
+	if filter.From != nil {
+		query += " AND created_at >= ?"
+		args = append(args, filter.From.UTC())
+	}
+	if filter.To != nil {
+		query += " AND created_at < ?"
+		args = append(args, filter.To.UTC())
+	}
+
+	if filter.From != nil {
+		query += " AND created_at >= ?"
+		args = append(args, filter.From.UTC())
+	}
+	if filter.To != nil {
+		query += " AND created_at < ?"
+		args = append(args, filter.To.UTC())
 	}
 
 	query += " ORDER BY created_at DESC LIMIT ?"

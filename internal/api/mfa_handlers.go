@@ -86,26 +86,6 @@ func mfaRequiredForUser(ctx context.Context, mfa store.MFAStore, userID int64) (
 	return status.Enabled, nil
 }
 
-func issueSessionResponse(w http.ResponseWriter, cfg config.Config, user store.User) bool {
-	ttl := time.Duration(cfg.JWTTTLHours) * time.Hour
-	token, err := auth.IssueUserToken(auth.UserIdentity{
-		ID:    user.ID,
-		Email: user.Email,
-		Name:  user.Name,
-		Role:  user.Role,
-	}, cfg.JWTSecret, ttl)
-	if err != nil {
-		log.Printf("[auth] failed to issue jwt for user=%d: %v", user.ID, err)
-		writeError(w, http.StatusInternalServerError, "failed to issue session token")
-		return false
-	}
-	writeJSON(w, http.StatusOK, loginResponse{
-		Token: token,
-		User:  userShape{ID: user.ID, Email: user.Email, Role: user.Role, Name: user.Name},
-	})
-	return true
-}
-
 // verifySecondFactor accepts a 6-digit TOTP code or an unused recovery code.
 func verifySecondFactor(ctx context.Context, mfa store.MFAStore, userID int64, code string) (bool, string, error) {
 	code = strings.TrimSpace(code)
@@ -129,7 +109,7 @@ func verifySecondFactor(ctx context.Context, mfa store.MFAStore, userID int64, c
 	return ok, "recovery code", err
 }
 
-func loginMFAHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, throttle store.LoginThrottleStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func loginMFAHandler(cfg config.Config, account *accountServices, users store.UserStore, mfa store.MFAStore, throttle store.LoginThrottleStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -144,7 +124,8 @@ func loginMFAHandler(cfg config.Config, users store.UserStore, mfa store.MFAStor
 			return
 		}
 
-		userID, err := auth.ParseMFAChallengeToken(payload.MFAToken, cfg.JWTSecret)
+		challenge, err := auth.ParseMFAChallenge(payload.MFAToken, cfg.JWTSecret)
+		userID := challenge.UserID
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, errorResponse{
 				Error:   "mfa_challenge_expired",
@@ -191,7 +172,11 @@ func loginMFAHandler(cfg config.Config, users store.UserStore, mfa store.MFAStor
 			return
 		}
 
-		if issueSessionResponse(w, cfg, user) {
+		signInMethod := challenge.Method
+		if signInMethod == "" {
+			signInMethod = "password"
+		}
+		if account.writeSessionResponse(w, r, user, signInMethod+"+2fa", challenge.Remember) {
 			recordLoginSuccess(r.Context(), throttle, user.Email)
 			logLoginAttempt(r.Context(), auditLogs, r, user, true, http.StatusOK, "Successful login (2FA via "+method+")")
 		}
@@ -326,7 +311,7 @@ func mfaEnableHandler(mfa store.MFAStore) http.HandlerFunc {
 	}
 }
 
-func mfaDisableHandler(mfa store.MFAStore, throttle store.LoginThrottleStore) http.HandlerFunc {
+func mfaDisableHandler(account *accountServices, mfa store.MFAStore, throttle store.LoginThrottleStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -334,6 +319,13 @@ func mfaDisableHandler(mfa store.MFAStore, throttle store.LoginThrottleStore) ht
 		}
 		principal, ok := requireInteractiveSession(w, r)
 		if !ok {
+			return
+		}
+		if store.RequireMFAApplies(account.requireMFAPolicy(r.Context()), principal.Role) {
+			writeJSON(w, http.StatusForbidden, errorResponse{
+				Error:   "mfa_required_by_policy",
+				Message: "Your organization requires two-factor authentication, so it cannot be turned off.",
+			})
 			return
 		}
 		if !verifyCodeForSensitiveMFAChange(w, r, mfa, throttle, principal) {

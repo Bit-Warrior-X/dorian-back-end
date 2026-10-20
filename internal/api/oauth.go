@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"vue-project-backend/internal/auth"
 	"vue-project-backend/internal/config"
@@ -187,9 +186,9 @@ func oauthStartHandler(
 	}
 }
 
-func googleOAuthCallbackHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func googleOAuthCallbackHandler(cfg config.Config, account *accountServices, users store.UserStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		handleOAuthCallback(w, r, cfg, users, mfa, auditLogs, "google", func() (oauthIdentity, error) {
+		handleOAuthCallback(w, r, cfg, account, users, auditLogs, "google", func() (oauthIdentity, error) {
 			profile, err := auth.ExchangeGoogleCode(r.Context(), googleOAuthConfig(cfg, r), strings.TrimSpace(r.URL.Query().Get("code")))
 			if err != nil {
 				return oauthIdentity{}, err
@@ -199,9 +198,9 @@ func googleOAuthCallbackHandler(cfg config.Config, users store.UserStore, mfa st
 	}
 }
 
-func githubOAuthCallbackHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func githubOAuthCallbackHandler(cfg config.Config, account *accountServices, users store.UserStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		handleOAuthCallback(w, r, cfg, users, mfa, auditLogs, "github", func() (oauthIdentity, error) {
+		handleOAuthCallback(w, r, cfg, account, users, auditLogs, "github", func() (oauthIdentity, error) {
 			profile, err := auth.ExchangeGitHubCode(r.Context(), githubOAuthConfig(cfg, r), strings.TrimSpace(r.URL.Query().Get("code")))
 			if err != nil {
 				return oauthIdentity{}, err
@@ -211,9 +210,9 @@ func githubOAuthCallbackHandler(cfg config.Config, users store.UserStore, mfa st
 	}
 }
 
-func ssoOAuthCallbackHandler(cfg config.Config, users store.UserStore, mfa store.MFAStore, auditLogs store.AuditLogStore) http.HandlerFunc {
+func ssoOAuthCallbackHandler(cfg config.Config, account *accountServices, users store.UserStore, auditLogs store.AuditLogStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		handleOAuthCallback(w, r, cfg, users, mfa, auditLogs, "sso", func() (oauthIdentity, error) {
+		handleOAuthCallback(w, r, cfg, account, users, auditLogs, "sso", func() (oauthIdentity, error) {
 			profile, err := auth.ExchangeOIDCCode(r.Context(), ssoOAuthConfig(cfg, r), strings.TrimSpace(r.URL.Query().Get("code")))
 			if err != nil {
 				return oauthIdentity{}, err
@@ -227,8 +226,8 @@ func handleOAuthCallback(
 	w http.ResponseWriter,
 	r *http.Request,
 	cfg config.Config,
+	account *accountServices,
 	users store.UserStore,
-	mfa store.MFAStore,
 	auditLogs store.AuditLogStore,
 	provider string,
 	exchange func() (oauthIdentity, error),
@@ -276,14 +275,14 @@ func handleOAuthCallback(
 		return
 	}
 
-	needsMFA, err := mfaRequiredForUser(r.Context(), mfa, user.ID)
+	needsMFA, err := mfaRequiredForUser(r.Context(), account.mfa, user.ID)
 	if err != nil {
 		log.Printf("[auth] %s oauth 2fa lookup failed user=%d: %v", provider, user.ID, err)
 		redirectOAuthError(w, r, frontend, "Sign-in failed. Please try again.")
 		return
 	}
 	if needsMFA {
-		challenge, err := auth.IssueMFAChallengeToken(user.ID, cfg.JWTSecret, mfaChallengeTTL)
+		challenge, err := auth.IssueMFAChallenge(auth.MFAChallenge{UserID: user.ID, Remember: state.Remember, Method: provider}, cfg.JWTSecret, mfaChallengeTTL)
 		if err != nil {
 			log.Printf("[auth] %s oauth 2fa challenge failed user=%d: %v", provider, user.ID, err)
 			redirectOAuthError(w, r, frontend, "Sign-in failed. Please try again.")
@@ -299,13 +298,7 @@ func handleOAuthCallback(
 		return
 	}
 
-	ttl := time.Duration(cfg.JWTTTLHours) * time.Hour
-	token, err := auth.IssueUserToken(auth.UserIdentity{
-		ID:    user.ID,
-		Email: user.Email,
-		Name:  user.Name,
-		Role:  user.Role,
-	}, cfg.JWTSecret, ttl)
+	token, _, err := account.issueSession(r, user, provider, state.Remember)
 	if err != nil {
 		log.Printf("[auth] %s oauth jwt issue failed user=%d: %v", provider, user.ID, err)
 		redirectOAuthError(w, r, frontend, "Sign-in failed. Please try again.")

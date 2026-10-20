@@ -21,11 +21,13 @@ var (
 )
 
 type UserClaims struct {
-	UserID int64  `json:"uid"`
-	Email  string `json:"email"`
-	Name   string `json:"name"`
-	Role   string `json:"role"`
-	Typ    string `json:"typ"`
+	UserID   int64  `json:"uid"`
+	Email    string `json:"email"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	Typ      string `json:"typ"`
+	Remember bool   `json:"rm,omitempty"`
+	Method   string `json:"am,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -34,6 +36,16 @@ type UserIdentity struct {
 	Email string
 	Name  string
 	Role  string
+	// SessionID is stored as the JWT `jti`; the API rejects tokens whose session
+	// row is missing, expired, or revoked.
+	SessionID string
+}
+
+// MFAChallenge carries sign-in options from the first factor to the session.
+type MFAChallenge struct {
+	UserID   int64
+	Remember bool
+	Method   string
 }
 
 func IssueUserToken(user UserIdentity, secret string, ttl time.Duration) (string, error) {
@@ -56,6 +68,7 @@ func IssueUserToken(user UserIdentity, secret string, ttl time.Duration) (string
 		Role:   strings.TrimSpace(user.Role),
 		Typ:    TokenTypeUser,
 		RegisteredClaims: jwt.RegisteredClaims{
+			ID:        strings.TrimSpace(user.SessionID),
 			Subject:   strconv.FormatInt(user.ID, 10),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
@@ -74,19 +87,25 @@ func IssueUserToken(user UserIdentity, secret string, ttl time.Duration) (string
 // IssueMFAChallengeToken proves the password step succeeded for userID. It is
 // typed so ParseUserToken rejects it as a session token.
 func IssueMFAChallengeToken(userID int64, secret string, ttl time.Duration) (string, error) {
+	return IssueMFAChallenge(MFAChallenge{UserID: userID}, secret, ttl)
+}
+
+func IssueMFAChallenge(challenge MFAChallenge, secret string, ttl time.Duration) (string, error) {
 	secret = strings.TrimSpace(secret)
 	if secret == "" {
 		return "", errors.New("jwt secret is required")
 	}
-	if userID <= 0 {
+	if challenge.UserID <= 0 {
 		return "", errors.New("user id is required")
 	}
 	now := time.Now()
 	claims := UserClaims{
-		UserID: userID,
-		Typ:    TokenTypeMFAChallenge,
+		UserID:   challenge.UserID,
+		Typ:      TokenTypeMFAChallenge,
+		Remember: challenge.Remember,
+		Method:   strings.TrimSpace(challenge.Method),
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   strconv.FormatInt(userID, 10),
+			Subject:   strconv.FormatInt(challenge.UserID, 10),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
@@ -100,10 +119,15 @@ func IssueMFAChallengeToken(userID int64, secret string, ttl time.Duration) (str
 }
 
 func ParseMFAChallengeToken(tokenString, secret string) (int64, error) {
+	challenge, err := ParseMFAChallenge(tokenString, secret)
+	return challenge.UserID, err
+}
+
+func ParseMFAChallenge(tokenString, secret string) (MFAChallenge, error) {
 	tokenString = strings.TrimSpace(tokenString)
 	secret = strings.TrimSpace(secret)
 	if tokenString == "" || secret == "" {
-		return 0, ErrInvalidToken
+		return MFAChallenge{}, ErrInvalidToken
 	}
 	parsed, err := jwt.ParseWithClaims(tokenString, &UserClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if token.Method != jwt.SigningMethodHS256 {
@@ -113,15 +137,15 @@ func ParseMFAChallengeToken(tokenString, secret string) (int64, error) {
 	})
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
-			return 0, ErrExpiredToken
+			return MFAChallenge{}, ErrExpiredToken
 		}
-		return 0, ErrInvalidToken
+		return MFAChallenge{}, ErrInvalidToken
 	}
 	claims, ok := parsed.Claims.(*UserClaims)
 	if !ok || !parsed.Valid || claims.Typ != TokenTypeMFAChallenge || claims.UserID <= 0 {
-		return 0, ErrInvalidToken
+		return MFAChallenge{}, ErrInvalidToken
 	}
-	return claims.UserID, nil
+	return MFAChallenge{UserID: claims.UserID, Remember: claims.Remember, Method: claims.Method}, nil
 }
 
 func ParseUserToken(tokenString, secret string) (UserClaims, error) {
