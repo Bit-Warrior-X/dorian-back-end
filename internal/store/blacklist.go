@@ -18,6 +18,8 @@ const (
 	// the L7 temporary list so a flush does not push them to the L7 agent.
 	redisKeyL4TempNext  = "l4temporaryblock:id"
 	redisKeyL4TempEntry = "l4temporaryblock:entry:"
+	// Per-edge SET of entry ids so ReplaceL4Temporary does not SCAN the whole keyspace.
+	redisKeyL4TempServerIdx = "l4temporaryblock:serveridx:"
 	// defaultExpireSeconds is used when ttl is 0 so the key still expires eventually
 	defaultExpireSeconds = 180 // 3 minutes
 )
@@ -216,8 +218,56 @@ func (s *blacklistStore) CreateFromPayload(ctx context.Context, p TemporaryBlack
 	p.Reason = strings.TrimSpace(p.Reason)
 	remaining, active := blockLifetime(p, now)
 	if !active {
-		return payloadToEntry(0, p), nil
+		// Edge still reported this block (one-shot notify or configure snapshot),
+		// but blocked_at+ttl is already past — common on re-notifies with the
+		// original blocked_at and a short TTL. Keep it visible from now.
+		if p.TTL <= 0 {
+			p.TTL = int64(defaultExpireSeconds)
+		}
+		p.BlockedAt = strconv.FormatInt(now.Unix(), 10)
+		remaining = time.Duration(p.TTL) * time.Second
 	}
+
+	// Refresh an existing live row for the same IP/site/URL instead of creating
+	// duplicates when Angelos re-notifies or configure sync overlaps.
+	idKey := tempIdentity(p)
+	keys, err := s.entryKeys(ctx)
+	if err != nil {
+		return BlacklistEntry{}, err
+	}
+	for _, key := range keys {
+		rawExisting, getErr := s.rdb.Get(ctx, key).Bytes()
+		if getErr != nil {
+			if getErr == redis.Nil {
+				continue
+			}
+			return BlacklistEntry{}, getErr
+		}
+		var existing TemporaryBlacklistPayload
+		if err := json.Unmarshal(rawExisting, &existing); err != nil {
+			continue
+		}
+		if existing.ServerID != p.ServerID {
+			continue
+		}
+		if tempIdentity(existing) != idKey {
+			continue
+		}
+		idStr := strings.TrimPrefix(key, redisKeyBlacklistEntry)
+		id, parseErr := strconv.ParseInt(idStr, 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		raw, err := json.Marshal(p)
+		if err != nil {
+			return BlacklistEntry{}, err
+		}
+		if err := s.rdb.Set(ctx, key, raw, remaining).Err(); err != nil {
+			return BlacklistEntry{}, err
+		}
+		return payloadToEntry(id, p), nil
+	}
+
 	id, err := s.rdb.Incr(ctx, redisKeyBlacklistNext).Result()
 	if err != nil {
 		return BlacklistEntry{}, err
@@ -282,29 +332,110 @@ func (s *blacklistStore) DeleteAll(ctx context.Context, serverID int64) error {
 	return s.rdb.Del(ctx, toDelete...).Err()
 }
 
+// tempIdentity dedupes one live L7 block (same IP+site+URL).
+func tempIdentity(p TemporaryBlacklistPayload) string {
+	return strings.ToLower(strings.TrimSpace(p.IP)) + "|" +
+		strconv.FormatInt(p.SiteID, 10) + "|" +
+		strings.TrimSpace(p.URL)
+}
+
+// replaceGrace is how long a one-shot temporary_blacklist_added entry is kept
+// even if the next report_edge_configure snapshot omits it (Angelos often sends
+// tempBL=0 for up to a minute after notifying).
+const replaceGrace = 2 * time.Minute
+
 func (s *blacklistStore) ReplaceForServer(ctx context.Context, serverID int64, payloads []TemporaryBlacklistPayload) error {
 	if serverID == 0 {
 		return errNotFound
 	}
-	if err := s.DeleteAll(ctx, serverID); err != nil {
+
+	type existing struct {
+		key string
+		p   TemporaryBlacklistPayload
+	}
+	keys, err := s.entryKeys(ctx)
+	if err != nil {
 		return err
 	}
+	byIdentity := make(map[string]existing)
+	now := time.Now().UTC()
+	for _, key := range keys {
+		raw, err := s.rdb.Get(ctx, key).Bytes()
+		if err != nil {
+			if err == redis.Nil {
+				continue
+			}
+			return err
+		}
+		var p TemporaryBlacklistPayload
+		if err := json.Unmarshal(raw, &p); err != nil {
+			continue
+		}
+		if p.ServerID != serverID {
+			continue
+		}
+		if _, active := blockLifetime(p, now); !active {
+			_ = s.rdb.Del(ctx, key)
+			continue
+		}
+		byIdentity[tempIdentity(p)] = existing{key: key, p: p}
+	}
+
+	// Empty edge snapshot must not wipe one-shot adds. Redis TTL still expires
+	// each entry when its block ends.
+	if len(payloads) == 0 {
+		return nil
+	}
+
 	seen := make(map[string]struct{}, len(payloads))
 	for _, payload := range payloads {
 		ip := strings.TrimSpace(payload.IP)
 		if ip == "" {
 			continue
 		}
-		key := strings.ToLower(ip) + "|" + strconv.FormatInt(payload.SiteID, 10) + "|" + strings.TrimSpace(payload.URL)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
 		payload.ServerID = serverID
 		payload.IP = ip
+		idKey := tempIdentity(payload)
+		if _, ok := seen[idKey]; ok {
+			continue
+		}
+		seen[idKey] = struct{}{}
+
+		if prev, ok := byIdentity[idKey]; ok {
+			remaining, active := blockLifetime(payload, now)
+			if !active {
+				if payload.TTL <= 0 {
+					payload.TTL = int64(defaultExpireSeconds)
+				}
+				payload.BlockedAt = strconv.FormatInt(now.Unix(), 10)
+				remaining = time.Duration(payload.TTL) * time.Second
+			}
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				return err
+			}
+			if err := s.rdb.Set(ctx, prev.key, raw, remaining).Err(); err != nil {
+				return err
+			}
+			byIdentity[idKey] = existing{key: prev.key, p: payload}
+			continue
+		}
 		if _, err := s.CreateFromPayload(ctx, payload); err != nil {
 			return err
 		}
+	}
+
+	// Drop entries missing from the snapshot only after the grace window so a
+	// temporary_blacklist_added race with report_edge_configure cannot erase them.
+	for idKey, item := range byIdentity {
+		if _, ok := seen[idKey]; ok {
+			continue
+		}
+		started, ok := parseBlockTime(item.p.BlockedAt)
+		if ok && now.Sub(started) < replaceGrace {
+			continue
+		}
+		_ = s.rdb.Del(ctx, item.key)
 	}
 	return nil
 }
@@ -326,38 +457,96 @@ func (s *blacklistStore) l4TempKeys(ctx context.Context) ([]string, error) {
 	return keys, nil
 }
 
+func (s *blacklistStore) l4TempIndexKey(serverID int64) string {
+	return redisKeyL4TempServerIdx + strconv.FormatInt(serverID, 10)
+}
+
+// l4TempKeysForServer returns entry keys for one edge via the server index,
+// falling back to a one-shot SCAN for legacy data written before the index existed.
+func (s *blacklistStore) l4TempKeysForServer(ctx context.Context, serverID int64) ([]string, error) {
+	idxKey := s.l4TempIndexKey(serverID)
+	ids, err := s.rdb.SMembers(ctx, idxKey).Result()
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) > 0 {
+		keys := make([]string, 0, len(ids))
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			keys = append(keys, redisKeyL4TempEntry+id)
+		}
+		return keys, nil
+	}
+
+	all, err := s.l4TempKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var matched []string
+	const chunk = 200
+	for i := 0; i < len(all); i += chunk {
+		end := i + chunk
+		if end > len(all) {
+			end = len(all)
+		}
+		batch := all[i:end]
+		values, err := s.rdb.MGet(ctx, batch...).Result()
+		if err != nil {
+			return nil, err
+		}
+		for j, value := range values {
+			raw, ok := value.(string)
+			if !ok || raw == "" {
+				continue
+			}
+			var existing TemporaryBlacklistPayload
+			if err := json.Unmarshal([]byte(raw), &existing); err != nil {
+				matched = append(matched, batch[j])
+				continue
+			}
+			if existing.ServerID == serverID {
+				matched = append(matched, batch[j])
+			}
+		}
+	}
+	return matched, nil
+}
+
 func (s *blacklistStore) ReplaceL4Temporary(ctx context.Context, serverID int64, payloads []TemporaryBlacklistPayload) error {
 	if serverID == 0 {
 		return errNotFound
 	}
-	keys, err := s.l4TempKeys(ctx)
+	stale, err := s.l4TempKeysForServer(ctx, serverID)
 	if err != nil {
 		return err
 	}
-	var stale []string
-	for _, key := range keys {
-		raw, err := s.rdb.Get(ctx, key).Result()
-		if err != nil {
-			if err == redis.Nil {
-				continue
-			}
-			return err
-		}
-		var existing TemporaryBlacklistPayload
-		if err := json.Unmarshal([]byte(raw), &existing); err != nil {
-			stale = append(stale, key)
-			continue
-		}
-		if existing.ServerID == serverID {
-			stale = append(stale, key)
-		}
-	}
+	idxKey := s.l4TempIndexKey(serverID)
 	if len(stale) > 0 {
-		if err := s.rdb.Del(ctx, stale...).Err(); err != nil {
-			return err
+		toDelete := append(append([]string{}, stale...), idxKey)
+		const delChunk = 500
+		for i := 0; i < len(toDelete); i += delChunk {
+			end := i + delChunk
+			if end > len(toDelete) {
+				end = len(toDelete)
+			}
+			if err := s.rdb.Del(ctx, toDelete[i:end]...).Err(); err != nil {
+				return err
+			}
 		}
+	} else {
+		_ = s.rdb.Del(ctx, idxKey).Err()
+	}
+
+	type pending struct {
+		raw       []byte
+		remaining time.Duration
 	}
 	seen := make(map[string]struct{}, len(payloads))
+	items := make([]pending, 0, len(payloads))
+	now := time.Now().UTC()
 	for _, payload := range payloads {
 		ip := strings.TrimSpace(payload.IP)
 		if ip == "" {
@@ -370,58 +559,98 @@ func (s *blacklistStore) ReplaceL4Temporary(ctx context.Context, serverID int64,
 		payload.ServerID = serverID
 		payload.IP = ip
 		payload.TriggerRule = "l4ddos"
-		if _, active := blockLifetime(payload, time.Now().UTC()); !active {
+		if _, active := blockLifetime(payload, now); !active {
 			continue
-		}
-		id, err := s.rdb.Incr(ctx, redisKeyL4TempNext).Result()
-		if err != nil {
-			return err
 		}
 		raw, err := json.Marshal(payload)
 		if err != nil {
 			return err
 		}
-		remaining, _ := blockLifetime(payload, time.Now().UTC())
-		if err := s.rdb.Set(ctx, redisKeyL4TempEntry+strconv.FormatInt(id, 10), raw, remaining).Err(); err != nil {
-			return err
-		}
+		remaining, _ := blockLifetime(payload, now)
+		items = append(items, pending{raw: raw, remaining: remaining})
+	}
+	if len(items) == 0 {
+		return nil
+	}
+
+	endID, err := s.rdb.IncrBy(ctx, redisKeyL4TempNext, int64(len(items))).Result()
+	if err != nil {
+		return err
+	}
+	startID := endID - int64(len(items)) + 1
+
+	pipe := s.rdb.Pipeline()
+	idStrs := make([]any, 0, len(items))
+	for i, item := range items {
+		id := startID + int64(i)
+		idStr := strconv.FormatInt(id, 10)
+		pipe.Set(ctx, redisKeyL4TempEntry+idStr, item.raw, item.remaining)
+		idStrs = append(idStrs, idStr)
+	}
+	pipe.SAdd(ctx, idxKey, idStrs...)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return err
 	}
 	return nil
 }
 
 func (s *blacklistStore) ListL4Temporary(ctx context.Context, serverID int64) ([]BlacklistEntry, error) {
-	keys, err := s.l4TempKeys(ctx)
+	var keys []string
+	var err error
+	if serverID != 0 {
+		keys, err = s.l4TempKeysForServer(ctx, serverID)
+	} else {
+		keys, err = s.l4TempKeys(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
 	var entries []BlacklistEntry
-	for _, key := range keys {
-		raw, err := s.rdb.Get(ctx, key).Result()
+	const chunk = 200
+	now := time.Now().UTC()
+	for i := 0; i < len(keys); i += chunk {
+		end := i + chunk
+		if end > len(keys) {
+			end = len(keys)
+		}
+		batch := keys[i:end]
+		values, err := s.rdb.MGet(ctx, batch...).Result()
 		if err != nil {
-			if err == redis.Nil {
-				continue
-			}
 			return nil, err
 		}
-		id, err := strconv.ParseInt(strings.TrimPrefix(key, redisKeyL4TempEntry), 10, 64)
-		if err != nil {
-			continue
+		for j, value := range values {
+			key := batch[j]
+			raw, ok := value.(string)
+			if !ok || raw == "" {
+				if serverID != 0 {
+					idStr := strings.TrimPrefix(key, redisKeyL4TempEntry)
+					_ = s.rdb.SRem(ctx, s.l4TempIndexKey(serverID), idStr).Err()
+				}
+				continue
+			}
+			id, err := strconv.ParseInt(strings.TrimPrefix(key, redisKeyL4TempEntry), 10, 64)
+			if err != nil {
+				continue
+			}
+			var payload TemporaryBlacklistPayload
+			if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+				continue
+			}
+			if serverID != 0 && payload.ServerID != serverID {
+				continue
+			}
+			if _, active := blockLifetime(payload, now); !active {
+				_ = s.rdb.Del(ctx, key).Err()
+				if payload.ServerID != 0 {
+					_ = s.rdb.SRem(ctx, s.l4TempIndexKey(payload.ServerID), strconv.FormatInt(id, 10)).Err()
+				}
+				continue
+			}
+			if strings.TrimSpace(payload.TriggerRule) == "" {
+				payload.TriggerRule = "l4ddos"
+			}
+			entries = append(entries, payloadToEntry(id, payload))
 		}
-		var payload TemporaryBlacklistPayload
-		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-			continue
-		}
-		if serverID != 0 && payload.ServerID != serverID {
-			continue
-		}
-		if _, active := blockLifetime(payload, time.Now().UTC()); !active {
-			_ = s.rdb.Del(ctx, key)
-			continue
-		}
-		if strings.TrimSpace(payload.TriggerRule) == "" {
-			payload.TriggerRule = "l4ddos"
-		}
-		entries = append(entries, payloadToEntry(id, payload))
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID > entries[j].ID })
 	return entries, nil
@@ -449,7 +678,11 @@ func (s *blacklistStore) DeleteL4Temporary(ctx context.Context, entryID int64) e
 	if entryID <= 0 {
 		return nil
 	}
-	return s.rdb.Del(ctx, redisKeyL4TempEntry+strconv.FormatInt(entryID, 10)).Err()
+	key := redisKeyL4TempEntry + strconv.FormatInt(entryID, 10)
+	if payload, err := s.GetL4Temporary(ctx, entryID); err == nil && payload.ServerID != 0 {
+		_ = s.rdb.SRem(ctx, s.l4TempIndexKey(payload.ServerID), strconv.FormatInt(entryID, 10)).Err()
+	}
+	return s.rdb.Del(ctx, key).Err()
 }
 
 // ListPayloadsByServer returns the raw temporary blacklist payloads stored in

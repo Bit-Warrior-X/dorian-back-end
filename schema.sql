@@ -303,6 +303,7 @@ CREATE TABLE IF NOT EXISTS `l4_ddos_defense` (
   `geo_countries_block_mode` tinyint(1) NOT NULL DEFAULT 0,
   `tcp_connection_limit_check` tinyint(1) DEFAULT 1,
   `tcp_connection_limit_cnt` int(11) DEFAULT 50,
+  `firewall_extra` longtext DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`)
@@ -366,6 +367,7 @@ CREATE TABLE IF NOT EXISTS `listening_ports` (
   `created_at` timestamp NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`) USING BTREE,
+  UNIQUE KEY `listening_ports_server_port_protocol` (`server_id`,`port`,`protocol`) USING BTREE,
   KEY `server_id` (`server_id`) USING BTREE,
   CONSTRAINT `listening_ports_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -419,6 +421,16 @@ CREATE TABLE IF NOT EXISTS `server_traffic_stats` (
   `bandwidth_nic_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
   `bandwidth_l7_rx` bigint(20) unsigned NOT NULL DEFAULT 0,
   `bandwidth_l7_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `packets_nic_rx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `packets_nic_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `packets_nic_dropped` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `packets_xdp_rx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `packets_xdp_blocked` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `pps_nic_rx` double unsigned NOT NULL DEFAULT 0,
+  `pps_nic_tx` double unsigned NOT NULL DEFAULT 0,
+  `pps_nic_dropped` double unsigned NOT NULL DEFAULT 0,
+  `pps_xdp_rx` double unsigned NOT NULL DEFAULT 0,
+  `pps_xdp_blocked` double unsigned NOT NULL DEFAULT 0,
   `request_count` bigint(20) unsigned NOT NULL DEFAULT 0,
   `response_count` bigint(20) unsigned NOT NULL DEFAULT 0,
   `blocked_request_count` bigint(20) unsigned NOT NULL DEFAULT 0,
@@ -712,6 +724,42 @@ CREATE TABLE IF NOT EXISTS `url_request_stats` (
   KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
   KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
   CONSTRAINT `url_request_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `content_type_request_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL DEFAULT 0,
+  `bucket_ts` datetime NOT NULL,
+  `content_type` varchar(32) NOT NULL,
+  `request_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `traffic_l7_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `cached_request_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `traffic_cached_tx` bigint(20) unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`content_type`),
+  KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
+  CONSTRAINT `content_type_request_stats_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `cache_miss_url_stats` (
+  `server_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL DEFAULT 0,
+  `bucket_ts` datetime NOT NULL,
+  `url_hash` binary(16) NOT NULL,
+  `domain` varchar(255) NOT NULL DEFAULT '',
+  `request_url` varchar(1024) NOT NULL,
+  `miss_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `request_count` bigint(20) unsigned NOT NULL DEFAULT 0,
+  PRIMARY KEY (`server_id`,`site_id`,`bucket_ts`,`url_hash`),
+  KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_site_bucket` (`site_id`,`bucket_ts`),
+  KEY `idx_server_bucket` (`server_id`,`bucket_ts`),
+  CONSTRAINT `cache_miss_url_stats_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;

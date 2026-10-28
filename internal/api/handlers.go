@@ -312,6 +312,7 @@ func registerRoutes(
 	l4Blacklist store.L4BlacklistStore,
 	l4LiveAttack store.L4LiveAttackStore,
 	l4AttackStats store.L4AttackStatsStore,
+	l7BlockEvents store.L7BlockEventStore,
 	securityEvents store.SecurityEventStore,
 	serverTrafficStats store.ServerTrafficStatsStore,
 	wafWhitelist store.WafWhitelistStore,
@@ -338,15 +339,26 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
 	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
-	mux.HandleFunc("/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts))
-	mux.HandleFunc("/api/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts))
-	mux.HandleFunc("/api/v1/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts))
+	mux.HandleFunc("/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents))
+	mux.HandleFunc("/api/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents))
+	mux.HandleFunc("/api/v1/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents))
+	mux.HandleFunc("/report_cache_hit", reportCacheHitHandler(servers, serverTrafficStats))
+	mux.HandleFunc("/api/report_cache_hit", reportCacheHitHandler(servers, serverTrafficStats))
+	mux.HandleFunc("/api/v1/report_cache_hit", reportCacheHitHandler(servers, serverTrafficStats))
 	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, securityEvents, serverTrafficStats))
 	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, securityEvents, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/api/v1/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats))
 	mux.HandleFunc("/api/v1/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats))
+	mux.HandleFunc("/dashboard/attack-console/sources", attackConsoleSourcesHandler(securityEvents))
+	mux.HandleFunc("/api/v1/dashboard/attack-console/sources", attackConsoleSourcesHandler(securityEvents))
+	mux.HandleFunc("/dashboard/attack-console/sparta-log", attackConsoleSpartaLogHandler(securityEvents, servers))
+	mux.HandleFunc("/api/v1/dashboard/attack-console/sparta-log", attackConsoleSpartaLogHandler(securityEvents, servers))
+	mux.HandleFunc("/dashboard/attack-console/sparta-archive", attackConsoleArchiveHandler(securityEvents, servers))
+	mux.HandleFunc("/api/v1/dashboard/attack-console/sparta-archive", attackConsoleArchiveHandler(securityEvents, servers))
+	mux.HandleFunc("/dashboard/attack-console/sparta-archive/download", attackConsoleArchiveDownloadHandler(securityEvents, servers))
+	mux.HandleFunc("/api/v1/dashboard/attack-console/sparta-archive/download", attackConsoleArchiveDownloadHandler(securityEvents, servers))
 	mux.HandleFunc("/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/dashboard/bandwidth", dashboardBandwidthHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/dashboard/bandwidth-nic-rx", dashboardBandwidthNicRxHandler(serverTrafficStats, sites))
@@ -363,12 +375,30 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/dashboard/status-codes", dashboardStatusCodesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/dashboard/top-domains", dashboardTopDomainsHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/dashboard/top-domains", dashboardTopDomainsHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/logs/export", analyticsLogsExportHandler(cfg, servers, sites))
+	mux.HandleFunc("/api/v1/analytics/logs/export", analyticsLogsExportHandler(cfg, servers, sites))
+	mux.HandleFunc("/analytics/logs/files", analyticsLogFilesHandler(servers))
+	mux.HandleFunc("/api/v1/analytics/logs/files", analyticsLogFilesHandler(servers))
+	mux.HandleFunc("/analytics/logs/files/content", analyticsLogFilesContentHandler(servers))
+	mux.HandleFunc("/api/v1/analytics/logs/files/content", analyticsLogFilesContentHandler(servers))
+	mux.HandleFunc("/analytics/logs/files/download", analyticsLogFilesDownloadHandler(servers))
+	mux.HandleFunc("/api/v1/analytics/logs/files/download", analyticsLogFilesDownloadHandler(servers))
 	mux.HandleFunc("/analytics/summary", analyticsSummaryHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/analytics/summary", analyticsSummaryHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/series/nic-rx-bandwidth", analyticsNicRxBandwidthSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/analytics/series/nic-rx-bandwidth", analyticsNicRxBandwidthSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/series/nic-tx-bandwidth", analyticsNicTxBandwidthSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/analytics/series/nic-tx-bandwidth", analyticsNicTxBandwidthSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/series/nic-rx-pps", analyticsNicRxPpsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/series/nic-rx-pps", analyticsNicRxPpsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/series/nic-tx-pps", analyticsNicTxPpsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/series/nic-tx-pps", analyticsNicTxPpsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/series/nic-dropped-pps", analyticsNicDroppedPpsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/series/nic-dropped-pps", analyticsNicDroppedPpsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/series/xdp-rx-pps", analyticsXdpRxPpsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/series/xdp-rx-pps", analyticsXdpRxPpsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/series/xdp-blocked-pps", analyticsXdpBlockedPpsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/series/xdp-blocked-pps", analyticsXdpBlockedPpsSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/series/l7-rx-bandwidth", analyticsL7RxBandwidthSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/analytics/series/l7-rx-bandwidth", analyticsL7RxBandwidthSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/series/l7-tx-bandwidth", analyticsL7TxBandwidthSeriesHandler(serverTrafficStats, sites))
@@ -405,6 +435,32 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/analytics/summary/referers", analyticsRefererSummaryHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/summary/countries", analyticsCountrySummaryHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/analytics/summary/countries", analyticsCountrySummaryHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/cache/summary", cacheAnalyticsSummaryHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/cache/summary", cacheAnalyticsSummaryHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/cache/series/status", cacheAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/cache/series/status", cacheAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/cache/series/bandwidth", cacheAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/cache/series/bandwidth", cacheAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/cache/summary/status", cacheAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/cache/summary/status", cacheAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/cache/summary/sites", cacheAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/cache/summary/sites", cacheAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/cache/summary/content-types", cacheAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/cache/summary/content-types", cacheAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/cache/summary/top-miss-urls", cacheAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/cache/summary/top-miss-urls", cacheAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/performance/summary", performanceAnalyticsSummaryHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/performance/summary", performanceAnalyticsSummaryHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/performance/series/edge-response", performanceAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/performance/series/edge-response", performanceAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/performance/series/origin-response", performanceAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/performance/series/origin-response", performanceAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/performance/series/origin-status", performanceAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/performance/series/origin-status", performanceAnalyticsSeriesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/performance/summary/edges", performanceAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/performance/summary/edges", performanceAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/performance/summary/origins", performanceAnalyticsGroupHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/performance/summary/origins", performanceAnalyticsGroupHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/security/summary", securityAnalyticsSummaryHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/analytics/security/summary", securityAnalyticsSummaryHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/security/series/block-count", securityAnalyticsBlockedSeriesHandler(serverTrafficStats, sites))
@@ -423,12 +479,24 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/analytics/security/summary/top-user-agents", securityAnalyticsTopUserAgentsHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/security/summary/top-domains", securityAnalyticsTopDomainsHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/analytics/security/summary/top-domains", securityAnalyticsTopDomainsHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/security/summary/rule-types", securityAnalyticsRuleTypesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/api/v1/analytics/security/summary/rule-types", securityAnalyticsRuleTypesHandler(serverTrafficStats, sites))
+	mux.HandleFunc("/analytics/security/attacks/summary", securityAnalyticsAttackSummaryHandler(l7BlockEvents, sites))
+	mux.HandleFunc("/api/v1/analytics/security/attacks/summary", securityAnalyticsAttackSummaryHandler(l7BlockEvents, sites))
+	mux.HandleFunc("/analytics/security/attacks/recent", securityAnalyticsRecentAttacksHandler(l7BlockEvents, sites))
+	mux.HandleFunc("/api/v1/analytics/security/attacks/recent", securityAnalyticsRecentAttacksHandler(l7BlockEvents, sites))
+	mux.HandleFunc("/analytics/security/attacks/top-ips", securityAnalyticsTopAttackIPsHandler(l7BlockEvents, sites))
+	mux.HandleFunc("/api/v1/analytics/security/attacks/top-ips", securityAnalyticsTopAttackIPsHandler(l7BlockEvents, sites))
+	mux.HandleFunc("/analytics/security/attacks/top-urls", securityAnalyticsTopAttackURLsHandler(l7BlockEvents, sites))
+	mux.HandleFunc("/api/v1/analytics/security/attacks/top-urls", securityAnalyticsTopAttackURLsHandler(l7BlockEvents, sites))
 	mux.HandleFunc("/analytics/l4/summary", l4AnalyticsSummaryHandler(l4AttackStats, sites))
 	mux.HandleFunc("/api/v1/analytics/l4/summary", l4AnalyticsSummaryHandler(l4AttackStats, sites))
 	mux.HandleFunc("/analytics/l4/series/traffic", l4AnalyticsTrafficSeriesHandler(l4AttackStats, sites))
 	mux.HandleFunc("/api/v1/analytics/l4/series/traffic", l4AnalyticsTrafficSeriesHandler(l4AttackStats, sites))
 	mux.HandleFunc("/analytics/l4/series/protocols", l4AnalyticsProtocolSeriesHandler(l4AttackStats, sites))
 	mux.HandleFunc("/api/v1/analytics/l4/series/protocols", l4AnalyticsProtocolSeriesHandler(l4AttackStats, sites))
+	mux.HandleFunc("/analytics/l4/attacks/summary", l4AnalyticsAttackSummaryHandler(l4AttackStats, sites))
+	mux.HandleFunc("/api/v1/analytics/l4/attacks/summary", l4AnalyticsAttackSummaryHandler(l4AttackStats, sites))
 	mux.HandleFunc("/analytics/l4/attacks/recent", l4AnalyticsRecentAttacksHandler(l4AttackStats, sites))
 	mux.HandleFunc("/api/v1/analytics/l4/attacks/recent", l4AnalyticsRecentAttacksHandler(l4AttackStats, sites))
 	mux.HandleFunc("/analytics/l4/attacks/top-ips", l4AnalyticsTopIpsHandler(l4AttackStats, sites))
@@ -479,12 +547,18 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/license-plans", licensePlansHandler(licensePlans))
 	mux.HandleFunc("/license-plans", licensePlansHandler(licensePlans))
 	mux.HandleFunc("/api/v1/servers/probe-host-versions", probeHostVersionsHandler(cfg))
+	mux.HandleFunc("/servers/host-metrics", func(w http.ResponseWriter, r *http.Request) {
+		handleServersHostMetricsBatch(w, r, servers)
+	})
+	mux.HandleFunc("/api/v1/servers/host-metrics", func(w http.ResponseWriter, r *http.Request) {
+		handleServersHostMetricsBatch(w, r, servers)
+	})
 	mux.HandleFunc("/servers", serversHandler(cfg, servers))
 	mux.HandleFunc("/servers/blacklist", serverBlacklistHandler(servers, sites, blacklist, agentClient))
 	mux.HandleFunc("/servers/blacklist/", serverBlacklistHandler(servers, sites, blacklist, agentClient))
-	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4))
-	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4))
-	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4))
+	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4, l7BlockEvents))
+	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4, l7BlockEvents))
+	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4, l7BlockEvents))
 	mux.HandleFunc("/servers/", restrictServerDetail(serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings)))
 	mux.HandleFunc("/users", requireAdmin(usersHandler(account, users, mfa)))
 	mux.HandleFunc("/users/", requireAdminOrSelfUser(userHandler(account, users)))
@@ -518,7 +592,7 @@ func registerRoutes(
 	mux.HandleFunc("/sites", sitesHandler(sites, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, certIssuer))
 	mux.HandleFunc("/sites/", restrictSiteDetail(sites, siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, certIssuer)))
 	mux.HandleFunc("/waf-rules", wafRulesHandler(wafRules))
-	mux.HandleFunc("/waf-rules/", wafRuleDetailHandler(wafRules, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent))
+	mux.HandleFunc("/waf-rules/", wafRuleDetailHandler(servers, sites, wafRules, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts))
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -1052,6 +1126,32 @@ func dashboardSecurityEventsHandler(securityEvents store.SecurityEventStore) htt
 			}
 		}
 
+		var windowStart, windowEnd time.Time
+		if startRaw := strings.TrimSpace(r.URL.Query().Get("start")); startRaw != "" {
+			parsed, err := parseTimeValue(startRaw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid start")
+				return
+			}
+			windowStart = parsed
+		}
+		if endRaw := strings.TrimSpace(r.URL.Query().Get("end")); endRaw != "" {
+			parsed, err := parseTimeValue(endRaw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid end")
+				return
+			}
+			windowEnd = parsed
+		}
+		if !windowStart.IsZero() && !windowEnd.IsZero() && !windowEnd.After(windowStart) {
+			writeError(w, http.StatusBadRequest, "end must be after start")
+			return
+		}
+		if (!windowStart.IsZero()) != (!windowEnd.IsZero()) {
+			writeError(w, http.StatusBadRequest, "start and end are both required")
+			return
+		}
+
 		viewer := viewerScopeFromContext(r.Context())
 		scope := store.TrafficScope{ServerIDs: viewer.serverIDs, Restricted: viewer.restricted}
 		serverID, err := parseServerIDParam(r.URL.Query().Get("serverId"))
@@ -1067,7 +1167,7 @@ func dashboardSecurityEventsHandler(securityEvents store.SecurityEventStore) htt
 			scope = store.TrafficScope{ServerID: serverID, Restricted: viewer.restricted}
 		}
 
-		events, err := securityEvents.ListPeriods(r.Context(), limit, scope)
+		events, err := securityEvents.ListPeriods(r.Context(), limit, scope, windowStart, windowEnd)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load security events")
 			return
@@ -1203,6 +1303,190 @@ func dashboardBucketSize(rangeValue time.Duration) time.Duration {
 // dashboardChartMaxPoints keeps Overview payloads chart-sized. Raw 1-minute
 // buckets for multi-day ranges overwhelm ApexCharts and the browser.
 const dashboardChartMaxPoints = 360
+
+func analyticsChartBucket(start, end time.Time) time.Duration {
+	dur := end.Sub(start)
+	if dur <= 0 {
+		return time.Minute
+	}
+	return dashboardBucketSize(dur)
+}
+
+type seriesAggMode int
+
+const (
+	seriesAggAvg seriesAggMode = iota
+	seriesAggSum
+)
+
+// coarsenAnalyticsSeries collapses fine buckets into ≤dashboardChartMaxPoints
+// points so long analytics ranges stay chart-sized without changing JSON shape.
+func coarsenAnalyticsSeries[T any](
+	items []T,
+	start, end time.Time,
+	mode seriesAggMode,
+	stamp func(T) string,
+	values func(T) []int64,
+	build func(string, []int64) T,
+) []T {
+	if len(items) == 0 {
+		return items
+	}
+	bucket := analyticsChartBucket(start, end)
+	if bucket <= time.Minute {
+		return items
+	}
+	aligned := start.UTC().Truncate(bucket)
+	type acc struct {
+		sums  []int64
+		count int64
+	}
+	order := make([]int64, 0)
+	buckets := make(map[int64]*acc)
+	for _, item := range items {
+		ts, err := time.Parse(time.RFC3339, stamp(item))
+		if err != nil {
+			continue
+		}
+		key := int64(0)
+		if !ts.Before(aligned) {
+			key = ts.Sub(aligned).Nanoseconds() / bucket.Nanoseconds()
+		}
+		vals := values(item)
+		entry, ok := buckets[key]
+		if !ok {
+			entry = &acc{sums: make([]int64, len(vals))}
+			buckets[key] = entry
+			order = append(order, key)
+		}
+		for i, v := range vals {
+			entry.sums[i] += v
+		}
+		entry.count++
+	}
+	sort.Slice(order, func(i, j int) bool { return order[i] < order[j] })
+	out := make([]T, 0, len(order))
+	for _, key := range order {
+		entry := buckets[key]
+		vals := make([]int64, len(entry.sums))
+		if mode == seriesAggAvg && entry.count > 0 {
+			for i, sum := range entry.sums {
+				vals[i] = int64(math.Round(float64(sum) / float64(entry.count)))
+			}
+		} else {
+			copy(vals, entry.sums)
+		}
+		out = append(out, build(aligned.Add(time.Duration(key)*bucket).UTC().Format(time.RFC3339), vals))
+	}
+	return out
+}
+
+func coarsenTrafficRate(points []store.TrafficPoint, start, end time.Time) []store.TrafficPoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggAvg,
+		func(p store.TrafficPoint) string { return p.Timestamp },
+		func(p store.TrafficPoint) []int64 { return []int64{p.Traffic} },
+		func(ts string, v []int64) store.TrafficPoint {
+			return store.TrafficPoint{Timestamp: ts, Traffic: v[0]}
+		},
+	)
+}
+
+func coarsenTrafficVolume(points []store.TrafficPoint, start, end time.Time) []store.TrafficPoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggSum,
+		func(p store.TrafficPoint) string { return p.Timestamp },
+		func(p store.TrafficPoint) []int64 { return []int64{p.Traffic} },
+		func(ts string, v []int64) store.TrafficPoint {
+			return store.TrafficPoint{Timestamp: ts, Traffic: v[0]}
+		},
+	)
+}
+
+func coarsenRequestResponse(points []store.RequestResponsePoint, start, end time.Time) []store.RequestResponsePoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggAvg,
+		func(p store.RequestResponsePoint) string { return p.Timestamp },
+		func(p store.RequestResponsePoint) []int64 { return []int64{p.RequestCount, p.ResponseCount} },
+		func(ts string, v []int64) store.RequestResponsePoint {
+			return store.RequestResponsePoint{Timestamp: ts, RequestCount: v[0], ResponseCount: v[1]}
+		},
+	)
+}
+
+func coarsenStatusCodes(points []store.StatusCodePoint, start, end time.Time) []store.StatusCodePoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggAvg,
+		func(p store.StatusCodePoint) string { return p.Timestamp },
+		func(p store.StatusCodePoint) []int64 { return []int64{p.Success, p.Redirect, p.Client, p.Server} },
+		func(ts string, v []int64) store.StatusCodePoint {
+			return store.StatusCodePoint{Timestamp: ts, Success: v[0], Redirect: v[1], Client: v[2], Server: v[3]}
+		},
+	)
+}
+
+func coarsenIpCount(points []store.IpCountPoint, start, end time.Time) []store.IpCountPoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggAvg,
+		func(p store.IpCountPoint) string { return p.Timestamp },
+		func(p store.IpCountPoint) []int64 { return []int64{p.Count} },
+		func(ts string, v []int64) store.IpCountPoint {
+			return store.IpCountPoint{Timestamp: ts, Count: v[0]}
+		},
+	)
+}
+
+func coarsenMethodSeries(points []store.MethodSeriesPoint, start, end time.Time) []store.MethodSeriesPoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggAvg,
+		func(p store.MethodSeriesPoint) string { return p.Timestamp },
+		func(p store.MethodSeriesPoint) []int64 {
+			return []int64{p.GetCount, p.PostCount, p.DeleteCount, p.PutCount, p.HeadCount, p.PatchCount, p.OptionsCount, p.OthersCount}
+		},
+		func(ts string, v []int64) store.MethodSeriesPoint {
+			return store.MethodSeriesPoint{
+				Timestamp: ts, GetCount: v[0], PostCount: v[1], DeleteCount: v[2], PutCount: v[3],
+				HeadCount: v[4], PatchCount: v[5], OptionsCount: v[6], OthersCount: v[7],
+			}
+		},
+	)
+}
+
+func coarsenProtocolSeries(points []store.ProtocolSeriesPoint, start, end time.Time) []store.ProtocolSeriesPoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggAvg,
+		func(p store.ProtocolSeriesPoint) string { return p.Timestamp },
+		func(p store.ProtocolSeriesPoint) []int64 { return []int64{p.Http1_0, p.Http1_1, p.Http2, p.Http3} },
+		func(ts string, v []int64) store.ProtocolSeriesPoint {
+			return store.ProtocolSeriesPoint{Timestamp: ts, Http1_0: v[0], Http1_1: v[1], Http2: v[2], Http3: v[3]}
+		},
+	)
+}
+
+func coarsenBlockedRequests(points []store.BlockedRequestPoint, start, end time.Time) []store.BlockedRequestPoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggAvg,
+		func(p store.BlockedRequestPoint) string { return p.Timestamp },
+		func(p store.BlockedRequestPoint) []int64 { return []int64{p.Count} },
+		func(ts string, v []int64) store.BlockedRequestPoint {
+			return store.BlockedRequestPoint{Timestamp: ts, Count: v[0]}
+		},
+	)
+}
+
+func coarsenL4Traffic(points []store.L4TrafficPoint, start, end time.Time) []store.L4TrafficPoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggAvg,
+		func(p store.L4TrafficPoint) string { return p.Timestamp },
+		func(p store.L4TrafficPoint) []int64 {
+			return []int64{p.TotalTraffic, p.AllowedTraffic, p.BlockedTraffic}
+		},
+		func(ts string, v []int64) store.L4TrafficPoint {
+			return store.L4TrafficPoint{Timestamp: ts, TotalTraffic: v[0], AllowedTraffic: v[1], BlockedTraffic: v[2]}
+		},
+	)
+}
+
+func coarsenL4Protocols(points []store.L4ProtocolPoint, start, end time.Time) []store.L4ProtocolPoint {
+	return coarsenAnalyticsSeries(points, start, end, seriesAggAvg,
+		func(p store.L4ProtocolPoint) string { return p.Timestamp },
+		func(p store.L4ProtocolPoint) []int64 { return []int64{p.Tcp, p.Udp, p.Icmp, p.Gre, p.Other} },
+		func(ts string, v []int64) store.L4ProtocolPoint {
+			return store.L4ProtocolPoint{Timestamp: ts, Tcp: v[0], Udp: v[1], Icmp: v[2], Gre: v[3], Other: v[4]}
+		},
+	)
+}
 
 func dashboardBandwidthHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
 	return dashboardBandwidthByServerHandler(stats, sites, stats.ListBandwidth)
@@ -1493,23 +1777,38 @@ func parseAnalyticsScope(w http.ResponseWriter, r *http.Request, sites store.Sit
 }
 
 type analyticsSummaryResponse struct {
-	TotalNicRxTraffic      int64  `json:"totalNicRxTraffic"`
-	TotalNicTxTraffic      int64  `json:"totalNicTxTraffic"`
-	TotalL7RxTraffic       int64  `json:"totalL7RxTraffic"`
-	TotalL7TxTraffic       int64  `json:"totalL7TxTraffic"`
-	NicRxBandwidthLast     int64  `json:"nicRxBandwidthLast"`
-	NicRxBandwidthLastTime string `json:"nicRxBandwidthLastTime"`
-	NicTxBandwidthLast     int64  `json:"nicTxBandwidthLast"`
-	NicTxBandwidthLastTime string `json:"nicTxBandwidthLastTime"`
-	L7RxBandwidthLast      int64  `json:"l7RxBandwidthLast"`
-	L7RxBandwidthLastTime  string `json:"l7RxBandwidthLastTime"`
-	L7TxBandwidthLast      int64  `json:"l7TxBandwidthLast"`
-	L7TxBandwidthLastTime  string `json:"l7TxBandwidthLastTime"`
-	TotalRequest           int64  `json:"totalRequest"`
-	TotalResponse          int64  `json:"totalResponse"`
-	IpCount                int64  `json:"ipCount"`
-	RefererCount           int64  `json:"refererCount"`
-	IspCount               int64  `json:"ispCount"`
+	TotalNicRxTraffic      int64   `json:"totalNicRxTraffic"`
+	TotalNicTxTraffic      int64   `json:"totalNicTxTraffic"`
+	TotalL7RxTraffic       int64   `json:"totalL7RxTraffic"`
+	TotalL7TxTraffic       int64   `json:"totalL7TxTraffic"`
+	NicRxBandwidthLast     int64   `json:"nicRxBandwidthLast"`
+	NicRxBandwidthLastTime string  `json:"nicRxBandwidthLastTime"`
+	NicTxBandwidthLast     int64   `json:"nicTxBandwidthLast"`
+	NicTxBandwidthLastTime string  `json:"nicTxBandwidthLastTime"`
+	L7RxBandwidthLast      int64   `json:"l7RxBandwidthLast"`
+	L7RxBandwidthLastTime  string  `json:"l7RxBandwidthLastTime"`
+	L7TxBandwidthLast      int64   `json:"l7TxBandwidthLast"`
+	L7TxBandwidthLastTime  string  `json:"l7TxBandwidthLastTime"`
+	TotalRequest           int64   `json:"totalRequest"`
+	TotalResponse          int64   `json:"totalResponse"`
+	IpCount                int64   `json:"ipCount"`
+	RefererCount           int64   `json:"refererCount"`
+	IspCount               int64   `json:"ispCount"`
+	PacketsNicRx           int64   `json:"packetsNicRx"`
+	PacketsNicTx           int64   `json:"packetsNicTx"`
+	PacketsNicDropped      int64   `json:"packetsNicDropped"`
+	PacketsXdpRx           int64   `json:"packetsXdpRx"`
+	PacketsXdpBlocked      int64   `json:"packetsXdpBlocked"`
+	PpsNicRxLast           float64 `json:"ppsNicRxLast"`
+	PpsNicRxLastTime       string  `json:"ppsNicRxLastTime"`
+	PpsNicTxLast           float64 `json:"ppsNicTxLast"`
+	PpsNicTxLastTime       string  `json:"ppsNicTxLastTime"`
+	PpsNicDroppedLast      float64 `json:"ppsNicDroppedLast"`
+	PpsNicDroppedLastTime  string  `json:"ppsNicDroppedLastTime"`
+	PpsXdpRxLast           float64 `json:"ppsXdpRxLast"`
+	PpsXdpRxLastTime       string  `json:"ppsXdpRxLastTime"`
+	PpsXdpBlockedLast      float64 `json:"ppsXdpBlockedLast"`
+	PpsXdpBlockedLastTime  string  `json:"ppsXdpBlockedLastTime"`
 }
 
 func analyticsSummaryHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
@@ -1572,6 +1871,38 @@ func analyticsSummaryHandler(stats store.ServerTrafficStatsStore, sites store.Si
 			return
 		}
 
+		packetTotals, err := stats.SumPacketTotals(r.Context(), start, end, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load packet totals")
+			return
+		}
+
+		ppsNicRxLast, ppsNicRxLastTime, err := stats.LatestPpsNicRx(r.Context(), start, end, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load nic rx pps")
+			return
+		}
+		ppsNicTxLast, ppsNicTxLastTime, err := stats.LatestPpsNicTx(r.Context(), start, end, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load nic tx pps")
+			return
+		}
+		ppsNicDroppedLast, ppsNicDroppedLastTime, err := stats.LatestPpsNicDropped(r.Context(), start, end, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load nic dropped pps")
+			return
+		}
+		ppsXdpRxLast, ppsXdpRxLastTime, err := stats.LatestPpsXdpRx(r.Context(), start, end, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load xdp rx pps")
+			return
+		}
+		ppsXdpBlockedLast, ppsXdpBlockedLastTime, err := stats.LatestPpsXdpBlocked(r.Context(), start, end, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load xdp blocked pps")
+			return
+		}
+
 		writeJSON(w, http.StatusOK, analyticsSummaryResponse{
 			TotalNicRxTraffic:      totalNicRxTraffic,
 			TotalNicTxTraffic:      totalNicTxTraffic,
@@ -1590,6 +1921,21 @@ func analyticsSummaryHandler(stats store.ServerTrafficStatsStore, sites store.Si
 			IpCount:                totalIp,
 			RefererCount:           refererCount,
 			IspCount:               ispCount,
+			PacketsNicRx:           packetTotals.PacketsNicRx,
+			PacketsNicTx:           packetTotals.PacketsNicTx,
+			PacketsNicDropped:      packetTotals.PacketsNicDropped,
+			PacketsXdpRx:           packetTotals.PacketsXdpRx,
+			PacketsXdpBlocked:      packetTotals.PacketsXdpBlocked,
+			PpsNicRxLast:           ppsNicRxLast,
+			PpsNicRxLastTime:       ppsNicRxLastTime.Format(time.RFC3339),
+			PpsNicTxLast:           ppsNicTxLast,
+			PpsNicTxLastTime:       ppsNicTxLastTime.Format(time.RFC3339),
+			PpsNicDroppedLast:      ppsNicDroppedLast,
+			PpsNicDroppedLastTime:  ppsNicDroppedLastTime.Format(time.RFC3339),
+			PpsXdpRxLast:           ppsXdpRxLast,
+			PpsXdpRxLastTime:       ppsXdpRxLastTime.Format(time.RFC3339),
+			PpsXdpBlockedLast:      ppsXdpBlockedLast,
+			PpsXdpBlockedLastTime:  ppsXdpBlockedLastTime.Format(time.RFC3339),
 		})
 	}
 }
@@ -1612,7 +1958,7 @@ func analyticsNicRxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, s
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenTrafficRate(points, start, end))
 	}
 }
 
@@ -1634,8 +1980,48 @@ func analyticsNicTxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, s
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenTrafficRate(points, start, end))
 	}
+}
+
+func analyticsPacketRateSeriesHandler(
+	stats store.ServerTrafficStatsStore,
+	sites store.SiteStore,
+	listFn func(context.Context, time.Time, time.Time, store.TrafficScope) ([]store.TrafficPoint, error),
+	errMsg string,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		scope, start, end, ok := parseAnalyticsScope(w, r, sites)
+		if !ok {
+			return
+		}
+		points, err := listFn(r.Context(), start, end, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, errMsg)
+			return
+		}
+		writeJSON(w, http.StatusOK, coarsenTrafficRate(points, start, end))
+	}
+}
+
+func analyticsNicRxPpsSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return analyticsPacketRateSeriesHandler(stats, sites, stats.ListPpsNicRxAggregate, "failed to load nic rx pps series")
+}
+func analyticsNicTxPpsSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return analyticsPacketRateSeriesHandler(stats, sites, stats.ListPpsNicTxAggregate, "failed to load nic tx pps series")
+}
+func analyticsNicDroppedPpsSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return analyticsPacketRateSeriesHandler(stats, sites, stats.ListPpsNicDroppedAggregate, "failed to load nic dropped pps series")
+}
+func analyticsXdpRxPpsSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return analyticsPacketRateSeriesHandler(stats, sites, stats.ListPpsXdpRxAggregate, "failed to load xdp rx pps series")
+}
+func analyticsXdpBlockedPpsSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return analyticsPacketRateSeriesHandler(stats, sites, stats.ListPpsXdpBlockedAggregate, "failed to load xdp blocked pps series")
 }
 
 func analyticsL7RxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
@@ -1656,7 +2042,7 @@ func analyticsL7RxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, si
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenTrafficRate(points, start, end))
 	}
 }
 
@@ -1678,7 +2064,7 @@ func analyticsL7TxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, si
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenTrafficRate(points, start, end))
 	}
 }
 
@@ -1700,7 +2086,7 @@ func analyticsNicTxTrafficSeriesHandler(stats store.ServerTrafficStatsStore, sit
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenTrafficVolume(points, start, end))
 	}
 }
 
@@ -1722,7 +2108,7 @@ func analyticsNicRxTrafficSeriesHandler(stats store.ServerTrafficStatsStore, sit
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenTrafficVolume(points, start, end))
 	}
 }
 
@@ -1744,7 +2130,7 @@ func analyticsL7TxTrafficSeriesHandler(stats store.ServerTrafficStatsStore, site
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenTrafficVolume(points, start, end))
 	}
 }
 
@@ -1766,7 +2152,7 @@ func analyticsL7RxTrafficSeriesHandler(stats store.ServerTrafficStatsStore, site
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenTrafficVolume(points, start, end))
 	}
 }
 
@@ -1788,7 +2174,7 @@ func analyticsRequestResponseSeriesHandler(stats store.ServerTrafficStatsStore, 
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenRequestResponse(points, start, end))
 	}
 }
 
@@ -1810,7 +2196,7 @@ func analyticsStatusCodesSeriesHandler(stats store.ServerTrafficStatsStore, site
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenStatusCodes(points, start, end))
 	}
 }
 
@@ -1832,7 +2218,7 @@ func analyticsIpCountSeriesHandler(stats store.ServerTrafficStatsStore, sites st
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenIpCount(points, start, end))
 	}
 }
 
@@ -1854,7 +2240,7 @@ func analyticsMethodSeriesHandler(stats store.ServerTrafficStatsStore, sites sto
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenMethodSeries(points, start, end))
 	}
 }
 
@@ -1876,7 +2262,7 @@ func analyticsProtocolSeriesHandler(stats store.ServerTrafficStatsStore, sites s
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenProtocolSeries(points, start, end))
 	}
 }
 
@@ -2141,7 +2527,7 @@ func securityAnalyticsBlockedSeriesHandler(stats store.ServerTrafficStatsStore, 
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenBlockedRequests(points, start, end))
 	}
 }
 
@@ -2444,7 +2830,7 @@ func l4AnalyticsTrafficSeriesHandler(stats store.L4AttackStatsStore, sites store
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenL4Traffic(points, start, end))
 	}
 }
 
@@ -2466,7 +2852,29 @@ func l4AnalyticsProtocolSeriesHandler(stats store.L4AttackStatsStore, sites stor
 			return
 		}
 
-		writeJSON(w, http.StatusOK, points)
+		writeJSON(w, http.StatusOK, coarsenL4Protocols(points, start, end))
+	}
+}
+
+func l4AnalyticsAttackSummaryHandler(stats store.L4AttackStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		scope, start, end, ok := parseAnalyticsScope(w, r, sites)
+		if !ok {
+			return
+		}
+
+		summary, err := stats.SummarizeAttacks(r.Context(), start, end, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load l4 attack summary")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, summary)
 	}
 }
 
@@ -3986,16 +4394,20 @@ func serverBlacklistHandler(servers store.ServerStore, sites store.SiteStore, bl
 					}
 					serverID = parsed
 				}
-				if err := blacklist.DeleteAll(r.Context(), serverID); err != nil {
-					writeError(w, http.StatusInternalServerError, "failed to flush blacklist entries")
-					return
-				}
-				// After flushing the temporary blacklist for a server, notify api_parser.
-				if serverID > 0 {
-					if err := callL7UpdateTemporaryBlacklist(r.Context(), servers, serverID, blacklist); err != nil {
-						writeError(w, http.StatusBadGateway, "failed to sync temporary blacklist")
+				if err := flushTemporaryBlocks(r.Context(), servers, blacklist, agentClient, serverID); err != nil {
+					var agentErr AgentResponseError
+					if errors.As(err, &agentErr) {
+						writeError(w, http.StatusBadGateway, agentErr.Error())
 						return
 					}
+					if strings.Contains(err.Error(), "sync temporary blacklist") ||
+						strings.Contains(err.Error(), "l7_update_temporaryblacklist") ||
+						strings.Contains(err.Error(), "clear live l4 blocks") {
+						writeError(w, http.StatusBadGateway, err.Error())
+						return
+					}
+					writeError(w, http.StatusInternalServerError, "failed to flush blacklist entries")
+					return
 				}
 				w.WriteHeader(http.StatusNoContent)
 			default:
@@ -4083,7 +4495,7 @@ func serverBlacklistHandler(servers store.ServerStore, sites store.SiteStore, bl
 	}
 }
 
-func temporaryBlacklistAddedHandler(servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore, l4 store.L4Store) http.HandlerFunc {
+func temporaryBlacklistAddedHandler(servers store.ServerStore, sites store.SiteStore, blacklist store.BlacklistStore, l4 store.L4Store, l7BlockEvents store.L7BlockEventStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -4131,6 +4543,13 @@ func temporaryBlacklistAddedHandler(servers store.ServerStore, sites store.SiteS
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to store blacklist entry")
 			return
+		}
+		// Keep a durable L7 history row so Firewall analytics still show the
+		// attack after Redis TTL removes the temporary block.
+		if event, ok := store.L7BlockEventFromTempPayload(payload); ok && l7BlockEvents != nil {
+			if err := l7BlockEvents.Record(r.Context(), event); err != nil {
+				log.Printf("[api] temporary_blacklist_added durable L7 event failed serverID=%d: %v", server.ID, err)
+			}
 		}
 		writeJSON(w, http.StatusCreated, created)
 	}
@@ -4312,6 +4731,106 @@ type l7TemporaryBlacklistUpdateEntry struct {
 	TTL         int64  `json:"ttl"`
 	TriggerRule string `json:"trigger_rule"`
 	SiteID      int64  `json:"site_id,omitempty"`
+}
+
+// flushTemporaryBlocks clears Temporary blocks for one edge (serverID > 0) or
+// every edge (serverID == 0). The Temporary blocks page merges L7 Redis entries
+// with the live L4 XDP block table, so flush must:
+//  1. clear live L4 blocks on each affected edge and drop their Redis mirror
+//  2. delete L7 temporary entries from Redis
+//  3. push the empty L7 list to each affected edge (including when serverId is omitted)
+func flushTemporaryBlocks(ctx context.Context, servers store.ServerStore, blacklist store.BlacklistStore, agentClient *AgentClient, serverID int64) error {
+	l7ServerIDs, err := temporaryBlockServerIDs(ctx, blacklist, serverID, false)
+	if err != nil {
+		return err
+	}
+	l4ServerIDs, err := temporaryBlockServerIDs(ctx, blacklist, serverID, true)
+	if err != nil {
+		return err
+	}
+
+	for _, id := range l4ServerIDs {
+		if agentClient != nil {
+			server, err := servers.GetView(ctx, id)
+			if err != nil {
+				if store.IsNotFound(err) {
+					continue
+				}
+				return fmt.Errorf("load server view: %w", err)
+			}
+			if err := agentClient.ClearL4Blacklist(ctx, server.IP, server.Token); err != nil {
+				return fmt.Errorf("clear live l4 blocks on %s: %w", server.Name, err)
+			}
+		}
+		if err := blacklist.ReplaceL4Temporary(ctx, id, nil); err != nil {
+			return fmt.Errorf("clear l4 temporary mirror: %w", err)
+		}
+	}
+
+	if err := blacklist.DeleteAll(ctx, serverID); err != nil {
+		return err
+	}
+
+	syncIDs := uniqueInt64s(append(append([]int64{}, l7ServerIDs...), l4ServerIDs...))
+	if serverID > 0 {
+		syncIDs = []int64{serverID}
+	}
+	for _, id := range syncIDs {
+		if err := callL7UpdateTemporaryBlacklist(ctx, servers, id, blacklist); err != nil {
+			return fmt.Errorf("sync temporary blacklist for server %d: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func temporaryBlockServerIDs(ctx context.Context, blacklist store.BlacklistStore, serverID int64, l4Only bool) ([]int64, error) {
+	seen := make(map[int64]struct{})
+	if l4Only {
+		live, err := blacklist.ListL4Temporary(ctx, serverID)
+		if err != nil {
+			return nil, err
+		}
+		for _, entry := range live {
+			if entry.ServerID > 0 && (serverID == 0 || entry.ServerID == serverID) {
+				seen[entry.ServerID] = struct{}{}
+			}
+		}
+	} else if serverID > 0 {
+		seen[serverID] = struct{}{}
+	} else {
+		payloads, err := blacklist.ListPayloadsByServer(ctx, 0)
+		if err != nil {
+			return nil, err
+		}
+		for _, payload := range payloads {
+			if payload.ServerID > 0 {
+				seen[payload.ServerID] = struct{}{}
+			}
+		}
+	}
+	out := make([]int64, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out, nil
+}
+
+func uniqueInt64s(ids []int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }
 
 // callL7UpdateTemporaryBlacklist loads all temporary blacklist payloads for the
@@ -5080,6 +5599,9 @@ func serverDetailHandler(
 					return
 				}
 				store.FillStompProtection(&payload)
+				store.NormalizeL4AdaptiveDefaults(&payload)
+				// Edge snapshot is panel-only; do not re-push raw firewall_config to Angelos.
+				payload.FirewallConfig = nil
 				if err := agentClient.PushL4(r.Context(), server.IP, server.Token, payload); err != nil {
 					var agentErr AgentResponseError
 					if errors.As(err, &agentErr) {

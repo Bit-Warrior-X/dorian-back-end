@@ -23,7 +23,14 @@ func handleServerSpartaLog(w http.ResponseWriter, r *http.Request, servers store
 		return
 	}
 
-	lines, err := remotesvc.TailServiceJournal(ctx, sshTargetFromView(view), "sparta", 80)
+	target := sshTargetFromView(view)
+	lines, err := remotesvc.TailSpartaLatestLog(ctx, target, 80)
+	if err != nil || len(lines) == 0 {
+		// Fall back to journal for edges that have not moved off systemd logging yet.
+		if journal, journalErr := remotesvc.TailServiceJournal(ctx, target, "sparta", 80); journalErr == nil && len(journal) > 0 {
+			lines, err = journal, nil
+		}
+	}
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"lines": []string{},

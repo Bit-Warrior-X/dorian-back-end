@@ -72,6 +72,8 @@ func (input SiteInput) Normalize() SiteInput {
 
 type SiteStore interface {
 	List(ctx context.Context) ([]Site, error)
+	// ListIDsByWafID returns site ids that currently use the given waf_rule row.
+	ListIDsByWafID(ctx context.Context, wafRuleID int64) ([]int64, error)
 	Count(ctx context.Context) (int64, error)
 	CountScoped(ctx context.Context, serverIDs []int64) (total int64, active int64, err error)
 	CountActive(ctx context.Context) (int64, error)
@@ -232,6 +234,27 @@ func (store *siteStore) List(ctx context.Context) ([]Site, error) {
 	}
 
 	return sites, nil
+}
+
+func (store *siteStore) ListIDsByWafID(ctx context.Context, wafRuleID int64) ([]int64, error) {
+	if wafRuleID <= 0 {
+		return nil, nil
+	}
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT id FROM sites WHERE waf_id = ? ORDER BY id ASC`, wafRuleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 func (store *siteStore) Count(ctx context.Context) (int64, error) {

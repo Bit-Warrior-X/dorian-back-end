@@ -42,6 +42,30 @@ func TestDashboardBucketSize(t *testing.T) {
 	}
 }
 
+func TestCoarsenAnalyticsSeriesCapsLongRanges(t *testing.T) {
+	start := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(7 * 24 * time.Hour)
+	points := make([]store.TrafficPoint, 0, 7*24*60)
+	for i := 0; i < 7*24*60; i++ {
+		points = append(points, store.TrafficPoint{
+			Timestamp: start.Add(time.Duration(i) * time.Minute).Format(time.RFC3339),
+			Traffic:   100,
+		})
+	}
+	got := coarsenTrafficRate(points, start, end)
+	// Truncation can add one edge bucket beyond the nominal max.
+	if len(got) > dashboardChartMaxPoints+1 {
+		t.Fatalf("points = %d, want ≤ %d", len(got), dashboardChartMaxPoints+1)
+	}
+	if len(got) < 100 {
+		t.Fatalf("points = %d, unexpectedly coarse", len(got))
+	}
+	short := coarsenTrafficRate(points[:60], start, start.Add(time.Hour))
+	if len(short) != 60 {
+		t.Fatalf("short range should stay raw, got %d", len(short))
+	}
+}
+
 func TestAverageBucketsKeepsPerMinuteRates(t *testing.T) {
 	start := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	at := func(min int) string { return start.Add(time.Duration(min) * time.Minute).Format(time.RFC3339) }

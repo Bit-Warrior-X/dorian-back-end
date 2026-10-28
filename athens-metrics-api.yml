@@ -1349,6 +1349,36 @@ components:
               description: NIC RX bits/s
             bandwidth_nic_tx:
               type: number
+            packets_nic_rx:
+              type: integer
+              description: Packets that arrived at the NIC in this bucket
+            pps_nic_rx:
+              type: number
+              description: NIC incoming packets/s (packets_nic_rx / seconds since previous sample)
+            packets_nic_dropped:
+              type: integer
+              description: Packets the NIC discarded before XDP (rx_discards_phy)
+            pps_nic_dropped:
+              type: number
+              description: NIC-level dropped packets/s
+            packets_xdp_rx:
+              type: integer
+              description: Packets the XDP program received
+            pps_xdp_rx:
+              type: number
+              description: XDP incoming packets/s
+            packets_xdp_blocked:
+              type: integer
+              description: Packets XDP dropped (rx_xdp_drop)
+            pps_xdp_blocked:
+              type: number
+              description: XDP blocked packets/s
+            packets_nic_tx:
+              type: integer
+              description: Packets sent by the NIC (tx_packets)
+            pps_nic_tx:
+              type: number
+              description: NIC outgoing packets/s
         - $ref: '#/components/schemas/L7Counters'
 
     SiteTrafficItem:

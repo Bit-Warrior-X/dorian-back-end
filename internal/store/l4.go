@@ -76,6 +76,27 @@ type L4Config struct {
 	GeoCountriesBlockMode    bool     `json:"geoCountriesBlockMode"`
 	TcpConnectionLimitCheck  bool     `json:"tcpConnectionLimitCheck"`
 	TcpConnectionLimitCnt    int      `json:"tcpConnectionLimitCnt"`
+
+	// Adaptive Sparta / Angelos fields (persisted in firewall_extra JSON).
+	PreferAdaptive       bool `json:"preferAdaptive"`
+	EnforceDropInvalid   bool `json:"enforceDropInvalid"`
+	DetectionLevel       int  `json:"detectionLevel"`
+	AlertHoldWindows     int  `json:"alertHoldWindows"`
+	QuietClearWindows    int  `json:"quietClearWindows"`
+	ConfirmWindows       int  `json:"confirmWindows"`
+	ExitWindows          int  `json:"exitWindows"`
+	CooldownSeconds       int  `json:"cooldownSeconds"`
+	EscalateAfterWindows int  `json:"escalateAfterWindows"`
+	BlockInitialSeconds  int  `json:"blockInitialSeconds"`
+	BlockMaxSeconds      int  `json:"blockMaxSeconds"`
+	BaselineK            int  `json:"baselineK"`
+	BaselineM            int  `json:"baselineM"`
+	LearningDays         int  `json:"learningDays"`
+	ServiceHttp3         bool `json:"serviceHttp3"`
+	ServiceDns           bool `json:"serviceDns"`
+	ServiceGreTunnels    bool `json:"serviceGreTunnels"`
+	// FirewallConfig is the last full edge snapshot (snake_case key→value).
+	FirewallConfig map[string]string `json:"firewallConfig,omitempty"`
 }
 
 type L4Store interface {
@@ -143,7 +164,7 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 			gre_valid, gre_threshold, gre_burst_pkt, gre_burst_count_per_sec,
 			gre_fixed_threshold, gre_fixed_check_duration, gre_protection_duration,
 			tcp_seg_check, geo_check, geo_db_ipv4_path, geo_db_location_path, geo_allow_countries, geo_countries_block_mode,
-			tcp_connection_limit_check, tcp_connection_limit_cnt
+			tcp_connection_limit_check, tcp_connection_limit_cnt, firewall_extra
 		FROM l4_ddos_defense
 		WHERE id = ?`, id)
 
@@ -156,6 +177,7 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 	var geoDbLocation sql.NullString
 	var geoAllow sql.NullString
 	var geoCountriesBlock sql.NullInt64
+	var firewallExtra sql.NullString
 	if err := row.Scan(
 		&cfg.ID,
 		&dev,
@@ -225,6 +247,7 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 		&geoCountriesBlock,
 		&cfg.TcpConnectionLimitCheck,
 		&cfg.TcpConnectionLimitCnt,
+		&firewallExtra,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return L4Config{}, errNotFound
@@ -240,12 +263,18 @@ func (store *l4Store) getByID(ctx context.Context, id int64) (L4Config, error) {
 	cfg.GeoDbLocationPath = nullStringValue(geoDbLocation)
 	cfg.GeoAllowCountries = splitCSV(nullStringValue(geoAllow))
 	cfg.GeoCountriesBlockMode = geoCountriesBlock.Valid && geoCountriesBlock.Int64 != 0
+	cfg.decodeFirewallExtra(nullStringValue(firewallExtra))
 
 	return cfg, nil
 }
 
 func (store *l4Store) update(ctx context.Context, cfg L4Config) error {
-	_, err := store.db.ExecContext(ctx, `
+	NormalizeL4AdaptiveDefaults(&cfg)
+	extra, err := cfg.encodeFirewallExtra()
+	if err != nil {
+		return err
+	}
+	_, err = store.db.ExecContext(ctx, `
 		UPDATE l4_ddos_defense SET
 			dev = ?, attach_mode = ?, sensitivity = ?, protection_mode = ?, black_ip_duration = ?,
 			syn_valid = ?, syn_threshold = ?, syn_burst_pkt = ?, syn_burst_count_per_sec = ?,
@@ -264,7 +293,7 @@ func (store *l4Store) update(ctx context.Context, cfg L4Config) error {
 			gre_valid = ?, gre_threshold = ?, gre_burst_pkt = ?, gre_burst_count_per_sec = ?,
 			gre_fixed_threshold = ?, gre_fixed_check_duration = ?, gre_protection_duration = ?,
 			tcp_seg_check = ?, geo_check = ?, geo_db_ipv4_path = ?, geo_db_location_path = ?, geo_allow_countries = ?, geo_countries_block_mode = ?,
-			tcp_connection_limit_check = ?, tcp_connection_limit_cnt = ?
+			tcp_connection_limit_check = ?, tcp_connection_limit_cnt = ?, firewall_extra = ?
 		WHERE id = ?`,
 		nullableServerString(cfg.Dev),
 		nullableServerString(cfg.AttachMode),
@@ -333,6 +362,7 @@ func (store *l4Store) update(ctx context.Context, cfg L4Config) error {
 		boolToInt(cfg.GeoCountriesBlockMode),
 		boolToInt(cfg.TcpConnectionLimitCheck),
 		cfg.TcpConnectionLimitCnt,
+		nullableServerString(extra),
 		cfg.ID,
 	)
 	return err

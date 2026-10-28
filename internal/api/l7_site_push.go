@@ -208,6 +208,37 @@ func siteWafRuleID(ctx context.Context, sites store.SiteStore, siteID int64) (in
 	return *site.WafID, nil
 }
 
+// syncWafRuleToAssignedSites pushes a WAF resource update to every site that
+// currently uses wafRuleID (and therefore to each site's assigned edges).
+// Used by /waf-rules/{id}/waf/* mutations, which previously only wrote the DB.
+func syncWafRuleToAssignedSites(
+	ctx context.Context,
+	sites store.SiteStore,
+	wafRuleID int64,
+	syncOne func(ctx context.Context, siteID int64) error,
+) error {
+	if wafRuleID <= 0 || syncOne == nil {
+		return nil
+	}
+	siteIDs, err := sites.ListIDsByWafID(ctx, wafRuleID)
+	if err != nil {
+		return fmt.Errorf("list sites for waf rule: %w", err)
+	}
+	if len(siteIDs) == 0 {
+		return nil
+	}
+	var failures []string
+	for _, siteID := range siteIDs {
+		if err := syncOne(ctx, siteID); err != nil {
+			failures = append(failures, fmt.Sprintf("site %d: %v", siteID, err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("edge sync failed for %d site(s): %s", len(failures), strings.Join(failures, "; "))
+	}
+	return nil
+}
+
 func callL7UpdateWhitelist(ctx context.Context, servers store.ServerStore, sites store.SiteStore, siteID int64, wafWhitelist store.WafWhitelistStore) error {
 	wafRuleID, err := siteWafRuleID(ctx, sites, siteID)
 	if err != nil {

@@ -71,14 +71,19 @@ type SecurityEventReport struct {
 type SecurityEventStore interface {
 	ListRecent(ctx context.Context, limit int, scope TrafficScope) ([]SecurityEvent, error)
 	// ListPeriods returns the newest attack windows, grouping reports that share a req_id.
-	ListPeriods(ctx context.Context, limit int, scope TrafficScope) ([]SecurityEventPeriod, error)
+	// When start and end are non-zero, only periods that overlap [start, end) are returned.
+	ListPeriods(ctx context.Context, limit int, scope TrafficScope, start, end time.Time) ([]SecurityEventPeriod, error)
 	// GetPeriod returns one attack window by its req_id.
 	GetPeriod(ctx context.Context, reqID string) (SecurityEventPeriod, error)
 	// Create records an event reported by an edge; serverID 0 stores no edge.
 	// occurredAt is the time the event happened and is stored as created_at.
 	Create(ctx context.Context, serverID int64, title, description string, occurredAt time.Time, report SecurityEventReport) error
 	// ListBlockedSources returns one row per source IP blocked under req_id.
-	ListBlockedSources(ctx context.Context, serverID int64, reqID string) ([]BlockedSource, error)
+	// limit caps the result (most recently blocked first). 0 uses 200.
+	ListBlockedSources(ctx context.Context, serverID int64, reqID string, limit int) ([]BlockedSource, error)
+	// ListBlockedSourcesPage returns a slice of blocked sources, optionally
+	// filtered by IP prefix/contains and whether the block is still active.
+	ListBlockedSourcesPage(ctx context.Context, serverID int64, reqID string, offset, limit int, match string, activeOnly bool) ([]BlockedSource, error)
 	// CountPeriodsStarted counts attack windows (same grouping as ListPeriods) that began in [start, end).
 	CountPeriodsStarted(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, error)
 }
@@ -110,10 +115,16 @@ func (store *securityEventStore) CountPeriodsStarted(ctx context.Context, start,
 	return total, nil
 }
 
-func (store *securityEventStore) ListBlockedSources(ctx context.Context, serverID int64, reqID string) ([]BlockedSource, error) {
+func (store *securityEventStore) ListBlockedSources(ctx context.Context, serverID int64, reqID string, limit int) ([]BlockedSource, error) {
 	reqID = strings.TrimSpace(reqID)
 	if reqID == "" {
 		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 500 {
+		limit = 500
 	}
 	query := `
 		SELECT e.source_ip,
@@ -127,7 +138,90 @@ func (store *securityEventStore) ListBlockedSources(ctx context.Context, serverI
 		query += ` AND e.server_id = ?`
 		args = append(args, serverID)
 	}
-	query += ` GROUP BY e.source_ip ORDER BY MAX(e.created_at) DESC`
+	query += ` GROUP BY e.source_ip ORDER BY MAX(e.created_at) DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []BlockedSource
+	for rows.Next() {
+		var item BlockedSource
+		var attackType, ttl sql.NullString
+		var first, last sql.NullTime
+		if err := rows.Scan(&item.IP, &attackType, &ttl, &first, &last, &item.Blocks); err != nil {
+			return nil, err
+		}
+		item.AttackType = attackType.String
+		item.TTL = ttl.String
+		item.FirstBlocked = first.Time.UTC()
+		item.LastBlockedAt = last.Time.UTC()
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func sanitizeSourceMatch(raw string) string {
+	var b strings.Builder
+	for _, r := range raw {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') || r == '.' || r == ':' {
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	if len(out) > 64 {
+		return out[:64]
+	}
+	return out
+}
+
+func (store *securityEventStore) ListBlockedSourcesPage(ctx context.Context, serverID int64, reqID string, offset, limit int, match string, activeOnly bool) ([]BlockedSource, error) {
+	reqID = strings.TrimSpace(reqID)
+	if reqID == "" {
+		return nil, nil
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 {
+		limit = 25
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	match = sanitizeSourceMatch(match)
+
+	query := `
+		SELECT source_ip, attack_type, ttl, first_at, last_at, blocks
+		FROM (
+			SELECT e.source_ip,
+				SUBSTRING_INDEX(GROUP_CONCAT(e.attack_type ORDER BY e.created_at DESC SEPARATOR '\n'), '\n', 1) AS attack_type,
+				SUBSTRING_INDEX(GROUP_CONCAT(e.ttl ORDER BY e.created_at DESC SEPARATOR '\n'), '\n', 1) AS ttl,
+				MIN(e.created_at) AS first_at,
+				MAX(e.created_at) AS last_at,
+				COUNT(*) AS blocks,
+				MAX(CAST(REPLACE(LOWER(e.ttl), 's', '') AS UNSIGNED)) AS ttl_seconds
+			FROM security_events e
+			WHERE e.req_id = ? AND e.command = 'report_block_ip' AND e.source_ip <> ''`
+	args := []any{reqID}
+	if serverID > 0 {
+		query += ` AND e.server_id = ?`
+		args = append(args, serverID)
+	}
+	if match != "" {
+		query += ` AND e.source_ip LIKE ?`
+		args = append(args, "%"+match+"%")
+	}
+	query += `
+			GROUP BY e.source_ip
+		) blocks`
+	if activeOnly {
+		query += ` WHERE last_at + INTERVAL IF(ttl_seconds > 0, ttl_seconds, 60) SECOND > UTC_TIMESTAMP()`
+	}
+	query += ` ORDER BY last_at DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+
 	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -238,7 +332,7 @@ type securityPeriodStats struct {
 	serverName string
 }
 
-func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, scope TrafficScope) ([]SecurityEventPeriod, error) {
+func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, scope TrafficScope, start, end time.Time) ([]SecurityEventPeriod, error) {
 	if limit <= 0 {
 		limit = 6
 	}
@@ -246,15 +340,38 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 	if limit > 5000 {
 		limit = 5000
 	}
+	useWindow := !start.IsZero() && !end.IsZero() && end.After(start)
 	// Prefer real attack windows (shared req_id). Orphan per-IP block rows without
 	// req_id (e.g. EVENT_IP_FRAG_MIDDLE_BLOCK) used to flood the newest-N list and
 	// hide ongoing floods from Overview / Alarms.
-	keyQuery, keyArgs := appendServerScope(`
+	var keyQuery string
+	var keyArgs []any
+	if useWindow {
+		// Look back a day so an attack already open at start keeps its real first report,
+		// then keep periods that overlap [start, end).
+		keyQuery, keyArgs = appendServerScope(`
+			SELECT period_key, last_at FROM (
+				SELECT IF(req_id = '', CONCAT('event:', id), req_id) AS period_key,
+				       MIN(created_at) AS started_at,
+				       MAX(created_at) AS last_at
+				FROM security_events
+				WHERE (req_id <> '' OR event_data IN ('attack_start', 'attack_stop'))
+				  AND created_at >= ? AND created_at < ?`, []any{start.Add(-24 * time.Hour), end}, scope)
+		keyQuery += `
+				GROUP BY period_key
+			) p
+			WHERE p.started_at < ? AND p.last_at >= ?
+			ORDER BY p.last_at DESC
+			LIMIT ?`
+		keyArgs = append(keyArgs, end, start, limit)
+	} else {
+		keyQuery, keyArgs = appendServerScope(`
 		SELECT IF(req_id = '', CONCAT('event:', id), req_id) AS period_key, MAX(created_at) AS last_at
 		FROM security_events
 		WHERE (req_id <> '' OR event_data IN ('attack_start', 'attack_stop'))`, nil, scope)
-	keyQuery += " GROUP BY period_key ORDER BY last_at DESC LIMIT ?"
-	keyArgs = append(keyArgs, limit)
+		keyQuery += " GROUP BY period_key ORDER BY last_at DESC LIMIT ?"
+		keyArgs = append(keyArgs, limit)
+	}
 	keyRows, err := store.db.QueryContext(ctx, keyQuery, keyArgs...)
 	if err != nil {
 		return nil, err
@@ -345,6 +462,10 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 		period := groupedSecurityPeriod(key, group, stats[key], ips[key], timeline[key])
 		period.ActiveIPCount = active[key]
 		period.Vectors = vectors[key]
+		if title := multiAttackPeriodTitle(period.Vectors); title != "" {
+			period.Title = title
+			period.AttackType = period.Vectors[0].Type
+		}
 		periods = append(periods, period)
 	}
 	return periods, nil
@@ -387,13 +508,106 @@ func (store *securityEventStore) periodVectors(ctx context.Context, reqIDs []str
 	defer rows.Close()
 	for rows.Next() {
 		var reqID string
-		var item PeriodVector
-		if err := rows.Scan(&reqID, &item.Type, &item.Count); err != nil {
+		var rawType string
+		var count int
+		if err := rows.Scan(&reqID, &rawType, &count); err != nil {
 			return nil, err
 		}
-		out[reqID] = append(out[reqID], item)
+		label := periodVectorLabel(rawType)
+		if label == "" {
+			label = strings.TrimSpace(rawType)
+		}
+		if label == "" {
+			continue
+		}
+		// Collapse duplicate raw types that map to the same label.
+		merged := false
+		for i := range out[reqID] {
+			if out[reqID][i].Type == label {
+				out[reqID][i].Count += count
+				merged = true
+				break
+			}
+		}
+		if !merged {
+			out[reqID] = append(out[reqID], PeriodVector{Type: label, Count: count})
+		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Protection-mode START events reveal vectors that never produced report_block_ip
+	// rows (common for RST alongside ACK in the same req_id).
+	protRows, err := store.db.QueryContext(ctx, `
+		SELECT req_id, event_data
+		FROM security_events
+		WHERE req_id IN (`+sqlPlaceholders(len(reqIDs))+`) AND command = 'report_protection'
+		  AND UPPER(event_data) LIKE '%START%'`, args...)
+	if err != nil {
+		return out, err
+	}
+	defer protRows.Close()
+	seen := map[string]map[string]struct{}{}
+	for reqID, vectors := range out {
+		seen[reqID] = map[string]struct{}{}
+		for _, item := range vectors {
+			seen[reqID][item.Type] = struct{}{}
+		}
+	}
+	for protRows.Next() {
+		var reqID, data string
+		if err := protRows.Scan(&reqID, &data); err != nil {
+			return nil, err
+		}
+		label := periodVectorLabel(data)
+		if label == "" {
+			continue
+		}
+		if seen[reqID] == nil {
+			seen[reqID] = map[string]struct{}{}
+		}
+		if _, ok := seen[reqID][label]; ok {
+			continue
+		}
+		seen[reqID][label] = struct{}{}
+		out[reqID] = append(out[reqID], PeriodVector{Type: label, Count: 0})
+	}
+	return out, protRows.Err()
+}
+
+func periodVectorLabel(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	tokens := map[string]bool{}
+	for _, token := range strings.FieldsFunc(strings.ToUpper(raw), func(r rune) bool {
+		return (r < 'A' || r > 'Z') && (r < '0' || r > '9')
+	}) {
+		tokens[token] = true
+	}
+	switch {
+	case tokens["SOCKET"], tokens["XMAS"], tokens["NULL"], tokens["FIN"]:
+		return "SOCKET"
+	case tokens["STOMP"], tokens["PSH"]:
+		return "STOMP"
+	case tokens["HANDSHAKE"]:
+		return "HANDSHAKE"
+	case tokens["SYN"]:
+		return "TCP SYN"
+	case tokens["RST"]:
+		return "TCP RST"
+	case tokens["ACK"]:
+		return "TCP ACK"
+	case tokens["UDP"]:
+		return "UDP"
+	case tokens["ICMP"]:
+		return "ICMP"
+	case tokens["GRE"]:
+		return "GRE"
+	default:
+		return ""
+	}
 }
 
 // periodActiveIPs counts sources whose latest block has not reached its TTL yet.
@@ -477,7 +691,19 @@ func (store *securityEventStore) GetPeriod(ctx context.Context, reqID string) (S
 	if len(members) == 0 {
 		return SecurityEventPeriod{}, errNotFound
 	}
-	return groupedSecurityPeriod(reqID, members, stats[reqID], ips[reqID], timeline[reqID]), nil
+	period := groupedSecurityPeriod(reqID, members, stats[reqID], ips[reqID], timeline[reqID])
+	vectors, err := store.periodVectors(ctx, []string{reqID})
+	if err != nil {
+		return SecurityEventPeriod{}, err
+	}
+	period.Vectors = vectors[reqID]
+	if title := multiAttackPeriodTitle(period.Vectors); title != "" {
+		period.Title = title
+	}
+	if active, activeErr := store.periodActiveIPs(ctx, []string{reqID}); activeErr == nil {
+		period.ActiveIPCount = active[reqID]
+	}
+	return period, nil
 }
 
 func (store *securityEventStore) periodStats(ctx context.Context, reqIDs []string) (map[string]securityPeriodStats, error) {
@@ -735,6 +961,9 @@ func attackPeriodTitle(attackType string) string {
 	if label == "" {
 		return ""
 	}
+	if mapped := periodVectorLabel(label); mapped != "" {
+		return mapped + " flood"
+	}
 	if strings.Contains(strings.ToLower(label), "attack") {
 		return label
 	}
@@ -742,6 +971,35 @@ func attackPeriodTitle(attackType string) string {
 		return strings.ToUpper(label) + " attack"
 	}
 	return label + " attack"
+}
+
+func multiAttackPeriodTitle(vectors []PeriodVector) string {
+	labels := make([]string, 0, len(vectors))
+	seen := map[string]struct{}{}
+	for _, item := range vectors {
+		label := strings.TrimSpace(item.Type)
+		if label == "" {
+			continue
+		}
+		if mapped := periodVectorLabel(label); mapped != "" {
+			label = mapped
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	switch len(labels) {
+	case 0:
+		return ""
+	case 1:
+		return labels[0] + " flood"
+	case 2:
+		return labels[0] + " + " + labels[1] + " flood"
+	default:
+		return strings.Join(labels[:len(labels)-1], ", ") + " + " + labels[len(labels)-1] + " flood"
+	}
 }
 
 func serverNames(events []SecurityEvent) string {

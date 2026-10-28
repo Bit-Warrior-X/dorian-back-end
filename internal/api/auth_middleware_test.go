@@ -25,6 +25,8 @@ func TestIsPublicAuthPath(t *testing.T) {
 		{http.MethodPost, "/report_xdp", true},
 		{http.MethodPost, "/api/report_edge_configure", true},
 		{http.MethodPost, "/report_edge_configure", true},
+		{http.MethodPost, "/api/report_cache_hit", true},
+		{http.MethodPost, "/report_cache_hit", true},
 		{http.MethodGet, "/api/get_blocklist_ips", true},
 		{http.MethodPost, "/auth/logout", false},
 		{http.MethodGet, "/dashboard/summary", false},

@@ -43,10 +43,17 @@ type L4TopIpRow struct {
 	AttackTypes []string `json:"attackTypes,omitempty"`
 }
 
+type L4AttackEventSummary struct {
+	Attempts int64 `json:"attempts"`
+	Sources  int64 `json:"sources"`
+	Edges    int64 `json:"edges"`
+}
+
 type L4AttackStatsStore interface {
 	SumTrafficTotals(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, int64, int64, error)
 	ListTrafficSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]L4TrafficPoint, error)
 	ListProtocolSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]L4ProtocolPoint, error)
+	SummarizeAttacks(ctx context.Context, start, end time.Time, scope TrafficScope) (L4AttackEventSummary, error)
 	ListRecentAttacks(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L4AttackRow, error)
 	ListTopAttackIPs(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L4TopIpRow, error)
 }
@@ -149,6 +156,22 @@ func (store *l4AttackStatsStore) ListProtocolSeries(ctx context.Context, start, 
 		return nil, err
 	}
 	return points, nil
+}
+
+func (store *l4AttackStatsStore) SummarizeAttacks(ctx context.Context, start, end time.Time, scope TrafficScope) (L4AttackEventSummary, error) {
+	query := `
+		SELECT COUNT(*),
+		       COUNT(DISTINCT a.source_ip),
+		       COUNT(DISTINCT a.server_id)
+		FROM l4_live_attack a
+		WHERE a.created_at >= ? AND a.created_at <= ?`
+	args := []any{start, end}
+	query, args = appendServerScopePrefixed(query, args, scope, "a")
+	var out L4AttackEventSummary
+	if err := store.db.QueryRowContext(ctx, query, args...).Scan(&out.Attempts, &out.Sources, &out.Edges); err != nil {
+		return L4AttackEventSummary{}, err
+	}
+	return out, nil
 }
 
 func (store *l4AttackStatsStore) ListRecentAttacks(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L4AttackRow, error) {

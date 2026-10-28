@@ -89,6 +89,8 @@ func wafRulesHandler(wafRules store.WafRuleStore) http.HandlerFunc {
 }
 
 func wafRuleDetailHandler(
+	servers store.ServerStore,
+	sites store.SiteStore,
 	wafRules store.WafRuleStore,
 	wafWhitelist store.WafWhitelistStore,
 	wafBlacklist store.WafBlacklistStore,
@@ -99,7 +101,30 @@ func wafRuleDetailHandler(
 	wafSecond store.WafSecondStore,
 	wafResponse store.WafResponseStore,
 	wafUserAgent store.WafUserAgentStore,
+	upstreamServers store.UpstreamServerStore,
+	cacheRules store.CacheRuleStore,
+	compressSettings store.CompressStore,
+	siteListeningPorts store.SiteListeningPortStore,
 ) http.HandlerFunc {
+	edge := predefinedWafEdge{
+		servers: servers,
+		sites:   sites,
+		l7: siteL7Stores{
+			wafWhitelist:       wafWhitelist,
+			wafBlacklist:       wafBlacklist,
+			wafGeo:             wafGeo,
+			wafAntiCc:          wafAntiCc,
+			wafAntiHeader:      wafAntiHeader,
+			wafInterval:        wafInterval,
+			wafSecond:          wafSecond,
+			wafResponse:        wafResponse,
+			wafUserAgent:       wafUserAgent,
+			upstreamServers:    upstreamServers,
+			cacheRules:         cacheRules,
+			compressSettings:   compressSettings,
+			siteListeningPorts: siteListeningPorts,
+		},
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if id, ok := parseIDWithSuffix(path, "/waf-rules/", "/duplicate"); ok {
@@ -132,23 +157,23 @@ func wafRuleDetailHandler(
 		if strings.Contains(path, "/waf/") {
 			switch {
 			case strings.Contains(path, "/waf/whitelist"):
-				handlePredefinedWafWhitelist(w, r, wafRules, wafWhitelist)
+				handlePredefinedWafWhitelist(w, r, wafRules, wafWhitelist, edge)
 			case strings.Contains(path, "/waf/blacklist"):
-				handlePredefinedWafBlacklist(w, r, wafRules, wafBlacklist)
+				handlePredefinedWafBlacklist(w, r, wafRules, wafBlacklist, edge)
 			case strings.Contains(path, "/waf/geolocation"):
-				handlePredefinedWafGeo(w, r, wafRules, wafGeo)
+				handlePredefinedWafGeo(w, r, wafRules, wafGeo, edge)
 			case strings.Contains(path, "/waf/anti-cc"):
-				handlePredefinedWafAntiCc(w, r, wafRules, wafAntiCc)
+				handlePredefinedWafAntiCc(w, r, wafRules, wafAntiCc, edge)
 			case strings.Contains(path, "/waf/anti-header"):
-				handlePredefinedWafAntiHeader(w, r, wafRules, wafAntiHeader)
+				handlePredefinedWafAntiHeader(w, r, wafRules, wafAntiHeader, edge)
 			case strings.Contains(path, "/waf/interval-freq-limit"):
-				handlePredefinedWafInterval(w, r, wafRules, wafInterval)
+				handlePredefinedWafInterval(w, r, wafRules, wafInterval, edge)
 			case strings.Contains(path, "/waf/second-freq-limit"):
-				handlePredefinedWafSecond(w, r, wafRules, wafSecond)
+				handlePredefinedWafSecond(w, r, wafRules, wafSecond, edge)
 			case strings.Contains(path, "/waf/response-freq"):
-				handlePredefinedWafResponse(w, r, wafRules, wafResponse)
+				handlePredefinedWafResponse(w, r, wafRules, wafResponse, edge)
 			case strings.Contains(path, "/waf/user-agent"):
-				handlePredefinedWafUserAgent(w, r, wafRules, wafUserAgent)
+				handlePredefinedWafUserAgent(w, r, wafRules, wafUserAgent, edge)
 			default:
 				writeError(w, http.StatusNotFound, "not found")
 			}

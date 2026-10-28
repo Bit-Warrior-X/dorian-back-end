@@ -34,6 +34,14 @@ type TrafficPoint struct {
 	Traffic   int64  `json:"traffic"`
 }
 
+type PacketTotals struct {
+	PacketsNicRx      int64 `json:"packetsNicRx"`
+	PacketsNicTx      int64 `json:"packetsNicTx"`
+	PacketsNicDropped int64 `json:"packetsNicDropped"`
+	PacketsXdpRx      int64 `json:"packetsXdpRx"`
+	PacketsXdpBlocked int64 `json:"packetsXdpBlocked"`
+}
+
 type IpCountPoint struct {
 	Timestamp string `json:"timestamp"`
 	Count     int64  `json:"count"`
@@ -167,6 +175,17 @@ type ServerTrafficStatsStore interface {
 	SumSecurityTotals(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, int64, int64, int64, error)
 	LatestNicRxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error)
 	LatestNicTxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error)
+	ListPpsNicRxAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error)
+	ListPpsNicTxAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error)
+	ListPpsNicDroppedAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error)
+	ListPpsXdpRxAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error)
+	ListPpsXdpBlockedAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error)
+	SumPacketTotals(ctx context.Context, start, end time.Time, scope TrafficScope) (PacketTotals, error)
+	LatestPpsNicRx(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error)
+	LatestPpsNicTx(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error)
+	LatestPpsNicDropped(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error)
+	LatestPpsXdpRx(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error)
+	LatestPpsXdpBlocked(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error)
 	LatestL7RxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error)
 	LatestL7TxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error)
 	SumBlockedRequests(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, error)
@@ -182,6 +201,25 @@ type ServerTrafficStatsStore interface {
 	ListCountryRequests(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CountryRequestRow, error)
 	ListCountryRequestsByRequests(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]CountryRequestRow, error)
 	ListCountryRequestsByBlocked(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]CountryRequestRow, error)
+
+	SumCacheSummary(ctx context.Context, start, end time.Time, scope TrafficScope) (CacheSummary, error)
+	ListCacheStatusSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CacheStatusPoint, error)
+	ListCacheBandwidthSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CacheBandwidthPoint, error)
+	ListCacheStatusSummary(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CacheStatusRow, error)
+	ListCacheBySite(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CacheSiteRow, error)
+	ReplaceCacheHitReport(ctx context.Context, serverID int64, input CacheHitReportInput) error
+	ListCacheContentTypes(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CacheContentTypeRow, error)
+	ListCacheTopMissURLs(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]CacheMissURLRow, error)
+
+	ReplaceSitePerformanceBucket(ctx context.Context, serverID int64, bucket time.Time, rows []SitePerformanceRow) error
+	SumPerformanceSummary(ctx context.Context, start, end time.Time, scope TrafficScope) (PerformanceSummary, error)
+	ListPerformanceLatencySeries(ctx context.Context, start, end time.Time, scope TrafficScope, kind string, bucketSize time.Duration) ([]PerformanceLatencyPoint, error)
+	ListPerformanceOriginStatusSeries(ctx context.Context, start, end time.Time, scope TrafficScope) ([]PerformanceOriginStatusPoint, error)
+	ListPerformanceByEdge(ctx context.Context, start, end time.Time, scope TrafficScope) ([]PerformanceEdgeRow, error)
+	ListPerformanceByOrigin(ctx context.Context, start, end time.Time, scope TrafficScope) ([]PerformanceOriginRow, error)
+
+	ReplaceBlockReasonBucket(ctx context.Context, serverID int64, bucket time.Time, rows []BlockReasonBucketRow) error
+	ListBlockReasonRuleTypes(ctx context.Context, start, end time.Time, scope TrafficScope) ([]BlockReasonRuleRow, error)
 }
 
 type serverTrafficStatsStore struct {
@@ -1468,7 +1506,7 @@ func (store *serverTrafficStatsStore) LatestNicRxBandwidth(ctx context.Context, 
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&bucket, &bandwidthNicRx); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, time.Time{}, errors.New("no data found")
+			return 0, time.Time{}, nil
 		}
 		return 0, time.Time{}, errors.New("failed to load latest nic rx bandwidth")
 	}
@@ -1492,7 +1530,7 @@ func (store *serverTrafficStatsStore) LatestL7RxBandwidth(ctx context.Context, s
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&bucket, &bandwidthL7Rx); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, time.Time{}, errors.New("no data found")
+			return 0, time.Time{}, nil
 		}
 		return 0, time.Time{}, errors.New("failed to load latest l7 rx bandwidth")
 	}
@@ -1516,7 +1554,7 @@ func (store *serverTrafficStatsStore) LatestL7TxBandwidth(ctx context.Context, s
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&bucket, &bandwidthL7Tx); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, time.Time{}, errors.New("failed to load latest l7 tx bandwidth")
+			return 0, time.Time{}, nil
 		}
 		return 0, time.Time{}, errors.New("failed to load latest l7 tx bandwidth")
 	}
@@ -1540,9 +1578,121 @@ func (store *serverTrafficStatsStore) LatestNicTxBandwidth(ctx context.Context, 
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&bucket, &bandwidthNicTx); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return 0, time.Time{}, errors.New("failed to load latest nic tx bandwidth")
+			return 0, time.Time{}, nil
 		}
 		return 0, time.Time{}, errors.New("failed to load latest nic tx bandwidth")
 	}
 	return bandwidthNicTx, bucket, nil
+}
+
+func (store *serverTrafficStatsStore) listNicRateAggregate(ctx context.Context, start, end time.Time, scope TrafficScope, column string) ([]TrafficPoint, error) {
+	query := `
+		SELECT bucket_ts, COALESCE(SUM(` + column + `), 0)
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
+	query += `
+		GROUP BY bucket_ts
+		ORDER BY bucket_ts`
+	rows, err := store.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var points []TrafficPoint
+	for rows.Next() {
+		var item TrafficPoint
+		var bucket time.Time
+		var value float64
+		if err := rows.Scan(&bucket, &value); err != nil {
+			return nil, err
+		}
+		item.Timestamp = bucket.Format(time.RFC3339)
+		item.Traffic = int64(value + 0.5)
+		points = append(points, item)
+	}
+	return points, rows.Err()
+}
+
+func (store *serverTrafficStatsStore) latestNicRate(ctx context.Context, start, end time.Time, scope TrafficScope, column string) (float64, time.Time, error) {
+	query := `
+		SELECT bucket_ts, COALESCE(SUM(` + column + `), 0)
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
+	query += `
+		GROUP BY bucket_ts
+		ORDER BY bucket_ts DESC
+		LIMIT 1`
+	var bucket time.Time
+	var value float64
+	err := store.db.QueryRowContext(ctx, query, args...).Scan(&bucket, &value)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, time.Time{}, nil
+		}
+		return 0, time.Time{}, err
+	}
+	return value, bucket, nil
+}
+
+func (store *serverTrafficStatsStore) ListPpsNicRxAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
+	return store.listNicRateAggregate(ctx, start, end, scope, "pps_nic_rx")
+}
+func (store *serverTrafficStatsStore) ListPpsNicTxAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
+	return store.listNicRateAggregate(ctx, start, end, scope, "pps_nic_tx")
+}
+func (store *serverTrafficStatsStore) ListPpsNicDroppedAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
+	return store.listNicRateAggregate(ctx, start, end, scope, "pps_nic_dropped")
+}
+func (store *serverTrafficStatsStore) ListPpsXdpRxAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
+	return store.listNicRateAggregate(ctx, start, end, scope, "pps_xdp_rx")
+}
+func (store *serverTrafficStatsStore) ListPpsXdpBlockedAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
+	return store.listNicRateAggregate(ctx, start, end, scope, "pps_xdp_blocked")
+}
+
+func (store *serverTrafficStatsStore) LatestPpsNicRx(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error) {
+	return store.latestNicRate(ctx, start, end, scope, "pps_nic_rx")
+}
+func (store *serverTrafficStatsStore) LatestPpsNicTx(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error) {
+	return store.latestNicRate(ctx, start, end, scope, "pps_nic_tx")
+}
+func (store *serverTrafficStatsStore) LatestPpsNicDropped(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error) {
+	return store.latestNicRate(ctx, start, end, scope, "pps_nic_dropped")
+}
+func (store *serverTrafficStatsStore) LatestPpsXdpRx(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error) {
+	return store.latestNicRate(ctx, start, end, scope, "pps_xdp_rx")
+}
+func (store *serverTrafficStatsStore) LatestPpsXdpBlocked(ctx context.Context, start, end time.Time, scope TrafficScope) (float64, time.Time, error) {
+	return store.latestNicRate(ctx, start, end, scope, "pps_xdp_blocked")
+}
+
+func (store *serverTrafficStatsStore) SumPacketTotals(ctx context.Context, start, end time.Time, scope TrafficScope) (PacketTotals, error) {
+	query := `
+		SELECT
+			COALESCE(SUM(packets_nic_rx), 0),
+			COALESCE(SUM(packets_nic_tx), 0),
+			COALESCE(SUM(packets_nic_dropped), 0),
+			COALESCE(SUM(packets_xdp_rx), 0),
+			COALESCE(SUM(packets_xdp_blocked), 0)
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
+	var out PacketTotals
+	err := store.db.QueryRowContext(ctx, query, args...).Scan(
+		&out.PacketsNicRx,
+		&out.PacketsNicTx,
+		&out.PacketsNicDropped,
+		&out.PacketsXdpRx,
+		&out.PacketsXdpBlocked,
+	)
+	if err != nil {
+		return PacketTotals{}, err
+	}
+	return out, nil
 }

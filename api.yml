@@ -606,6 +606,18 @@ paths:
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/ServerIdQuery"
+        - name: start
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Inclusive window start (RFC3339). Requires end.
+        - name: end
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Exclusive window end (RFC3339). Requires start.
       responses:
         "200":
           description: Security events

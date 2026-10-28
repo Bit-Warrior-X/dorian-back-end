@@ -35,6 +35,7 @@ type ipRequestStatsClientConfig struct {
 	serverTrafficPath   string
 	siteTrafficPath     string
 	domainRequestPath   string
+	blockReasonPath     string
 	interval            time.Duration
 }
 
@@ -450,6 +451,16 @@ type serverTrafficStatsPayload struct {
 	TrafficL7Tx         float64 `json:"traffic_l7_tx"`
 	BandwidthNicRx      float64 `json:"bandwidth_nic_rx"`
 	BandwidthNicTx      float64 `json:"bandwidth_nic_tx"`
+	PacketsNicRx        float64 `json:"packets_nic_rx"`
+	PacketsNicTx        float64 `json:"packets_nic_tx"`
+	PacketsNicDropped   float64 `json:"packets_nic_dropped"`
+	PacketsXdpRx        float64 `json:"packets_xdp_rx"`
+	PacketsXdpBlocked   float64 `json:"packets_xdp_blocked"`
+	PpsNicRx            float64 `json:"pps_nic_rx"`
+	PpsNicTx            float64 `json:"pps_nic_tx"`
+	PpsNicDropped       float64 `json:"pps_nic_dropped"`
+	PpsXdpRx            float64 `json:"pps_xdp_rx"`
+	PpsXdpBlocked       float64 `json:"pps_xdp_blocked"`
 	RequestCount        float64 `json:"request_count"`
 	ResponseCount       float64 `json:"response_count"`
 	BlockedRequestCount float64 `json:"blocked_request_count"`
@@ -492,49 +503,60 @@ type serverTrafficStatsPayload struct {
 
 // siteTrafficStatsEntry is per-site L7 aggregates (no NIC fields).
 type siteTrafficStatsEntry struct {
-	SiteID              int64   `json:"site_id"`
-	TrafficL7Rx         float64 `json:"traffic_l7_rx"`
-	TrafficL7Tx         float64 `json:"traffic_l7_tx"`
-	BandwidthL7Rx       float64 `json:"bandwidth_l7_rx"`
-	BandwidthL7Tx       float64 `json:"bandwidth_l7_tx"`
-	RequestCount        float64 `json:"request_count"`
-	ResponseCount       float64 `json:"response_count"`
-	BlockedRequestCount float64 `json:"blocked_request_count"`
-	IPCount             float64 `json:"ip_count"`
-	BlockedIPCount      float64 `json:"blocked_ip_count"`
-	Code200             float64 `json:"code200"`
-	Code206             float64 `json:"code206"`
-	Code301             float64 `json:"code301"`
-	Code302             float64 `json:"code302"`
-	Code400             float64 `json:"code400"`
-	Code403             float64 `json:"code403"`
-	Code404             float64 `json:"code404"`
-	Code444             float64 `json:"code444"`
-	Code499             float64 `json:"code499"`
-	Code500             float64 `json:"code500"`
-	Code501             float64 `json:"code501"`
-	Code502             float64 `json:"code502"`
-	Code503             float64 `json:"code503"`
-	Code504             float64 `json:"code504"`
-	Code904             float64 `json:"code904"`
-	Code929             float64 `json:"code929"`
-	Code978             float64 `json:"code978"`
-	GetCount            float64 `json:"get_count"`
-	PostCount           float64 `json:"post_count"`
-	DeleteCount         float64 `json:"delete_count"`
-	PutCount            float64 `json:"put_count"`
-	HeadCount           float64 `json:"head_count"`
-	PatchCount          float64 `json:"patch_count"`
-	OptionsCount        float64 `json:"options_count"`
-	OthersCount         float64 `json:"others_count"`
-	HTTP10Count         float64 `json:"http1_0_count"`
-	HTTP11Count         float64 `json:"http1_1_count"`
-	HTTP2Count          float64 `json:"http2_count"`
-	HTTP3Count          float64 `json:"http3_count"`
-	CacheHitCount       float64 `json:"cache_hit_count"`
-	CacheMissCount      float64 `json:"cache_miss_count"`
-	CacheBypassCount    float64 `json:"cache_bypass_count"`
-	CacheHitRatio       float64 `json:"cache_hit_ratio"`
+	SiteID              int64     `json:"site_id"`
+	TrafficL7Rx         float64   `json:"traffic_l7_rx"`
+	TrafficL7Tx         float64   `json:"traffic_l7_tx"`
+	BandwidthL7Rx       float64   `json:"bandwidth_l7_rx"`
+	BandwidthL7Tx       float64   `json:"bandwidth_l7_tx"`
+	RequestCount        float64   `json:"request_count"`
+	ResponseCount       float64   `json:"response_count"`
+	BlockedRequestCount float64   `json:"blocked_request_count"`
+	IPCount             float64   `json:"ip_count"`
+	BlockedIPCount      float64   `json:"blocked_ip_count"`
+	Code200             float64   `json:"code200"`
+	Code206             float64   `json:"code206"`
+	Code301             float64   `json:"code301"`
+	Code302             float64   `json:"code302"`
+	Code400             float64   `json:"code400"`
+	Code403             float64   `json:"code403"`
+	Code404             float64   `json:"code404"`
+	Code444             float64   `json:"code444"`
+	Code499             float64   `json:"code499"`
+	Code500             float64   `json:"code500"`
+	Code501             float64   `json:"code501"`
+	Code502             float64   `json:"code502"`
+	Code503             float64   `json:"code503"`
+	Code504             float64   `json:"code504"`
+	Code904             float64   `json:"code904"`
+	Code929             float64   `json:"code929"`
+	Code978             float64   `json:"code978"`
+	GetCount            float64   `json:"get_count"`
+	PostCount           float64   `json:"post_count"`
+	DeleteCount         float64   `json:"delete_count"`
+	PutCount            float64   `json:"put_count"`
+	HeadCount           float64   `json:"head_count"`
+	PatchCount          float64   `json:"patch_count"`
+	OptionsCount        float64   `json:"options_count"`
+	OthersCount         float64   `json:"others_count"`
+	HTTP10Count         float64   `json:"http1_0_count"`
+	HTTP11Count         float64   `json:"http1_1_count"`
+	HTTP2Count          float64   `json:"http2_count"`
+	HTTP3Count          float64   `json:"http3_count"`
+	CacheHitCount       float64   `json:"cache_hit_count"`
+	CacheMissCount      float64   `json:"cache_miss_count"`
+	CacheBypassCount    float64   `json:"cache_bypass_count"`
+	CacheHitRatio       float64   `json:"cache_hit_ratio"`
+	OriginRequestCount  float64   `json:"origin_request_count"`
+	OriginCode2xx       float64   `json:"origin_code2xx"`
+	OriginCode3xx       float64   `json:"origin_code3xx"`
+	OriginCode4xx       float64   `json:"origin_code4xx"`
+	OriginCode5xx       float64   `json:"origin_code5xx"`
+	OriginTimeoutCount  float64   `json:"origin_timeout_count"`
+	OriginErrorCount    float64   `json:"origin_error_count"`
+	EdgeLatencyHist     []float64 `json:"edge_latency_hist"`
+	EdgeLatencySumMs    float64   `json:"edge_latency_sum_ms"`
+	OriginLatencyHist   []float64 `json:"origin_latency_hist"`
+	OriginLatencySumMs  float64   `json:"origin_latency_sum_ms"`
 }
 
 // siteTrafficStatsList accepts:
@@ -588,6 +610,53 @@ type domainRequestStatsEntry struct {
 	TrafficL7Tx   float64 `json:"traffic_l7_tx"`
 	BandwidthL7Rx float64 `json:"bandwidth_l7_rx"`
 	BandwidthL7Tx float64 `json:"bandwidth_l7_tx"`
+}
+
+type blockReasonStatsEntry struct {
+	SiteID       int64   `json:"site_id"`
+	RuleType     string  `json:"rule_type"`
+	RuleID       string  `json:"rule_id"`
+	RequestCount float64 `json:"request_count"`
+	IPCount      float64 `json:"ip_count"`
+}
+
+// blockReasonStatsList accepts array or map-of-entries shapes from Athens.
+type blockReasonStatsList []blockReasonStatsEntry
+
+func (l *blockReasonStatsList) UnmarshalJSON(data []byte) error {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	switch data[0] {
+	case '[':
+		var arr []blockReasonStatsEntry
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		*l = arr
+		return nil
+	case '{':
+		var obj map[string]blockReasonStatsEntry
+		if err := json.Unmarshal(data, &obj); err != nil {
+			return err
+		}
+		out := make([]blockReasonStatsEntry, 0, len(obj))
+		for key, entry := range obj {
+			if strings.TrimSpace(entry.RuleType) == "" {
+				entry.RuleType = key
+			}
+			out = append(out, entry)
+		}
+		*l = out
+		return nil
+	}
+	return nil
+}
+
+type blockReasonStatsBucketResponse struct {
+	Timestamp        int64                `json:"timestamp"`
+	BlockReasonStats blockReasonStatsList `json:"block_reason_stats"`
 }
 
 // domainRequestStatsList accepts:
@@ -781,6 +850,9 @@ func collectIPRequestStatsOnce(ctx context.Context, dbConn *sql.DB, servers stor
 				if err := insertSiteTrafficBucket(ctx, dbConn, server.ID, ts, respSite); err != nil {
 					log.Printf("ip request stats collector: insert site traffic bucket %d for server %d (%s): %v", ts.Unix(), server.ID, serverIP, err)
 				}
+				if err := insertSitePerformanceBucket(ctx, dbConn, server.ID, ts, respSite); err != nil {
+					log.Printf("ip request stats collector: insert site performance bucket %d for server %d (%s): %v", ts.Unix(), server.ID, serverIP, err)
+				}
 			}
 
 			respDomain, err := fetchDomainRequestBucket(ctx, httpClient, serverIP, ts.Unix(), clientCfg)
@@ -789,6 +861,15 @@ func collectIPRequestStatsOnce(ctx context.Context, dbConn *sql.DB, servers stor
 			} else if len(respDomain.DomainRequestStats) > 0 {
 				if err := insertDomainRequestBucket(ctx, dbConn, server.ID, ts, respDomain); err != nil {
 					log.Printf("ip request stats collector: insert domain request bucket %d for server %d (%s): %v", ts.Unix(), server.ID, serverIP, err)
+				}
+			}
+
+			respBlockReason, err := fetchBlockReasonBucket(ctx, httpClient, serverIP, ts.Unix(), clientCfg)
+			if err != nil {
+				log.Printf("ip request stats collector: fetch block reason bucket %d for server %d (%s): %v", ts.Unix(), server.ID, serverIP, err)
+			} else if len(respBlockReason.BlockReasonStats) > 0 {
+				if err := insertBlockReasonBucket(ctx, dbConn, server.ID, ts, respBlockReason); err != nil {
+					log.Printf("ip request stats collector: insert block reason bucket %d for server %d (%s): %v", ts.Unix(), server.ID, serverIP, err)
 				}
 			}
 
@@ -1415,6 +1496,50 @@ func fetchDomainRequestBucket(ctx context.Context, httpClient *http.Client, serv
 	return parsed, nil
 }
 
+func fetchBlockReasonBucket(ctx context.Context, httpClient *http.Client, serverIP string, timestamp int64, clientCfg ipRequestStatsClientConfig) (blockReasonStatsBucketResponse, error) {
+	targetHost := net.JoinHostPort(serverIP, clientCfg.port)
+	url := fmt.Sprintf("http://%s%s?timestamp=%d", targetHost, clientCfg.blockReasonPath, timestamp)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return blockReasonStatsBucketResponse{}, fmt.Errorf("build block reason bucket request: %w", err)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return blockReasonStatsBucketResponse{}, fmt.Errorf("block reason bucket request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return blockReasonStatsBucketResponse{}, fmt.Errorf("block reason bucket request returned status %d", resp.StatusCode)
+	}
+	var parsed blockReasonStatsBucketResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return blockReasonStatsBucketResponse{}, fmt.Errorf("decode block reason bucket response: %w", err)
+	}
+	if parsed.Timestamp != 0 && parsed.Timestamp != timestamp {
+		log.Printf("ip request stats collector: block reason bucket timestamp mismatch, requested %d got %d", timestamp, parsed.Timestamp)
+	}
+	return parsed, nil
+}
+
+func insertBlockReasonBucket(ctx context.Context, dbConn *sql.DB, serverID int64, bucket time.Time, data blockReasonStatsBucketResponse) error {
+	rows := make([]store.BlockReasonBucketRow, 0, len(data.BlockReasonStats))
+	for _, p := range data.BlockReasonStats {
+		ruleType := strings.TrimSpace(p.RuleType)
+		count := int64(math.Round(p.RequestCount))
+		if ruleType == "" || count <= 0 {
+			continue
+		}
+		rows = append(rows, store.BlockReasonBucketRow{
+			SiteID:       p.SiteID,
+			RuleType:     ruleType,
+			RuleID:       strings.TrimSpace(p.RuleID),
+			RequestCount: count,
+			IPCount:      int64(math.Round(p.IPCount)),
+		})
+	}
+	return store.NewServerTrafficStatsStore(dbConn).ReplaceBlockReasonBucket(ctx, serverID, bucket, rows)
+}
+
 func collectServerTrafficSnapshot(ctx context.Context, dbConn *sql.DB, httpClient *http.Client, clientCfg ipRequestStatsClientConfig, serverID int64, serverIP string) error {
 	select {
 	case <-ctx.Done():
@@ -1843,6 +1968,38 @@ func insertSiteTrafficBucket(ctx context.Context, dbConn *sql.DB, serverID int64
 	return nil
 }
 
+func insertSitePerformanceBucket(ctx context.Context, dbConn *sql.DB, serverID int64, bucket time.Time, data siteTrafficStatsBucketResponse) error {
+	if len(data.SiteTrafficStats) == 0 {
+		return nil
+	}
+
+	rows := make([]store.SitePerformanceRow, 0, len(data.SiteTrafficStats))
+	for _, p := range data.SiteTrafficStats {
+		if p.SiteID <= 0 {
+			continue
+		}
+		rows = append(rows, store.SitePerformanceRow{
+			SiteID:             p.SiteID,
+			RequestCount:       int64(math.Round(p.RequestCount)),
+			OriginRequestCount: int64(math.Round(p.OriginRequestCount)),
+			OriginCode2xx:      int64(math.Round(p.OriginCode2xx)),
+			OriginCode3xx:      int64(math.Round(p.OriginCode3xx)),
+			OriginCode4xx:      int64(math.Round(p.OriginCode4xx)),
+			OriginCode5xx:      int64(math.Round(p.OriginCode5xx)),
+			OriginTimeoutCount: int64(math.Round(p.OriginTimeoutCount)),
+			OriginErrorCount:   int64(math.Round(p.OriginErrorCount)),
+			EdgeLatencyHist:    store.ParseLatencyHist(p.EdgeLatencyHist),
+			EdgeLatencySumMs:   p.EdgeLatencySumMs,
+			OriginLatencyHist:  store.ParseLatencyHist(p.OriginLatencyHist),
+			OriginLatencySumMs: p.OriginLatencySumMs,
+		})
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	return store.NewServerTrafficStatsStore(dbConn).ReplaceSitePerformanceBucket(ctx, serverID, bucket, rows)
+}
+
 // resolveCacheHitRatio prefers hit/(hit+miss) per Athens OpenAPI; falls back to reported ratio.
 func resolveCacheHitRatio(hit, miss int64, reported float64) float64 {
 	denom := hit + miss
@@ -1941,6 +2098,16 @@ func insertServerTrafficSnapshot(
 			bandwidth_nic_tx,
 			bandwidth_l7_rx,
 			bandwidth_l7_tx,
+			packets_nic_rx,
+			packets_nic_tx,
+			packets_nic_dropped,
+			packets_xdp_rx,
+			packets_xdp_blocked,
+			pps_nic_rx,
+			pps_nic_tx,
+			pps_nic_dropped,
+			pps_xdp_rx,
+			pps_xdp_blocked,
 			request_count,
 			response_count,
 			blocked_request_count,
@@ -1975,7 +2142,59 @@ func insertServerTrafficSnapshot(
 			http2_count,
 			http3_count
 		) VALUES (
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?,
+			?
 		)
 		ON DUPLICATE KEY UPDATE
 			traffic_nic_rx = VALUES(traffic_nic_rx),
@@ -1986,6 +2205,16 @@ func insertServerTrafficSnapshot(
 			bandwidth_nic_tx = VALUES(bandwidth_nic_tx),
 			bandwidth_l7_rx = VALUES(bandwidth_l7_rx),
 			bandwidth_l7_tx = VALUES(bandwidth_l7_tx),
+			packets_nic_rx = VALUES(packets_nic_rx),
+			packets_nic_tx = VALUES(packets_nic_tx),
+			packets_nic_dropped = VALUES(packets_nic_dropped),
+			packets_xdp_rx = VALUES(packets_xdp_rx),
+			packets_xdp_blocked = VALUES(packets_xdp_blocked),
+			pps_nic_rx = VALUES(pps_nic_rx),
+			pps_nic_tx = VALUES(pps_nic_tx),
+			pps_nic_dropped = VALUES(pps_nic_dropped),
+			pps_xdp_rx = VALUES(pps_xdp_rx),
+			pps_xdp_blocked = VALUES(pps_xdp_blocked),
 			request_count = VALUES(request_count),
 			response_count = VALUES(response_count),
 			blocked_request_count = VALUES(blocked_request_count),
@@ -2034,6 +2263,16 @@ func insertServerTrafficSnapshot(
 		p.BandwidthNicTx/1024,
 		p.BandwidthL7Rx/1024,
 		p.BandwidthL7Tx/1024,
+		p.PacketsNicRx,
+		p.PacketsNicTx,
+		p.PacketsNicDropped,
+		p.PacketsXdpRx,
+		p.PacketsXdpBlocked,
+		p.PpsNicRx,
+		p.PpsNicTx,
+		p.PpsNicDropped,
+		p.PpsXdpRx,
+		p.PpsXdpBlocked,
 		p.RequestCount,
 		p.ResponseCount,
 		p.BlockedRequestCount,
@@ -2159,6 +2398,8 @@ func buildIPRequestStatsClientConfig(cfg config.Config) ipRequestStatsClientConf
 		domainRequestPath = "/" + domainRequestPath
 	}
 
+	blockReasonPath := "/block_reason_stats"
+
 	intervalSeconds := cfg.MetricsPollIntervalSeconds
 	if intervalSeconds <= 0 {
 		intervalSeconds = 30
@@ -2176,6 +2417,7 @@ func buildIPRequestStatsClientConfig(cfg config.Config) ipRequestStatsClientConf
 		serverTrafficPath:   serverTrafficPath,
 		siteTrafficPath:     siteTrafficPath,
 		domainRequestPath:   domainRequestPath,
+		blockReasonPath:     blockReasonPath,
 		interval:            time.Duration(intervalSeconds) * time.Second,
 	}
 }

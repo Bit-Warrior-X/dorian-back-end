@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"vue-project-backend/internal/config"
@@ -94,6 +96,106 @@ func handleServerHostMetrics(w http.ResponseWriter, r *http.Request, servers sto
 		return
 	}
 	writeJSON(w, http.StatusOK, metrics)
+}
+
+const hostMetricsBatchConcurrency = 6
+
+// handleServersHostMetricsBatch probes many edges in one request so Dashboard /
+// Edges can avoid N parallel HTTP round-trips (SSH work still runs server-side).
+// GET /servers/host-metrics?ids=1,2,3 — omit ids to probe every visible server.
+// Response: { "<id>": HostMetrics | { "error": "..." } }
+func handleServersHostMetricsBatch(w http.ResponseWriter, r *http.Request, servers store.ServerStore) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	viewer := viewerScopeFromContext(r.Context())
+	list, err := servers.ListWithUsers(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load servers")
+		return
+	}
+	list = viewer.filterServers(list)
+
+	wanted := map[int64]bool{}
+	if raw := strings.TrimSpace(r.URL.Query().Get("ids")); raw != "" {
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			id, parseErr := strconv.ParseInt(part, 10, 64)
+			if parseErr != nil || id <= 0 {
+				writeError(w, http.StatusBadRequest, "invalid ids")
+				return
+			}
+			if !viewer.canSeeServer(id) {
+				writeError(w, http.StatusForbidden, "server not allowed")
+				return
+			}
+			wanted[id] = true
+		}
+	}
+
+	// ListWithUsers omits decrypted SSH secrets (password/key). Probe via GetView
+	// like the per-server host-metrics handler, or every edge looks "Unreachable".
+	targetIDs := make([]int64, 0, len(list))
+	for _, view := range list {
+		if len(wanted) > 0 && !wanted[view.ID] {
+			continue
+		}
+		targetIDs = append(targetIDs, view.ID)
+	}
+
+	type row struct {
+		id      int64
+		metrics remotesvc.HostMetrics
+		err     error
+	}
+	results := make([]row, len(targetIDs))
+	sem := make(chan struct{}, hostMetricsBatchConcurrency)
+	var wg sync.WaitGroup
+	for i, serverID := range targetIDs {
+		wg.Add(1)
+		go func(i int, serverID int64) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			view, viewErr := servers.GetView(r.Context(), serverID)
+			if viewErr != nil {
+				results[i] = row{id: serverID, err: viewErr}
+				return
+			}
+
+			probeCtx, cancel := context.WithTimeout(r.Context(), remoteHostMetricsTimeout)
+			defer cancel()
+			metrics, probeErr := remotesvc.ProbeHostMetrics(probeCtx, sshTargetFromView(view))
+			results[i] = row{id: serverID, metrics: metrics, err: probeErr}
+			if probeErr != nil {
+				log.Printf("[api] GET /servers/host-metrics id=%d failed ssh_target=%s@%s:%s: %v",
+					serverID,
+					strings.TrimSpace(view.SSHUser),
+					strings.TrimSpace(view.IP),
+					strings.TrimSpace(view.SSHPort),
+					probeErr,
+				)
+			}
+		}(i, serverID)
+	}
+	wg.Wait()
+
+	out := make(map[string]any, len(results))
+	for _, item := range results {
+		key := strconv.FormatInt(item.id, 10)
+		if item.err != nil {
+			out[key] = map[string]string{"error": item.err.Error()}
+			continue
+		}
+		out[key] = item.metrics
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func handleServerBoundPorts(w http.ResponseWriter, r *http.Request, servers store.ServerStore, serverID int64) {

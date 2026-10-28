@@ -80,6 +80,7 @@ func main() {
 	remotesvc.SetKnownHostStore(sshKnownHostStore)
 	l4LiveAttackStore := store.NewL4LiveAttackStore(connection)
 	l4AttackStatsStore := store.NewL4AttackStatsStore(connection)
+	l7BlockEventStore := store.NewL7BlockEventStore(connection)
 	securityEventStore := store.NewSecurityEventStore(connection)
 	serverTrafficStatsStore := store.NewServerTrafficStatsStore(connection)
 	wafWhitelistStore := store.NewWafWhitelistStore(connection)
@@ -134,7 +135,7 @@ func main() {
 		Lockout:            time.Duration(cfg.LoginLockoutMinutes) * time.Minute,
 	})
 	certIssuer := acme.NewIssuer(cfg, siteStore)
-	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore, apiTokenStore, licensePlanStore, notificationStore, authSessionStore, panelSettingsStore, userTokenStore, certIssuer)
+	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, l7BlockEventStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, auditLogStore, apiTokenStore, licensePlanStore, notificationStore, authSessionStore, panelSettingsStore, userTokenStore, certIssuer)
 
 	// Start background worker to periodically collect IP request statistics
 	// from each server and store them into the database.

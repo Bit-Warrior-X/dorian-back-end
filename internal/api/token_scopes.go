@@ -64,6 +64,23 @@ func isReadMethod(method string) bool {
 	return method == http.MethodGet || method == http.MethodHead
 }
 
+// isAnalyticsExportPath is a read of retained logs (POST only because of the body).
+func isAnalyticsExportPath(path string) bool {
+	p := strings.TrimSuffix(path, "/")
+	p = strings.TrimPrefix(p, "/api/v1")
+	p = strings.TrimPrefix(p, "/api")
+	return p == "/analytics/logs/export"
+}
+
+func isAnalyticsLogFilesPath(path string) bool {
+	p := strings.TrimSuffix(path, "/")
+	p = strings.TrimPrefix(p, "/api/v1")
+	p = strings.TrimPrefix(p, "/api")
+	return p == "/analytics/logs/files" ||
+		p == "/analytics/logs/files/content" ||
+		p == "/analytics/logs/files/download"
+}
+
 // apiTokenAllows reports whether scopes permit method on path.
 func apiTokenAllows(scopes []string, method, path string) bool {
 	has := make(map[string]bool, len(scopes))
@@ -77,7 +94,7 @@ func apiTokenAllows(scopes []string, method, path string) bool {
 	if area == "" {
 		return false
 	}
-	read := isReadMethod(method)
+	read := isReadMethod(method) || (method == http.MethodPost && isAnalyticsExportPath(path))
 	if has[area+":write"] {
 		return true
 	}

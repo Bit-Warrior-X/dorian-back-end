@@ -123,7 +123,16 @@ func (store *listeningPortStore) Update(ctx context.Context, serverID, portID in
 		return ListeningPort{}, err
 	}
 	if affected == 0 {
-		return ListeningPort{}, errNotFound
+		// MySQL reports 0 when values are unchanged. Confirm the row still exists
+		// so report_edge_configure does not insert a duplicate every minute.
+		var exists int
+		if err := store.db.QueryRowContext(ctx, `
+			SELECT 1 FROM listening_ports WHERE id = ? AND server_id = ?`, portID, serverID).Scan(&exists); err != nil {
+			if err == sql.ErrNoRows {
+				return ListeningPort{}, errNotFound
+			}
+			return ListeningPort{}, err
+		}
 	}
 
 	return ListeningPort{
@@ -187,9 +196,43 @@ func (store *listeningPortStore) ReplaceByServer(ctx context.Context, serverID i
 		port     int
 		protocol string
 	}
+	// One row per port/protocol. Prefer an id still selected by a site, else the lowest id.
+	referenced := map[int64]struct{}{}
+	if rows, err := store.db.QueryContext(ctx, `
+		SELECT DISTINCT slp.listening_port_id
+		FROM site_listening_ports slp
+		INNER JOIN listening_ports lp ON lp.id = slp.listening_port_id
+		WHERE lp.server_id = ?`, serverID); err == nil {
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err == nil {
+				referenced[id] = struct{}{}
+			}
+		}
+		rows.Close()
+	}
+	prefer := func(candidate, current ListeningPort) bool {
+		_, candidateRef := referenced[candidate.ID]
+		_, currentRef := referenced[current.ID]
+		if candidateRef != currentRef {
+			return candidateRef
+		}
+		return candidate.ID < current.ID
+	}
 	existingByKey := make(map[key]ListeningPort, len(existing))
+	var duplicateIDs []int64
 	for _, port := range existing {
-		existingByKey[key{port: port.Port, protocol: strings.ToUpper(normalizeListeningProtocol(port.Protocol))}] = port
+		k := key{port: port.Port, protocol: strings.ToUpper(normalizeListeningProtocol(port.Protocol))}
+		if current, ok := existingByKey[k]; ok {
+			if prefer(port, current) {
+				duplicateIDs = append(duplicateIDs, current.ID)
+				existingByKey[k] = port
+			} else {
+				duplicateIDs = append(duplicateIDs, port.ID)
+			}
+			continue
+		}
+		existingByKey[k] = port
 	}
 
 	desiredKeys := make(map[key]struct{}, len(ports))
@@ -219,11 +262,14 @@ func (store *listeningPortStore) ReplaceByServer(ctx context.Context, serverID i
 		}
 		if current, ok := existingByKey[k]; ok {
 			updated, err := store.Update(ctx, serverID, current.ID, normalized)
-			if err != nil {
+			if err == nil {
+				out = append(out, updated)
+				continue
+			}
+			// Row may have been deleted by a concurrent sync; fall through to create.
+			if !IsNotFound(err) {
 				return nil, err
 			}
-			out = append(out, updated)
-			continue
 		}
 		created, err := store.Create(ctx, serverID, normalized)
 		if err != nil {
@@ -233,6 +279,7 @@ func (store *listeningPortStore) ReplaceByServer(ctx context.Context, serverID i
 	}
 
 	var toDelete []int64
+	toDelete = append(toDelete, duplicateIDs...)
 	for k, port := range existingByKey {
 		if _, keep := desiredKeys[k]; !keep {
 			toDelete = append(toDelete, port.ID)

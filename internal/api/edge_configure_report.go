@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log"
@@ -15,7 +16,7 @@ import (
 type edgeConfigureReportPayload struct {
 	Token                   string                 `json:"token"`
 	Command                 string                 `json:"command"`
-	ReportedAt              int64                  `json:"reported_at"`
+	ReportedAt              flexibleInt64          `json:"reported_at"`
 	IncludeSSLPems          bool                   `json:"include_ssl_pems"`
 	WhitelistCount          int                    `json:"whitelist_count"`
 	BlocklistCount          int                    `json:"blocklist_count"`
@@ -28,24 +29,25 @@ type edgeConfigureReportPayload struct {
 }
 
 type edgeL4WhitelistEntry struct {
-	IP      string `json:"ip"`
-	Reason  string `json:"reason"`
-	Created string `json:"created"`
+	IP      string         `json:"ip"`
+	Reason  string         `json:"reason"`
+	Created flexibleString `json:"created"`
 }
 
 type edgeL4BlocklistEntry struct {
-	IP       string `json:"ip"`
-	Type     string `json:"type"`
-	Duration int    `json:"duration"`
-	Reason   string `json:"reason"`
-	Created  string `json:"created"`
+	IP       string         `json:"ip"`
+	Type     string         `json:"type"`
+	Duration flexibleInt64  `json:"duration"`
+	Reason   string         `json:"reason"`
+	Created  flexibleString `json:"created"`
 }
 
 type edgeL4ConfigureSection struct {
-	FirewallConfig      map[string]string      `json:"firewall_config"`
-	FirewallConfigError *string                `json:"firewall_config_error"`
-	Whitelist           []edgeL4WhitelistEntry `json:"whitelist"`
-	Blocklist           []edgeL4BlocklistEntry `json:"blocklist"`
+	// Angelos may send string or numeric values for firewall.config keys.
+	FirewallConfig      map[string]flexibleString `json:"firewall_config"`
+	FirewallConfigError any                       `json:"firewall_config_error"`
+	Whitelist           []edgeL4WhitelistEntry    `json:"whitelist"`
+	Blocklist           []edgeL4BlocklistEntry    `json:"blocklist"`
 }
 
 type edgeL7ConfigureSection struct {
@@ -63,24 +65,24 @@ type edgeL7EdgeSection struct {
 }
 
 type edgeListeningPortEntry struct {
-	ID          int64  `json:"id"`
-	ServerID    int64  `json:"serverId"`
-	Port        int    `json:"port"`
-	Protocol    string `json:"protocol"`
-	Description string `json:"description"`
-	Status      string `json:"status"`
+	ID          flexibleInt64  `json:"id"`
+	ServerID    flexibleInt64  `json:"serverId"`
+	Port        flexibleInt64  `json:"port"`
+	Protocol    string         `json:"protocol"`
+	Description string         `json:"description"`
+	Status      string         `json:"status"`
 }
 
 type edgeTemporaryBlacklistEntry struct {
-	IP          string `json:"ip"`
-	URL         string `json:"url"`
-	Country     string `json:"country"`
-	City        string `json:"city"`
-	BlockedAt   string `json:"blocked_at"`
-	TTL         int64  `json:"ttl"`
-	TriggerRule string `json:"trigger_rule"`
-	SiteID      int64  `json:"site_id"`
-	SiteIDCamel int64  `json:"siteId"`
+	IP          string         `json:"ip"`
+	URL         string         `json:"url"`
+	Country     string         `json:"country"`
+	City        string         `json:"city"`
+	BlockedAt   flexibleString `json:"blocked_at"`
+	TTL         flexibleInt64  `json:"ttl"`
+	TriggerRule string         `json:"trigger_rule"`
+	SiteID      flexibleInt64  `json:"site_id"`
+	SiteIDCamel flexibleInt64  `json:"siteId"`
 }
 
 type edgeL7SiteSection struct {
@@ -128,6 +130,7 @@ func reportEdgeConfigureHandler(
 	upstreamServers store.UpstreamServerStore,
 	compressSettings store.CompressStore,
 	siteListeningPorts store.SiteListeningPortStore,
+	l7BlockEvents store.L7BlockEventStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -139,6 +142,7 @@ func reportEdgeConfigureHandler(
 		decoder := json.NewDecoder(r.Body)
 		decoder.UseNumber()
 		if err := decoder.Decode(&payload); err != nil {
+			log.Printf("[api] report_edge_configure invalid JSON: %v", err)
 			writeError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
@@ -167,8 +171,9 @@ func reportEdgeConfigureHandler(
 		result := edgeConfigureSyncResult{
 			Status:     "success",
 			ServerID:   server.ID,
-			ReportedAt: payload.ReportedAt,
+			ReportedAt: payload.ReportedAt.Int64(),
 		}
+		firewallConfig := flexibleStringMap(payload.L4.FirewallConfig)
 
 		whitelistEntries := payload.L4.Whitelist
 		if len(whitelistEntries) == 0 {
@@ -198,7 +203,7 @@ func reportEdgeConfigureHandler(
 		if len(blocklistEntries) == 0 {
 			blocklistEntries = payload.Blocklist
 		}
-		defaultTTL := configuredBlackIPDuration(payload.L4.FirewallConfig)
+		defaultTTL := configuredBlackIPDuration(firewallConfig)
 		if defaultTTL <= 0 {
 			if cfg, err := l4.GetByServerID(r.Context(), server.ID); err == nil && cfg.BlackIPDuration > 0 {
 				defaultTTL = int64(cfg.BlackIPDuration)
@@ -218,12 +223,12 @@ func reportEdgeConfigureHandler(
 			// per-IP duration is often the 3600s default, not that setting.
 			ttl := defaultTTL
 			if ttl <= 0 {
-				ttl = int64(entry.Duration)
+				ttl = entry.Duration.Int64()
 			}
 			liveBlocks = append(liveBlocks, store.TemporaryBlacklistPayload{
 				IP:          ip,
 				Reason:      reason,
-				BlockedAt:   blocklistBlockedAt(entry.Created),
+				BlockedAt:   blocklistBlockedAt(entry.Created.String()),
 				TTL:         ttl,
 				TriggerRule: "l4ddos",
 				ServerID:    server.ID,
@@ -237,32 +242,32 @@ func reportEdgeConfigureHandler(
 		}
 		result.BlocklistSynced = len(liveBlocks)
 
-		if payload.L4.FirewallConfigError == nil && len(payload.L4.FirewallConfig) > 0 {
+		if !hasFirewallConfigError(payload.L4.FirewallConfigError) && len(firewallConfig) > 0 {
 			cfg, err := l4.GetByServerID(r.Context(), server.ID)
 			if err != nil {
 				if !store.IsNotFound(err) {
+					// Non-fatal: lists still sync; Angelos will retry config next minute.
 					log.Printf("[api] report_edge_configure serverID=%d load L4 config failed: %v", server.ID, err)
-					writeError(w, http.StatusInternalServerError, "failed to load L4 config")
-					return
 				}
 			} else {
-				applyFirewallConfigMap(&cfg, payload.L4.FirewallConfig)
+				applyFirewallConfigMap(&cfg, firewallConfig)
+				store.ApplyFirewallConfigRaw(&cfg, firewallConfig)
 				if err := l4.UpdateByServerID(r.Context(), server.ID, cfg); err != nil {
 					log.Printf("[api] report_edge_configure serverID=%d update L4 config failed: %v", server.ID, err)
-					writeError(w, http.StatusInternalServerError, "failed to sync L4 config")
-					return
+				} else {
+					result.L4ConfigUpdated = true
 				}
-				result.L4ConfigUpdated = true
 			}
 		}
 
 		portInputs := make([]store.ListeningPortInput, 0, len(payload.L7.Edge.ListeningPorts))
 		for _, port := range payload.L7.Edge.ListeningPorts {
-			if port.Port <= 0 {
+			portNum := int(port.Port.Int64())
+			if portNum <= 0 {
 				continue
 			}
 			portInputs = append(portInputs, store.ListeningPortInput{
-				Port:        port.Port,
+				Port:        portNum,
 				Protocol:    port.Protocol,
 				Description: port.Description,
 				Status:      port.Status,
@@ -270,9 +275,9 @@ func reportEdgeConfigureHandler(
 		}
 		syncedPorts, err := listeningPorts.ReplaceByServer(r.Context(), server.ID, portInputs)
 		if err != nil {
+			// Non-fatal: lists/L4 still sync; Angelos will retry ports next minute.
 			log.Printf("[api] report_edge_configure serverID=%d listening ports sync failed: %v", server.ID, err)
-			writeError(w, http.StatusInternalServerError, "failed to sync listening ports")
-			return
+			syncedPorts = nil
 		}
 		result.ListeningPorts = len(syncedPorts)
 
@@ -282,11 +287,11 @@ func reportEdgeConfigureHandler(
 			if ip == "" {
 				continue
 			}
-			siteID := entry.SiteID
+			siteID := entry.SiteID.Int64()
 			if siteID == 0 {
-				siteID = entry.SiteIDCamel
+				siteID = entry.SiteIDCamel.Int64()
 			}
-			ttl := entry.TTL
+			ttl := entry.TTL.Int64()
 			trigger := strings.TrimSpace(entry.TriggerRule)
 			if isL4BlockRule(trigger) && defaultTTL > 0 {
 				ttl = defaultTTL
@@ -296,7 +301,7 @@ func reportEdgeConfigureHandler(
 				URL:         strings.TrimSpace(entry.URL),
 				Country:     strings.TrimSpace(entry.Country),
 				City:        strings.TrimSpace(entry.City),
-				BlockedAt:   strings.TrimSpace(entry.BlockedAt),
+				BlockedAt:   strings.TrimSpace(entry.BlockedAt.String()),
 				TTL:         ttl,
 				TriggerRule: trigger,
 				ServerID:    server.ID,
@@ -310,6 +315,17 @@ func reportEdgeConfigureHandler(
 			return
 		}
 		result.TemporaryBlacklist = len(tempPayloads)
+		if l7BlockEvents != nil && len(tempPayloads) > 0 {
+			history := make([]store.L7BlockEventInput, 0, len(tempPayloads))
+			for _, item := range tempPayloads {
+				if event, ok := store.L7BlockEventFromTempPayload(item); ok {
+					history = append(history, event)
+				}
+			}
+			if err := l7BlockEvents.RecordMany(r.Context(), history); err != nil {
+				log.Printf("[api] report_edge_configure serverID=%d durable L7 block history failed: %v", server.ID, err)
+			}
+		}
 
 		portIDByKey := make(map[string]int64, len(syncedPorts))
 		for _, port := range syncedPorts {
@@ -357,6 +373,50 @@ func reportEdgeConfigureHandler(
 			result.SitesTouched,
 		)
 		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+func normalizeL4AttachMode(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "skb", "generic":
+		return "skb", true
+	case "native", "np", "driver":
+		return "native", true
+	case "drv", "offload":
+		return "drv", true
+	case "hw", "hardware":
+		return "hw", true
+	default:
+		return "", false
+	}
+}
+
+func normalizeL4Sensitivity(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "low", "l":
+		return "Low", true
+	case "medium", "med", "m":
+		return "Medium", true
+	case "high", "h":
+		return "High", true
+	default:
+		return "", false
+	}
+}
+
+func normalizeL4ProtectionMode(value string) (string, bool) {
+	trimmed := strings.TrimSpace(value)
+	switch strings.ToLower(trimmed) {
+	case "always on", "always_on", "alwayson", "on", "active":
+		return "Always On", true
+	case "monitor", "detection", "detect":
+		return "Monitor", true
+	default:
+		// Preserve exact DB enum labels if Angelos already sends them.
+		if trimmed == "Always On" || trimmed == "Monitor" {
+			return trimmed, true
+		}
+		return "", false
 	}
 }
 
@@ -441,10 +501,24 @@ func applyFirewallConfigMap(cfg *store.L4Config, raw map[string]string) {
 	}
 
 	setString(&cfg.Dev, "dev")
-	setString(&cfg.AttachMode, "attach_mode", "attachMode")
-	setString(&cfg.Sensitivity, "sensitivity")
-	setString(&cfg.ProtectionMode, "protection_mode", "protectionMode")
 	setInt(&cfg.BlackIPDuration, "black_ip_duration", "blackIpDuration")
+
+	// MySQL ENUMs — ignore unknown Angelos values instead of failing the whole sync.
+	if value, ok := get("attach_mode", "attachMode"); ok {
+		if normalized, ok := normalizeL4AttachMode(value); ok {
+			cfg.AttachMode = normalized
+		}
+	}
+	if value, ok := get("sensitivity"); ok {
+		if normalized, ok := normalizeL4Sensitivity(value); ok {
+			cfg.Sensitivity = normalized
+		}
+	}
+	if value, ok := get("protection_mode", "protectionMode"); ok {
+		if normalized, ok := normalizeL4ProtectionMode(value); ok {
+			cfg.ProtectionMode = normalized
+		}
+	}
 
 	setBool(&cfg.SynValid, "syn_valid", "synValid")
 	setInt(&cfg.SynThreshold, "syn_threshold", "synThreshold")
@@ -650,15 +724,16 @@ func syncSiteListeningSelection(
 	seen := make(map[int64]struct{})
 	add := func(list []edgeListeningPortEntry) {
 		for _, port := range list {
-			if port.Port <= 0 {
+			portNum := int(port.Port.Int64())
+			if portNum <= 0 {
 				continue
 			}
-			key := listeningPortKey(port.Port, port.Protocol)
+			key := listeningPortKey(portNum, port.Protocol)
 			id, ok := portIDByKey[key]
 			if !ok {
 				// Try alternate protocol casing / default HTTP
-				if id, ok = portIDByKey[listeningPortKey(port.Port, "HTTP")]; !ok {
-					id, ok = portIDByKey[listeningPortKey(port.Port, "HTTPS")]
+				if id, ok = portIDByKey[listeningPortKey(portNum, "HTTP")]; !ok {
+					id, ok = portIDByKey[listeningPortKey(portNum, "HTTPS")]
 				}
 			}
 			if !ok || id == 0 {
@@ -694,5 +769,130 @@ func anyToBool(value any) bool {
 		return v != 0
 	default:
 		return false
+	}
+}
+
+// flexibleString accepts JSON strings or numbers (Angelos often sends mixed types).
+type flexibleString string
+
+func (s flexibleString) String() string { return string(s) }
+
+func (s *flexibleString) UnmarshalJSON(data []byte) error {
+	data = bytesTrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		*s = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var str string
+		if err := json.Unmarshal(data, &str); err != nil {
+			return err
+		}
+		*s = flexibleString(str)
+		return nil
+	}
+	if data[0] == 't' || data[0] == 'f' {
+		var b bool
+		if err := json.Unmarshal(data, &b); err != nil {
+			return err
+		}
+		if b {
+			*s = "1"
+		} else {
+			*s = "0"
+		}
+		return nil
+	}
+	var num json.Number
+	if err := json.Unmarshal(data, &num); err != nil {
+		return err
+	}
+	*s = flexibleString(num.String())
+	return nil
+}
+
+// flexibleInt64 accepts JSON numbers or numeric strings.
+type flexibleInt64 int64
+
+func (n flexibleInt64) Int64() int64 { return int64(n) }
+
+func (n *flexibleInt64) UnmarshalJSON(data []byte) error {
+	data = bytesTrimSpace(data)
+	if len(data) == 0 || string(data) == "null" {
+		*n = 0
+		return nil
+	}
+	if data[0] == '"' {
+		var str string
+		if err := json.Unmarshal(data, &str); err != nil {
+			return err
+		}
+		str = strings.TrimSpace(str)
+		if str == "" {
+			*n = 0
+			return nil
+		}
+		// Allow "600s" style durations from Angelos.
+		str = strings.TrimSuffix(str, "s")
+		str = strings.TrimSuffix(str, "S")
+		parsed, err := strconv.ParseInt(str, 10, 64)
+		if err != nil {
+			if f, ferr := strconv.ParseFloat(str, 64); ferr == nil {
+				*n = flexibleInt64(f)
+				return nil
+			}
+			return err
+		}
+		*n = flexibleInt64(parsed)
+		return nil
+	}
+	var num json.Number
+	if err := json.Unmarshal(data, &num); err != nil {
+		return err
+	}
+	parsed, err := num.Int64()
+	if err != nil {
+		f, ferr := num.Float64()
+		if ferr != nil {
+			return err
+		}
+		*n = flexibleInt64(f)
+		return nil
+	}
+	*n = flexibleInt64(parsed)
+	return nil
+}
+
+func bytesTrimSpace(data []byte) []byte {
+	return bytes.TrimSpace(data)
+}
+
+func flexibleStringMap(raw map[string]flexibleString) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(raw))
+	for key, value := range raw {
+		out[key] = value.String()
+	}
+	return out
+}
+
+func hasFirewallConfigError(value any) bool {
+	if value == nil {
+		return false
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v) != ""
+	case bool:
+		return v
+	case json.Number:
+		return false
+	case float64:
+		return false
+	default:
+		// Object/array from a buggy edge build — treat as "config unreadable".
+		return true
 	}
 }

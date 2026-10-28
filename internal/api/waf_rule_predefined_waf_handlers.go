@@ -1,12 +1,21 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 
 	"vue-project-backend/internal/store"
 )
+
+// predefinedWafEdge holds stores needed to push /waf-rules mutations to edges
+// that host sites assigned to the rule set.
+type predefinedWafEdge struct {
+	servers store.ServerStore
+	sites   store.SiteStore
+	l7      siteL7Stores
+}
 
 func writePredefinedWafRuleError(w http.ResponseWriter, err error) bool {
 	if err == nil {
@@ -20,7 +29,22 @@ func writePredefinedWafRuleError(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-func handlePredefinedWafWhitelist(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafWhitelist store.WafWhitelistStore) {
+func writePredefinedWafSyncError(w http.ResponseWriter, err error, message string) bool {
+	if err == nil {
+		return false
+	}
+	writeError(w, http.StatusBadGateway, message)
+	return true
+}
+
+func (edge predefinedWafEdge) syncSites(ctx context.Context, wafRuleID int64, syncOne func(context.Context, int64) error) error {
+	if edge.sites == nil || syncOne == nil {
+		return nil
+	}
+	return syncWafRuleToAssignedSites(ctx, edge.sites, wafRuleID, syncOne)
+}
+
+func handlePredefinedWafWhitelist(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafWhitelist store.WafWhitelistStore, edge predefinedWafEdge) {
 	wafRuleID, ruleID, isBatch, ok := parseWafRuleResourcePath(r.URL.Path, "whitelist")
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -53,6 +77,11 @@ func handlePredefinedWafWhitelist(w http.ResponseWriter, r *http.Request, wafRul
 				writeError(w, http.StatusInternalServerError, "failed to delete rules")
 				return
 			}
+			if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+				return callL7UpdateWhitelist(ctx, edge.servers, edge.sites, siteID, wafWhitelist)
+			}), "failed to sync waf whitelist rules") {
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -73,6 +102,11 @@ func handlePredefinedWafWhitelist(w http.ResponseWriter, r *http.Request, wafRul
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create whitelist rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateWhitelist(ctx, edge.servers, edge.sites, siteID, wafWhitelist)
+		}), "failed to sync waf whitelist rules") {
 			return
 		}
 		writeJSON(w, http.StatusCreated, created)
@@ -100,6 +134,11 @@ func handlePredefinedWafWhitelist(w http.ResponseWriter, r *http.Request, wafRul
 			writeError(w, http.StatusInternalServerError, "failed to update whitelist rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateWhitelist(ctx, edge.servers, edge.sites, siteID, wafWhitelist)
+		}), "failed to sync waf whitelist rules") {
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
 		if ruleID == 0 || isBatch {
@@ -110,13 +149,18 @@ func handlePredefinedWafWhitelist(w http.ResponseWriter, r *http.Request, wafRul
 			writeError(w, http.StatusInternalServerError, "failed to delete whitelist rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateWhitelist(ctx, edge.servers, edge.sites, siteID, wafWhitelist)
+		}), "failed to sync waf whitelist rules") {
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handlePredefinedWafBlacklist(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafBlacklist store.WafBlacklistStore) {
+func handlePredefinedWafBlacklist(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafBlacklist store.WafBlacklistStore, edge predefinedWafEdge) {
 	wafRuleID, ruleID, isBatch, ok := parseWafRuleResourcePath(r.URL.Path, "blacklist")
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -149,6 +193,11 @@ func handlePredefinedWafBlacklist(w http.ResponseWriter, r *http.Request, wafRul
 				writeError(w, http.StatusInternalServerError, "failed to delete rules")
 				return
 			}
+			if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+				return callL7UpdateBlacklist(ctx, edge.servers, edge.sites, siteID, wafBlacklist)
+			}), "failed to sync waf blacklist rules") {
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -170,6 +219,11 @@ func handlePredefinedWafBlacklist(w http.ResponseWriter, r *http.Request, wafRul
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create blacklist rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateBlacklist(ctx, edge.servers, edge.sites, siteID, wafBlacklist)
+		}), "failed to sync waf blacklist rules") {
 			return
 		}
 		writeJSON(w, http.StatusCreated, created)
@@ -198,6 +252,11 @@ func handlePredefinedWafBlacklist(w http.ResponseWriter, r *http.Request, wafRul
 			writeError(w, http.StatusInternalServerError, "failed to update blacklist rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateBlacklist(ctx, edge.servers, edge.sites, siteID, wafBlacklist)
+		}), "failed to sync waf blacklist rules") {
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
 		if ruleID == 0 || isBatch {
@@ -208,13 +267,18 @@ func handlePredefinedWafBlacklist(w http.ResponseWriter, r *http.Request, wafRul
 			writeError(w, http.StatusInternalServerError, "failed to delete blacklist rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateBlacklist(ctx, edge.servers, edge.sites, siteID, wafBlacklist)
+		}), "failed to sync waf blacklist rules") {
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handlePredefinedWafGeo(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafGeo store.WafGeoStore) {
+func handlePredefinedWafGeo(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafGeo store.WafGeoStore, edge predefinedWafEdge) {
 	wafRuleID, ruleID, isBatch, ok := parseWafRuleResourcePath(r.URL.Path, "geolocation")
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -247,6 +311,11 @@ func handlePredefinedWafGeo(w http.ResponseWriter, r *http.Request, wafRules sto
 				writeError(w, http.StatusInternalServerError, "failed to delete rules")
 				return
 			}
+			if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+				return callL7UpdateGeo(ctx, edge.servers, edge.sites, siteID, wafGeo)
+			}), "failed to sync waf geolocation rules") {
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -268,6 +337,11 @@ func handlePredefinedWafGeo(w http.ResponseWriter, r *http.Request, wafRules sto
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create geo rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateGeo(ctx, edge.servers, edge.sites, siteID, wafGeo)
+		}), "failed to sync waf geolocation rules") {
 			return
 		}
 		writeJSON(w, http.StatusCreated, created)
@@ -296,6 +370,11 @@ func handlePredefinedWafGeo(w http.ResponseWriter, r *http.Request, wafRules sto
 			writeError(w, http.StatusInternalServerError, "failed to update geo rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateGeo(ctx, edge.servers, edge.sites, siteID, wafGeo)
+		}), "failed to sync waf geolocation rules") {
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
 		if ruleID == 0 || isBatch {
@@ -306,13 +385,18 @@ func handlePredefinedWafGeo(w http.ResponseWriter, r *http.Request, wafRules sto
 			writeError(w, http.StatusInternalServerError, "failed to delete geo rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateGeo(ctx, edge.servers, edge.sites, siteID, wafGeo)
+		}), "failed to sync waf geolocation rules") {
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handlePredefinedWafAntiCc(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafAntiCc store.WafAntiCcStore) {
+func handlePredefinedWafAntiCc(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafAntiCc store.WafAntiCcStore, edge predefinedWafEdge) {
 	wafRuleID, ruleID, isBatch, ok := parseWafRuleResourcePath(r.URL.Path, "anti-cc")
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -345,6 +429,12 @@ func handlePredefinedWafAntiCc(w http.ResponseWriter, r *http.Request, wafRules 
 				writeError(w, http.StatusInternalServerError, "failed to delete rules")
 				return
 			}
+			if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+				_, err := callL7UpdateSite(ctx, edge.servers, edge.sites, siteID, edge.l7)
+				return err
+			}), "failed to sync waf anti-cc rules") {
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -368,6 +458,12 @@ func handlePredefinedWafAntiCc(w http.ResponseWriter, r *http.Request, wafRules 
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create anti-cc rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			_, err := callL7UpdateSite(ctx, edge.servers, edge.sites, siteID, edge.l7)
+			return err
+		}), "failed to sync waf anti-cc rules") {
 			return
 		}
 		writeJSON(w, http.StatusCreated, created)
@@ -398,6 +494,12 @@ func handlePredefinedWafAntiCc(w http.ResponseWriter, r *http.Request, wafRules 
 			writeError(w, http.StatusInternalServerError, "failed to update anti-cc rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			_, err := callL7UpdateSite(ctx, edge.servers, edge.sites, siteID, edge.l7)
+			return err
+		}), "failed to sync waf anti-cc rules") {
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
 		if ruleID == 0 || isBatch {
@@ -408,13 +510,19 @@ func handlePredefinedWafAntiCc(w http.ResponseWriter, r *http.Request, wafRules 
 			writeError(w, http.StatusInternalServerError, "failed to delete anti-cc rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			_, err := callL7UpdateSite(ctx, edge.servers, edge.sites, siteID, edge.l7)
+			return err
+		}), "failed to sync waf anti-cc rules") {
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handlePredefinedWafAntiHeader(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafAntiHeader store.WafAntiHeaderStore) {
+func handlePredefinedWafAntiHeader(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafAntiHeader store.WafAntiHeaderStore, edge predefinedWafEdge) {
 	wafRuleID, ruleID, isBatch, ok := parseWafRuleResourcePath(r.URL.Path, "anti-header")
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -447,6 +555,11 @@ func handlePredefinedWafAntiHeader(w http.ResponseWriter, r *http.Request, wafRu
 				writeError(w, http.StatusInternalServerError, "failed to delete rules")
 				return
 			}
+			if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+				return callL7UpdateAntiHeader(ctx, edge.servers, edge.sites, siteID, wafAntiHeader)
+			}), "failed to sync waf anti-header rules") {
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -469,6 +582,11 @@ func handlePredefinedWafAntiHeader(w http.ResponseWriter, r *http.Request, wafRu
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create anti-header rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateAntiHeader(ctx, edge.servers, edge.sites, siteID, wafAntiHeader)
+		}), "failed to sync waf anti-header rules") {
 			return
 		}
 		writeJSON(w, http.StatusCreated, created)
@@ -498,6 +616,11 @@ func handlePredefinedWafAntiHeader(w http.ResponseWriter, r *http.Request, wafRu
 			writeError(w, http.StatusInternalServerError, "failed to update anti-header rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateAntiHeader(ctx, edge.servers, edge.sites, siteID, wafAntiHeader)
+		}), "failed to sync waf anti-header rules") {
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
 		if ruleID == 0 || isBatch {
@@ -508,13 +631,18 @@ func handlePredefinedWafAntiHeader(w http.ResponseWriter, r *http.Request, wafRu
 			writeError(w, http.StatusInternalServerError, "failed to delete anti-header rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateAntiHeader(ctx, edge.servers, edge.sites, siteID, wafAntiHeader)
+		}), "failed to sync waf anti-header rules") {
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handlePredefinedWafInterval(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafInterval store.WafIntervalStore) {
+func handlePredefinedWafInterval(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafInterval store.WafIntervalStore, edge predefinedWafEdge) {
 	wafRuleID, ruleID, isBatch, ok := parseWafRuleResourcePath(r.URL.Path, "interval-freq-limit")
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -547,6 +675,11 @@ func handlePredefinedWafInterval(w http.ResponseWriter, r *http.Request, wafRule
 				writeError(w, http.StatusInternalServerError, "failed to delete rules")
 				return
 			}
+			if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+				return callL7UpdateIntervalFreqLimit(ctx, edge.servers, edge.sites, siteID, wafInterval)
+			}), "failed to sync waf interval frequency rules") {
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -568,6 +701,11 @@ func handlePredefinedWafInterval(w http.ResponseWriter, r *http.Request, wafRule
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create interval rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateIntervalFreqLimit(ctx, edge.servers, edge.sites, siteID, wafInterval)
+		}), "failed to sync waf interval frequency rules") {
 			return
 		}
 		writeJSON(w, http.StatusCreated, created)
@@ -596,6 +734,11 @@ func handlePredefinedWafInterval(w http.ResponseWriter, r *http.Request, wafRule
 			writeError(w, http.StatusInternalServerError, "failed to update interval rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateIntervalFreqLimit(ctx, edge.servers, edge.sites, siteID, wafInterval)
+		}), "failed to sync waf interval frequency rules") {
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
 		if ruleID == 0 || isBatch {
@@ -606,13 +749,18 @@ func handlePredefinedWafInterval(w http.ResponseWriter, r *http.Request, wafRule
 			writeError(w, http.StatusInternalServerError, "failed to delete interval rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateIntervalFreqLimit(ctx, edge.servers, edge.sites, siteID, wafInterval)
+		}), "failed to sync waf interval frequency rules") {
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handlePredefinedWafSecond(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafSecond store.WafSecondStore) {
+func handlePredefinedWafSecond(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafSecond store.WafSecondStore, edge predefinedWafEdge) {
 	wafRuleID, ruleID, isBatch, ok := parseWafRuleResourcePath(r.URL.Path, "second-freq-limit")
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -645,6 +793,11 @@ func handlePredefinedWafSecond(w http.ResponseWriter, r *http.Request, wafRules 
 				writeError(w, http.StatusInternalServerError, "failed to delete rules")
 				return
 			}
+			if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+				return callL7UpdateSecondFreqLimit(ctx, edge.servers, edge.sites, siteID, wafSecond)
+			}), "failed to sync waf second frequency rules") {
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -666,6 +819,11 @@ func handlePredefinedWafSecond(w http.ResponseWriter, r *http.Request, wafRules 
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create second freq rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateSecondFreqLimit(ctx, edge.servers, edge.sites, siteID, wafSecond)
+		}), "failed to sync waf second frequency rules") {
 			return
 		}
 		writeJSON(w, http.StatusCreated, created)
@@ -694,6 +852,11 @@ func handlePredefinedWafSecond(w http.ResponseWriter, r *http.Request, wafRules 
 			writeError(w, http.StatusInternalServerError, "failed to update second freq rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateSecondFreqLimit(ctx, edge.servers, edge.sites, siteID, wafSecond)
+		}), "failed to sync waf second frequency rules") {
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
 		if ruleID == 0 || isBatch {
@@ -704,13 +867,18 @@ func handlePredefinedWafSecond(w http.ResponseWriter, r *http.Request, wafRules 
 			writeError(w, http.StatusInternalServerError, "failed to delete second freq rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateSecondFreqLimit(ctx, edge.servers, edge.sites, siteID, wafSecond)
+		}), "failed to sync waf second frequency rules") {
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handlePredefinedWafResponse(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafResponse store.WafResponseStore) {
+func handlePredefinedWafResponse(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafResponse store.WafResponseStore, edge predefinedWafEdge) {
 	wafRuleID, ruleID, isBatch, ok := parseWafRuleResourcePath(r.URL.Path, "response-freq")
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -743,6 +911,11 @@ func handlePredefinedWafResponse(w http.ResponseWriter, r *http.Request, wafRule
 				writeError(w, http.StatusInternalServerError, "failed to delete rules")
 				return
 			}
+			if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+				return callL7UpdateResponseFreq(ctx, edge.servers, edge.sites, siteID, wafResponse)
+			}), "failed to sync waf response frequency rules") {
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -765,6 +938,11 @@ func handlePredefinedWafResponse(w http.ResponseWriter, r *http.Request, wafRule
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create response freq rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateResponseFreq(ctx, edge.servers, edge.sites, siteID, wafResponse)
+		}), "failed to sync waf response frequency rules") {
 			return
 		}
 		writeJSON(w, http.StatusCreated, created)
@@ -794,6 +972,11 @@ func handlePredefinedWafResponse(w http.ResponseWriter, r *http.Request, wafRule
 			writeError(w, http.StatusInternalServerError, "failed to update response freq rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateResponseFreq(ctx, edge.servers, edge.sites, siteID, wafResponse)
+		}), "failed to sync waf response frequency rules") {
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
 		if ruleID == 0 || isBatch {
@@ -804,13 +987,18 @@ func handlePredefinedWafResponse(w http.ResponseWriter, r *http.Request, wafRule
 			writeError(w, http.StatusInternalServerError, "failed to delete response freq rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateResponseFreq(ctx, edge.servers, edge.sites, siteID, wafResponse)
+		}), "failed to sync waf response frequency rules") {
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
-func handlePredefinedWafUserAgent(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafUserAgent store.WafUserAgentStore) {
+func handlePredefinedWafUserAgent(w http.ResponseWriter, r *http.Request, wafRules store.WafRuleStore, wafUserAgent store.WafUserAgentStore, edge predefinedWafEdge) {
 	wafRuleID, ruleID, isBatch, ok := parseWafRuleResourcePath(r.URL.Path, "user-agent")
 	if !ok {
 		writeError(w, http.StatusNotFound, "not found")
@@ -843,6 +1031,11 @@ func handlePredefinedWafUserAgent(w http.ResponseWriter, r *http.Request, wafRul
 				writeError(w, http.StatusInternalServerError, "failed to delete rules")
 				return
 			}
+			if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+				return callL7UpdateUserAgent(ctx, edge.servers, edge.sites, siteID, wafUserAgent)
+			}), "failed to sync waf user-agent rules") {
+				return
+			}
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -864,6 +1057,11 @@ func handlePredefinedWafUserAgent(w http.ResponseWriter, r *http.Request, wafRul
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "failed to create user agent rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateUserAgent(ctx, edge.servers, edge.sites, siteID, wafUserAgent)
+		}), "failed to sync waf user-agent rules") {
 			return
 		}
 		writeJSON(w, http.StatusCreated, created)
@@ -892,6 +1090,11 @@ func handlePredefinedWafUserAgent(w http.ResponseWriter, r *http.Request, wafRul
 			writeError(w, http.StatusInternalServerError, "failed to update user agent rule")
 			return
 		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateUserAgent(ctx, edge.servers, edge.sites, siteID, wafUserAgent)
+		}), "failed to sync waf user-agent rules") {
+			return
+		}
 		writeJSON(w, http.StatusOK, updated)
 	case http.MethodDelete:
 		if ruleID == 0 || isBatch {
@@ -900,6 +1103,11 @@ func handlePredefinedWafUserAgent(w http.ResponseWriter, r *http.Request, wafRul
 		}
 		if err := wafUserAgent.Delete(r.Context(), wafRuleID, ruleID); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to delete user agent rule")
+			return
+		}
+		if writePredefinedWafSyncError(w, edge.syncSites(r.Context(), wafRuleID, func(ctx context.Context, siteID int64) error {
+			return callL7UpdateUserAgent(ctx, edge.servers, edge.sites, siteID, wafUserAgent)
+		}), "failed to sync waf user-agent rules") {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
