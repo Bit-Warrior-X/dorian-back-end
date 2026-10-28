@@ -72,7 +72,10 @@ type BlacklistEntry struct {
 	TriggerRule string `json:"triggerRule"`
 	CreatedAt   string `json:"createdAt"`
 	ExpireAt    string `json:"expireAt"`
-	UpdatedAt   string `json:"updatedAt"`
+	// RemainingSeconds is computed on the API host so the panel countdown
+	// does not depend on the browser clock matching the edge/API clock.
+	RemainingSeconds int64  `json:"remainingSeconds"`
+	UpdatedAt        string `json:"updatedAt"`
 }
 
 type BlacklistInput struct {
@@ -753,20 +756,43 @@ func payloadToEntry(id int64, p TemporaryBlacklistPayload) BlacklistEntry {
 		geolocation += strings.TrimSpace(p.City)
 	}
 	createdAt := formatUnixTimestamp(p.BlockedAt)
+	now := time.Now().UTC()
+	remaining, active := blockLifetime(p, now)
+	remainingSeconds := int64(0)
+	expireAt := ""
+	if active {
+		if remaining > 0 {
+			remainingSeconds = int64(remaining / time.Second)
+			if remaining%time.Second != 0 {
+				remainingSeconds++
+			}
+		}
+		if started, ok := parseBlockTime(p.BlockedAt); ok && p.TTL > 0 {
+			expireAt = started.Add(time.Duration(p.TTL) * time.Second).UTC().Format(time.RFC3339)
+		} else if remainingSeconds > 0 {
+			expireAt = now.Add(time.Duration(remainingSeconds) * time.Second).Format(time.RFC3339)
+		}
+	}
+	// Remaining must never exceed the configured TTL (guards clock/report skew in storage).
+	if p.TTL > 0 && remainingSeconds > p.TTL {
+		remainingSeconds = p.TTL
+		expireAt = now.Add(time.Duration(remainingSeconds) * time.Second).Format(time.RFC3339)
+	}
 	return BlacklistEntry{
-		ID:          id,
-		ServerID:    p.ServerID,
-		SiteID:      p.SiteID,
-		IPAddress:   p.IP,
-		Geolocation: geolocation,
-		Reason:      strings.TrimSpace(p.Reason),
-		URL:         p.URL,
-		Server:      p.Server,
-		TTL:         ttlStr,
-		TriggerRule: p.TriggerRule,
-		CreatedAt:   createdAt,
-		ExpireAt:    "",
-		UpdatedAt:   createdAt,
+		ID:               id,
+		ServerID:         p.ServerID,
+		SiteID:           p.SiteID,
+		IPAddress:        p.IP,
+		Geolocation:      geolocation,
+		Reason:           strings.TrimSpace(p.Reason),
+		URL:              p.URL,
+		Server:           p.Server,
+		TTL:              ttlStr,
+		TriggerRule:      p.TriggerRule,
+		CreatedAt:        createdAt,
+		ExpireAt:         expireAt,
+		RemainingSeconds: remainingSeconds,
+		UpdatedAt:        createdAt,
 	}
 }
 

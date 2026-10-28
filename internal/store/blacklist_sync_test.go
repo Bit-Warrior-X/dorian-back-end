@@ -25,6 +25,22 @@ func TestBlockLifetimeUsesUnixBlockedAt(t *testing.T) {
 	}
 }
 
+func TestPayloadToEntryRemainingNeverExceedsTTL(t *testing.T) {
+	now := time.Now().UTC()
+	p := TemporaryBlacklistPayload{
+		IP:        "1.2.3.4",
+		BlockedAt: strconv.FormatInt(now.Add(2*time.Minute).Unix(), 10), // future blocked_at
+		TTL:       180,
+	}
+	entry := payloadToEntry(1, p)
+	if entry.RemainingSeconds > 180 {
+		t.Fatalf("remainingSeconds=%d exceeds TTL", entry.RemainingSeconds)
+	}
+	if entry.RemainingSeconds <= 0 {
+		t.Fatalf("expected positive remaining, got %d", entry.RemainingSeconds)
+	}
+}
+
 func TestTempIdentity(t *testing.T) {
 	a := TemporaryBlacklistPayload{IP: "138.199.196.76", SiteID: 3, URL: "/x"}
 	b := TemporaryBlacklistPayload{IP: "138.199.196.76", SiteID: 3, URL: "/x"}
