@@ -332,6 +332,7 @@ func registerRoutes(
 	sites store.SiteStore,
 	wafRules store.WafRuleStore,
 	siteListeningPorts store.SiteListeningPortStore,
+	originRoutes store.SiteOriginRouteStore,
 	certIssuer *acme.Issuer,
 ) {
 	mux.HandleFunc("/health", healthHandler)
@@ -578,6 +579,7 @@ func registerRoutes(
 		cacheRules:         cacheRules,
 		compressSettings:   compressSettings,
 		siteListeningPorts: siteListeningPorts,
+		originRoutes:       originRoutes,
 	}
 	if certIssuer != nil {
 		certIssuer.SetAfterIssue(func(ctx context.Context, siteID int64) error {
@@ -589,8 +591,8 @@ func registerRoutes(
 			return err
 		})
 	}
-	mux.HandleFunc("/sites", sitesHandler(sites, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, certIssuer))
-	mux.HandleFunc("/sites/", restrictSiteDetail(sites, siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, certIssuer)))
+	mux.HandleFunc("/sites", sitesHandler(sites, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, originRoutes, certIssuer))
+	mux.HandleFunc("/sites/", restrictSiteDetail(sites, siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, originRoutes, certIssuer)))
 	mux.HandleFunc("/waf-rules", wafRulesHandler(wafRules))
 	mux.HandleFunc("/waf-rules/", wafRuleDetailHandler(servers, sites, wafRules, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts))
 }
@@ -6813,6 +6815,7 @@ func sitesHandler(
 	cacheRules store.CacheRuleStore,
 	compressSettings store.CompressStore,
 	siteListeningPorts store.SiteListeningPortStore,
+	originRoutes store.SiteOriginRouteStore,
 	certIssuer *acme.Issuer,
 ) http.HandlerFunc {
 	deps := siteL7Stores{
@@ -6829,6 +6832,7 @@ func sitesHandler(
 		cacheRules:         cacheRules,
 		compressSettings:   compressSettings,
 		siteListeningPorts: siteListeningPorts,
+		originRoutes:       originRoutes,
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

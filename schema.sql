@@ -712,6 +712,48 @@ CREATE TABLE IF NOT EXISTS `upstream_servers` (
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `site_origin_routes` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `site_id` bigint(20) NOT NULL,
+  `scheme` enum('HTTP','HTTPS') NOT NULL,
+  `description` varchar(255) NOT NULL DEFAULT '',
+  `created_at` timestamp NULL DEFAULT current_timestamp(),
+  `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
+  PRIMARY KEY (`id`),
+  KEY `idx_site_origin_routes_site` (`site_id`),
+  KEY `idx_site_origin_routes_site_scheme` (`site_id`,`scheme`),
+  CONSTRAINT `site_origin_routes_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `site_origin_route_ports` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT,
+  `route_id` bigint(20) NOT NULL,
+  `site_id` bigint(20) NOT NULL,
+  `scheme` enum('HTTP','HTTPS') NOT NULL,
+  `port` int(11) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_site_origin_route_ports_site_scheme_port` (`site_id`,`scheme`,`port`),
+  UNIQUE KEY `uk_site_origin_route_ports_route_port` (`route_id`,`port`),
+  KEY `idx_site_origin_route_ports_route` (`route_id`),
+  CONSTRAINT `site_origin_route_ports_route_fk` FOREIGN KEY (`route_id`) REFERENCES `site_origin_routes` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `site_origin_route_ports_site_fk` FOREIGN KEY (`site_id`) REFERENCES `sites` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `site_origin_route_upstreams` (
+  `route_id` bigint(20) NOT NULL,
+  `upstream_server_id` bigint(20) NOT NULL,
+  PRIMARY KEY (`route_id`,`upstream_server_id`),
+  KEY `idx_site_origin_route_upstreams_upstream` (`upstream_server_id`),
+  CONSTRAINT `site_origin_route_upstreams_route_fk` FOREIGN KEY (`route_id`) REFERENCES `site_origin_routes` (`id`) ON DELETE CASCADE ON UPDATE CASCADE,
+  CONSTRAINT `site_origin_route_upstreams_upstream_fk` FOREIGN KEY (`upstream_server_id`) REFERENCES `upstream_servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
 CREATE TABLE IF NOT EXISTS `url_request_stats` (
   `server_id` bigint(20) NOT NULL,
   `site_id` bigint(20) NOT NULL DEFAULT 0,

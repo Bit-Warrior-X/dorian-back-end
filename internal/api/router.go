@@ -39,6 +39,7 @@ func NewRouter(
 	sites store.SiteStore,
 	wafRules store.WafRuleStore,
 	siteListeningPorts store.SiteListeningPortStore,
+	originRoutes store.SiteOriginRouteStore,
 	auditLogs store.AuditLogStore,
 	apiTokens store.APITokenStore,
 	licensePlans store.LicensePlanStore,
@@ -53,7 +54,7 @@ func NewRouter(
 	agentClient := NewAgentClient(cfg)
 	configureL7Edge(cfg)
 	account := newAccountServices(cfg, users, mfa, sessions, panelSettings, userTokens, auditLogs)
-	registerRoutes(mux, cfg, agentClient, account, users, mfa, loginThrottle, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, l7BlockEvents, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, certIssuer)
+	registerRoutes(mux, cfg, agentClient, account, users, mfa, loginThrottle, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, l7BlockEvents, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, originRoutes, certIssuer)
 	registerNotificationRoutes(mux, notifications)
 	registerAccountRoutes(mux, account)
 

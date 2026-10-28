@@ -652,6 +652,19 @@ type l7SiteWafRulesPayload struct {
 	WafUserAgent         []store.WafUserAgentRule  `json:"waf_useragent"`
 }
 
+// l7OriginRoutePayload maps listen ports to origin upstreams for one scheme rule.
+type l7OriginRoutePayload struct {
+	Ports     []int                      `json:"ports"`
+	Upstreams []upstreamServerPayloadL7  `json:"upstreams"`
+}
+
+type l7OriginRoutesPayload struct {
+	ServerID int64                  `json:"server_id"`
+	SiteID   int64                  `json:"site_id"`
+	HTTP     []l7OriginRoutePayload `json:"http"`
+	HTTPS    []l7OriginRoutePayload `json:"https"`
+}
+
 // l7SiteConfigPayload is the full site configuration pushed to angelos on site create.
 type l7SiteConfigPayload struct {
 	ServerID         int64                     `json:"server_id"`
@@ -664,6 +677,7 @@ type l7SiteConfigPayload struct {
 	HTTPPorts        []listeningPortPayloadL7  `json:"http_ports"`
 	HTTPSPorts       []listeningPortPayloadL7  `json:"https_ports"`
 	UpstreamServers  []upstreamServerPayloadL7 `json:"upstream_servers"`
+	OriginRoutes     l7OriginRoutesPayload     `json:"origin_routes"`
 }
 
 type siteL7Stores struct {
@@ -680,6 +694,7 @@ type siteL7Stores struct {
 	cacheRules         store.CacheRuleStore
 	compressSettings   store.CompressStore
 	siteListeningPorts store.SiteListeningPortStore
+	originRoutes       store.SiteOriginRouteStore
 }
 
 func buildL7SiteWafRules(
@@ -770,6 +785,20 @@ func buildL7SiteConfigPayload(
 	}
 	httpPorts, httpsPorts := splitListeningPortsByProtocol(edgeServerID, selectedPorts)
 
+	originRoutes := l7OriginRoutesPayload{
+		ServerID: edgeServerID,
+		SiteID:   site.ID,
+		HTTP:     []l7OriginRoutePayload{},
+		HTTPS:    []l7OriginRoutePayload{},
+	}
+	if deps.originRoutes != nil {
+		routes, routeErr := deps.originRoutes.GetBySite(ctx, site.ID)
+		if routeErr != nil {
+			return l7SiteConfigPayload{}, fmt.Errorf("load origin routes: %w", routeErr)
+		}
+		originRoutes = buildL7OriginRoutesPayload(edgeServerID, site.ID, routes, upstreamList)
+	}
+
 	sslType := strings.ToLower(strings.TrimSpace(site.SslType))
 	sslCert := site.SslCert
 	sslCertKey := site.SslCertKey
@@ -794,7 +823,68 @@ func buildL7SiteConfigPayload(
 		HTTPPorts:        httpPorts,
 		HTTPSPorts:       httpsPorts,
 		UpstreamServers:  upstreamServersToL7Payload(edgeServerID, upstreamList),
+		OriginRoutes:     originRoutes,
 	}, nil
+}
+
+func buildL7OriginRoutesPayload(
+	edgeServerID, siteID int64,
+	routes store.SiteOriginRoutes,
+	upstreams []store.UpstreamServer,
+) l7OriginRoutesPayload {
+	byID := make(map[int64]store.UpstreamServer, len(upstreams))
+	for _, upstream := range upstreams {
+		byID[upstream.ID] = upstream
+	}
+	convert := func(rules []store.SiteOriginRouteRule) []l7OriginRoutePayload {
+		out := make([]l7OriginRoutePayload, 0, len(rules))
+		for _, rule := range rules {
+			selected := make([]store.UpstreamServer, 0, len(rule.UpstreamIDs))
+			for _, id := range rule.UpstreamIDs {
+				if upstream, ok := byID[id]; ok {
+					selected = append(selected, upstream)
+				}
+			}
+			out = append(out, l7OriginRoutePayload{
+				Ports:     append([]int{}, rule.Ports...),
+				Upstreams: upstreamServersToL7Payload(edgeServerID, selected),
+			})
+		}
+		if out == nil {
+			return []l7OriginRoutePayload{}
+		}
+		return out
+	}
+	return l7OriginRoutesPayload{
+		ServerID: edgeServerID,
+		SiteID:   siteID,
+		HTTP:     convert(routes.HTTP),
+		HTTPS:    convert(routes.HTTPS),
+	}
+}
+
+func callL7UpdateOriginRoutes(
+	ctx context.Context,
+	servers store.ServerStore,
+	sites store.SiteStore,
+	siteID int64,
+	deps siteL7Stores,
+) error {
+	if deps.originRoutes == nil {
+		return nil
+	}
+	routes, err := deps.originRoutes.GetBySite(ctx, siteID)
+	if err != nil {
+		return fmt.Errorf("load origin routes: %w", err)
+	}
+	upstreams, err := deps.upstreamServers.ListBySite(ctx, siteID)
+	if err != nil {
+		return fmt.Errorf("load upstream servers: %w", err)
+	}
+	return postL7ToSiteEdgeServers(ctx, servers, sites, siteID, "/API/L7/l7_update_origin_routes", func(edgeID int64, server store.ServerView) ([]byte, error) {
+		payload := buildL7OriginRoutesPayload(server.ID, siteID, routes, upstreams)
+		return json.Marshal(payload)
+	})
 }
 
 // callL7UpdateSite pushes the full site configuration to every assigned edge

@@ -136,6 +136,7 @@ Field names for other WAF endpoints follow the same envelope (`serverId`, `siteI
 | `POST /API/L7/l7_update_domain` | Site | Domain rename (`old_domain` → `new_domain`) |
 | `POST /API/L7/l7_delete_site` | Site | Site removed from panel (HTTP **404** = outdated Angelos → warning only) |
 | `POST /API/L7/l7_update_upstreamservers` | Site | Upstream origin list changed |
+| `POST /API/L7/l7_update_origin_routes` | Site | Listen-port → origin routing rules changed |
 | `POST /API/L7/l7_update_listeningports` | Server | Edge listening ports changed |
 | `POST /API/L7/l7_update_site_listeningports` | Server | Site↔port selection changed |
 | `POST /API/L7/l7_update_compress` | Site | Gzip MIME settings changed |
@@ -186,6 +187,43 @@ Field names for other WAF endpoints follow the same envelope (`serverId`, `siteI
       "protocol": "http",
       "description": "Primary origin"
     }
+  ],
+  "origin_routes": {
+    "server_id": 1033,
+    "site_id": 55,
+    "http": [
+      {
+        "ports": [80],
+        "upstreams": [
+          {
+            "id": 12,
+            "serverId": 1033,
+            "ip_port": "10.10.0.5:8080",
+            "protocol": "http",
+            "description": "Primary origin"
+          }
+        ]
+      }
+    ],
+    "https": []
+  }
+}
+```
+
+Flat `http_ports` / `https_ports` / `upstream_servers` remain the **union** of all route ports and origins for older Angelos builds. Prefer `origin_routes` (also pushed via `l7_update_origin_routes`) to route each listen port to its own origin pool.
+
+**Origin routes replace** (`l7_update_origin_routes`):
+
+```json
+{
+  "server_id": 1033,
+  "site_id": 55,
+  "http": [
+    { "ports": [80], "upstreams": [{ "id": 1, "serverId": 1033, "ip_port": "10.0.0.1:8080", "protocol": "http", "description": "" }] },
+    { "ports": [9000, 9001], "upstreams": [{ "id": 3, "serverId": 1033, "ip_port": "10.0.0.3:8080", "protocol": "http", "description": "" }] }
+  ],
+  "https": [
+    { "ports": [443], "upstreams": [{ "id": 8, "serverId": 1033, "ip_port": "10.0.0.8:443", "protocol": "https", "description": "" }] }
   ]
 }
 ```

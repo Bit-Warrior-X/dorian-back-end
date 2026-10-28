@@ -491,6 +491,45 @@ paths:
         "4XX":
           $ref: "#/components/responses/AgentError"
 
+  /API/L7/l7_update_origin_routes:
+    post:
+      tags: [L7 Traffic]
+      summary: Replace listen-port to origin routing rules for a site
+      description: |
+        Maps one or more edge listen ports (per HTTP/HTTPS scheme) to a pool of
+        upstream origins. Flat `upstream_servers` remain the union for older
+        agents; prefer this payload for per-port routing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7OriginRoutesUpdate"
+            example:
+              server_id: 1033
+              site_id: 55
+              http:
+                - ports: [80]
+                  upstreams:
+                    - id: 11
+                      serverId: 1033
+                      ip_port: 10.10.0.5:8080
+                      protocol: http
+                      description: Primary origin
+              https:
+                - ports: [443]
+                  upstreams:
+                    - id: 12
+                      serverId: 1033
+                      ip_port: 10.10.0.8:443
+                      protocol: https
+                      description: TLS origin
+      responses:
+        "200":
+          description: Origin routes applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
   /API/L7/l7_update_site:
     post:
       tags: [L7 Traffic]
@@ -1333,6 +1372,41 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/UpstreamServerL7"
+        origin_routes:
+          $ref: "#/components/schemas/L7OriginRoutesUpdate"
+          description: Per listen-port origin pools; preferred over flat upstream_servers when present
+
+    L7OriginRouteRule:
+      type: object
+      required: [ports, upstreams]
+      properties:
+        ports:
+          type: array
+          items:
+            type: integer
+        upstreams:
+          type: array
+          items:
+            $ref: "#/components/schemas/UpstreamServerL7"
+
+    L7OriginRoutesUpdate:
+      type: object
+      required: [server_id, site_id, http, https]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+          format: int64
+        http:
+          type: array
+          items:
+            $ref: "#/components/schemas/L7OriginRouteRule"
+        https:
+          type: array
+          items:
+            $ref: "#/components/schemas/L7OriginRouteRule"
 
     L7SiteDomainUpdate:
       type: object

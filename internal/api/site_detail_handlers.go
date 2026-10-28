@@ -41,6 +41,7 @@ func siteDetailHandler(
 	cacheRules store.CacheRuleStore,
 	compressSettings store.CompressStore,
 	siteListeningPorts store.SiteListeningPortStore,
+	originRoutes store.SiteOriginRouteStore,
 	certIssuer *acme.Issuer,
 ) http.HandlerFunc {
 	deps := siteL7Stores{
@@ -57,6 +58,7 @@ func siteDetailHandler(
 		cacheRules:         cacheRules,
 		compressSettings:   compressSettings,
 		siteListeningPorts: siteListeningPorts,
+		originRoutes:       originRoutes,
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -1253,6 +1255,92 @@ func siteDetailHandler(
 				return
 			}
 
+			if strings.HasSuffix(r.URL.Path, "/origin-routes") {
+				siteID, ok := parseIDWithSuffix(r.URL.Path, "/sites/", "/origin-routes")
+				if !ok {
+					writeError(w, http.StatusNotFound, "not found")
+					return
+				}
+				if originRoutes == nil {
+					writeError(w, http.StatusInternalServerError, "origin routes not configured")
+					return
+				}
+				switch r.Method {
+				case http.MethodGet:
+					routes, err := originRoutes.GetBySite(r.Context(), siteID)
+					if err != nil {
+						if store.IsNotFound(err) {
+							writeError(w, http.StatusNotFound, "site not found")
+							return
+						}
+						writeError(w, http.StatusInternalServerError, "failed to load origin routes")
+						return
+					}
+					writeJSON(w, http.StatusOK, routes)
+				case http.MethodPut:
+					var payload store.SiteOriginRoutes
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						writeError(w, http.StatusBadRequest, "invalid JSON body")
+						return
+					}
+					payload = store.NormalizeSiteOriginRoutes(payload)
+					upstreams, err := upstreamServers.ListBySite(r.Context(), siteID)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to load upstream servers")
+						return
+					}
+					validUpstreams := make(map[int64]struct{}, len(upstreams))
+					for _, upstream := range upstreams {
+						validUpstreams[upstream.ID] = struct{}{}
+					}
+					if err := store.ValidateSiteOriginRoutes(payload, validUpstreams); err != nil {
+						writeError(w, http.StatusBadRequest, err.Error())
+						return
+					}
+					site, err := sites.Get(r.Context(), siteID)
+					if err != nil {
+						if store.IsNotFound(err) {
+							writeError(w, http.StatusNotFound, "site not found")
+							return
+						}
+						writeError(w, http.StatusInternalServerError, "failed to load site")
+						return
+					}
+					if err := syncSiteListeningPortsFromRoutes(r.Context(), site, siteListeningPorts, payload); err != nil {
+						writeError(w, http.StatusBadRequest, err.Error())
+						return
+					}
+					saved, err := originRoutes.ReplaceForSite(r.Context(), siteID, payload)
+					if err != nil {
+						writeError(w, http.StatusInternalServerError, "failed to save origin routes")
+						return
+					}
+					if err := callL7UpdateUpstreamServers(r.Context(), servers, sites, siteID, upstreamServers); err != nil {
+						writeError(w, http.StatusBadGateway, err.Error())
+						return
+					}
+					for _, edgeID := range site.ServerIDs {
+						selectedPorts, listErr := siteListeningPorts.ListSelectedForServer(r.Context(), siteID, edgeID)
+						if listErr != nil {
+							writeError(w, http.StatusInternalServerError, "failed to load selected listening ports")
+							return
+						}
+						if err := postL7SiteListeningPorts(r.Context(), servers, edgeID, siteID, selectedPorts); err != nil {
+							writeError(w, http.StatusBadGateway, err.Error())
+							return
+						}
+					}
+					if err := callL7UpdateOriginRoutes(r.Context(), servers, sites, siteID, deps); err != nil {
+						writeError(w, http.StatusBadGateway, err.Error())
+						return
+					}
+					writeJSON(w, http.StatusOK, saved)
+				default:
+					writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				}
+				return
+			}
+
 			if strings.HasSuffix(r.URL.Path, "/ports") {
 				siteID, ok := parseIDWithSuffix(r.URL.Path, "/sites/", "/ports")
 				if !ok {
@@ -2054,4 +2142,77 @@ func validateSitePortSelections(
 		return nil, msg
 	}
 	return merged, ""
+}
+
+// syncSiteListeningPortsFromRoutes ensures every route listen port exists on each
+// assigned edge and is selected for the site. Missing catalog ports are rejected.
+func syncSiteListeningPortsFromRoutes(
+	ctx context.Context,
+	site store.Site,
+	siteListeningPorts store.SiteListeningPortStore,
+	routes store.SiteOriginRoutes,
+) error {
+	required := make(map[string]map[int]struct{})
+	add := func(scheme string, ports []int) {
+		scheme = store.NormalizeOriginRouteScheme(scheme)
+		if required[scheme] == nil {
+			required[scheme] = make(map[int]struct{})
+		}
+		for _, port := range ports {
+			required[scheme][port] = struct{}{}
+		}
+	}
+	for _, rule := range routes.HTTP {
+		add("HTTP", rule.Ports)
+	}
+	for _, rule := range routes.HTTPS {
+		add("HTTPS", rule.Ports)
+	}
+	if len(required) == 0 {
+		return nil
+	}
+
+	for _, edgeID := range site.ServerIDs {
+		catalog, err := siteListeningPorts.ListPortsForServer(ctx, edgeID)
+		if err != nil {
+			return fmt.Errorf("load listening ports for edge %d: %w", edgeID, err)
+		}
+		bySchemePort := make(map[string]int64, len(catalog))
+		for _, port := range catalog {
+			scheme := store.NormalizeOriginRouteScheme(port.Protocol)
+			bySchemePort[fmt.Sprintf("%s:%d", scheme, port.Port)] = port.ID
+		}
+		selected := make([]int64, 0)
+		seen := make(map[int64]struct{})
+		for scheme, ports := range required {
+			for port := range ports {
+				id, ok := bySchemePort[fmt.Sprintf("%s:%d", scheme, port)]
+				if !ok {
+					return fmt.Errorf("edge %d has no %s listening port %d; add it on the edge first", edgeID, strings.ToLower(scheme), port)
+				}
+				if _, exists := seen[id]; exists {
+					continue
+				}
+				seen[id] = struct{}{}
+				selected = append(selected, id)
+			}
+		}
+		// Keep any previously selected ports that are still valid so Delivery → Ports
+		// selections outside routes are not wiped unexpectedly.
+		existing, err := siteListeningPorts.ListSelectedForServer(ctx, site.ID, edgeID)
+		if err != nil {
+			return fmt.Errorf("load selected ports for edge %d: %w", edgeID, err)
+		}
+		for _, port := range existing {
+			if _, exists := seen[port.ID]; exists {
+				continue
+			}
+			seen[port.ID] = struct{}{}
+			selected = append(selected, port.ID)
+		}
+		if err := siteListeningPorts.ReplaceForServer(ctx, site.ID, edgeID, selected); err != nil {
+			return err
+		}
+	}
+	return nil
 }
