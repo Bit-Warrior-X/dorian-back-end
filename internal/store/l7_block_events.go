@@ -72,7 +72,7 @@ type L7BlockEventStore interface {
 	Record(ctx context.Context, input L7BlockEventInput) error
 	RecordMany(ctx context.Context, inputs []L7BlockEventInput) error
 	Summarize(ctx context.Context, start, end time.Time, scope TrafficScope) (L7BlockEventSummary, error)
-	ListRecent(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L7BlockEventRow, error)
+	ListRecent(ctx context.Context, start, end time.Time, scope TrafficScope, limit int, sourceIP string) ([]L7BlockEventRow, error)
 	ListTopIPs(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L7TopIPRow, error)
 	ListTopURLs(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L7TopURLRow, error)
 }
@@ -179,7 +179,7 @@ func (store *l7BlockEventStore) Summarize(ctx context.Context, start, end time.T
 	return out, nil
 }
 
-func (store *l7BlockEventStore) ListRecent(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]L7BlockEventRow, error) {
+func (store *l7BlockEventStore) ListRecent(ctx context.Context, start, end time.Time, scope TrafficScope, limit int, sourceIP string) ([]L7BlockEventRow, error) {
 	if limit <= 0 {
 		limit = 25
 	}
@@ -194,6 +194,10 @@ func (store *l7BlockEventStore) ListRecent(ctx context.Context, start, end time.
 		WHERE e.blocked_at >= ? AND e.blocked_at <= ?`
 	args := []any{start, end}
 	query, args = appendL7EventScope(query, args, scope)
+	if ip := strings.TrimSpace(sourceIP); ip != "" {
+		query += ` AND e.source_ip = ?`
+		args = append(args, ip)
+	}
 	query += ` ORDER BY e.blocked_at DESC, e.id DESC LIMIT ?`
 	args = append(args, limit)
 

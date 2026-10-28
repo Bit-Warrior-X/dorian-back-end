@@ -65,7 +65,8 @@ func securityAnalyticsRecentAttacksHandler(events store.L7BlockEventStore, sites
 				limit = parsed
 			}
 		}
-		rows, err := events.ListRecent(r.Context(), start, end, scope, limit)
+		sourceIP := strings.TrimSpace(r.URL.Query().Get("ip"))
+		rows, err := events.ListRecent(r.Context(), start, end, scope, limit, sourceIP)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load recent L7 blocks")
 			return
