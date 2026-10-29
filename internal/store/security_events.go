@@ -536,6 +536,55 @@ func (store *securityEventStore) periodVectors(ctx context.Context, reqIDs []str
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// L7 incidents carry vector ids on report_l7_attack rows (no report_block_ip).
+	l7Rows, err := store.db.QueryContext(ctx, `
+		SELECT req_id, attack_type, MAX(CAST(NULLIF(ttl, '') AS UNSIGNED))
+		FROM security_events
+		WHERE req_id IN (`+sqlPlaceholders(len(reqIDs))+`) AND command = 'report_l7_attack' AND attack_type <> ''
+		GROUP BY req_id, attack_type`, args...)
+	if err != nil {
+		return out, err
+	}
+	defer l7Rows.Close()
+	for l7Rows.Next() {
+		var reqID, rawType string
+		var unique sql.NullInt64
+		if err := l7Rows.Scan(&reqID, &rawType, &unique); err != nil {
+			return out, err
+		}
+		count := int(unique.Int64)
+		if count <= 0 {
+			count = 1
+		}
+		for _, part := range strings.FieldsFunc(rawType, func(r rune) bool {
+			return r == '+' || r == ',' || r == '|' || r == '/'
+		}) {
+			label := L7VectorLabel(part)
+			if label == "" {
+				label = periodVectorLabel(part)
+			}
+			if label == "" {
+				continue
+			}
+			merged := false
+			for i := range out[reqID] {
+				if out[reqID][i].Type == label {
+					if count > out[reqID][i].Count {
+						out[reqID][i].Count = count
+					}
+					merged = true
+					break
+				}
+			}
+			if !merged {
+				out[reqID] = append(out[reqID], PeriodVector{Type: label, Count: count})
+			}
+		}
+	}
+	if err := l7Rows.Err(); err != nil {
+		return out, err
+	}
+
 	// Protection-mode START events reveal vectors that never produced report_block_ip
 	// rows (common for RST alongside ACK in the same req_id).
 	protRows, err := store.db.QueryContext(ctx, `
@@ -605,6 +654,14 @@ func periodVectorLabel(raw string) string {
 		return "ICMP"
 	case tokens["GRE"]:
 		return "GRE"
+	case tokens["FLOOD"]:
+		return "Flood"
+	case tokens["RAPIDRESET"], tokens["RAPID"]:
+		return "Rapid Reset"
+	case tokens["MALFORMED"]:
+		return "Malformed"
+	case tokens["BLOCKED"]:
+		return "Blocked"
 	default:
 		return ""
 	}
@@ -836,14 +893,22 @@ func scanSecurityEvent(rows *sql.Rows) (SecurityEvent, error) {
 }
 
 func singleSecurityPeriod(event SecurityEvent) SecurityEventPeriod {
-	layer := "L4"
+	layer := periodLayer([]SecurityEvent{event})
 	status := "reported"
 	title := event.Title
 	if event.AttackType != "" {
-		title = attackPeriodTitle(event.AttackType)
+		if isL7AttackCommand(event.Command) {
+			title = l7AttackPeriodTitle(event.AttackType)
+		} else {
+			title = attackPeriodTitle(event.AttackType)
+		}
 	}
 	if !isAttackEvent(event) && !strings.Contains(strings.ToLower(event.Title), "ddos") {
 		layer = ""
+	}
+	ipCount := 0
+	if isL7AttackCommand(event.Command) {
+		ipCount = atoiDefault(event.TTL, 0)
 	}
 	return SecurityEventPeriod{
 		ID:          fmt.Sprintf("event:%d", event.ID),
@@ -856,6 +921,7 @@ func singleSecurityPeriod(event SecurityEvent) SecurityEventPeriod {
 		Status:      status,
 		StartedAt:   event.CreatedAt,
 		CreatedAt:   event.CreatedAt,
+		IPCount:     ipCount,
 		EventCount:  1,
 		Events:      []SecurityEvent{event},
 	}
@@ -903,21 +969,37 @@ func groupedSecurityPeriod(reqID string, scanned []SecurityEvent, stats security
 	if ended == "" {
 		ended = latest.CreatedAt
 	}
+	layer := periodLayer(scanned)
 	title := attackPeriodTitle(attackType)
+	if layer == "L7" {
+		title = l7AttackPeriodTitle(attackType)
+		if ipCount == 0 {
+			for i := len(scanned) - 1; i >= 0; i-- {
+				if n := atoiDefault(scanned[i].TTL, 0); n > 0 {
+					ipCount = n
+					break
+				}
+			}
+		}
+	}
 	if title == "" {
 		title = latest.Title
 	}
 	if timeline == nil {
 		timeline = []SecurityEvent{}
 	}
+	desc := periodDescription(ipCount, status)
+	if layer == "L7" {
+		desc = l7PeriodDescription(ipCount, status)
+	}
 	return SecurityEventPeriod{
 		ID:           reqID,
 		ReqID:        reqID,
 		ServerID:     latest.ServerID,
 		ServerName:   serverName,
-		Layer:        "L4",
+		Layer:        layer,
 		Title:        title,
-		Description:  periodDescription(ipCount, status),
+		Description:  desc,
 		AttackType:   attackType,
 		Status:       status,
 		StartedAt:    started,
@@ -929,6 +1011,75 @@ func groupedSecurityPeriod(reqID string, scanned []SecurityEvent, stats security
 		StopReported: stats.stoppedHit,
 		Events:       timeline,
 	}
+}
+
+func l7PeriodDescription(ipCount int, status string) string {
+	var summary string
+	switch {
+	case ipCount == 1:
+		summary = "1 unique IP"
+	case ipCount > 1:
+		summary = fmt.Sprintf("%d unique IPs", ipCount)
+	case status == "ended":
+		summary = "Attack ended"
+	default:
+		summary = "Attack in progress"
+	}
+	switch status {
+	case "ongoing":
+		if ipCount > 0 {
+			summary += " · Ongoing"
+		}
+	case "ended":
+		if ipCount > 0 {
+			summary += " · Ended"
+		}
+	}
+	return summary
+}
+
+func l7AttackPeriodTitle(attackType string) string {
+	parts := strings.FieldsFunc(attackType, func(r rune) bool {
+		return r == '+' || r == ',' || r == '|' || r == '/'
+	})
+	labels := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, part := range parts {
+		label := L7VectorLabel(part)
+		if label == "" {
+			continue
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		labels = append(labels, label)
+	}
+	switch len(labels) {
+	case 0:
+		return "L7 attack"
+	case 1:
+		return labels[0] + " attack"
+	case 2:
+		return labels[0] + " + " + labels[1] + " attack"
+	default:
+		return strings.Join(labels[:len(labels)-1], ", ") + " + " + labels[len(labels)-1] + " attack"
+	}
+}
+
+func atoiDefault(raw string, fallback int) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback
+	}
+	var n int
+	for _, r := range raw {
+		if r < '0' || r > '9' {
+			return fallback
+		}
+		n = n*10 + int(r-'0')
+	}
+	return n
 }
 
 func periodDescription(ipCount int, status string) string {
@@ -1021,7 +1172,23 @@ func serverNames(events []SecurityEvent) string {
 
 func isAttackEvent(event SecurityEvent) bool {
 	command := strings.ToLower(event.Command)
-	return command == "report_attack" || command == "report_block_ip" || event.AttackType != ""
+	return command == "report_attack" || command == "report_l7_attack" || command == "report_block_ip" || event.AttackType != ""
+}
+
+func isL7AttackCommand(command string) bool {
+	return strings.EqualFold(strings.TrimSpace(command), "report_l7_attack")
+}
+
+func periodLayer(events []SecurityEvent) string {
+	for _, event := range events {
+		if isL7AttackCommand(event.Command) {
+			return "L7"
+		}
+		if strings.EqualFold(event.Command, "report_attack") || strings.EqualFold(event.Command, "report_block_ip") {
+			return "L4"
+		}
+	}
+	return "L4"
 }
 
 func sqlPlaceholders(count int) string {

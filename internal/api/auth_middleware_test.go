@@ -23,6 +23,8 @@ func TestIsPublicAuthPath(t *testing.T) {
 		{http.MethodGet, "/api/v1/auth/oauth/sso/start", true},
 		{http.MethodGet, "/api/v1/auth/oauth/sso/callback", true},
 		{http.MethodPost, "/report_xdp", true},
+		{http.MethodPost, "/api/report_l7_attack", true},
+		{http.MethodPost, "/report_l7_attack", true},
 		{http.MethodPost, "/api/report_edge_configure", true},
 		{http.MethodPost, "/report_edge_configure", true},
 		{http.MethodPost, "/api/report_cache_hit", true},

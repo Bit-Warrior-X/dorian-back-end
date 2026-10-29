@@ -103,6 +103,8 @@ Angelos serves TLS on that port.
 | `POST /API/L7/l7_update_temporaryblacklist` | Server | Edge reports / control-plane temp blacklist sync |
 | `POST /API/L7/l7_update_l7guard` | Server | L7 Guard abuse-detector settings (Configure edges → L7 Guard) |
 | `GET /API/L7/l7guard` | Server | Read effective L7 Guard settings (agent / diagnostics) |
+| `GET /API/L7/l7_attacks` | Server | List recorded L7 attack incidents on the edge (request counts: blocked / passed / ratio) |
+| `GET /API/L7/l7_attack` | Server | Full L7 attack incident (`?id=`); timeline is blocked vs passed requests (not bandwidth) |
 
 Anti-CC rules are included inside `l7_update_site` (`waf_rules.waf_anticc`); there is no separate incremental Anti-CC push path today.
 
@@ -334,6 +336,7 @@ Not Angelos “outbound API”, but related edge callbacks the back-end exposes:
 | Panel / API path | Purpose |
 |------------------|---------|
 | `POST /report_xdp` | L4 attack / XDP reports |
+| `POST /api/report_l7_attack` | L7 attack incident start / update / stop (`report_l7_attack`) |
 | `POST /api/temporary_blacklist_added` | Temporary blacklist notified from edge |
 | `POST /api/report_edge_configure` | Periodic full edge configure snapshot (L4 lists/config, listening ports, temp blacklist, L7 Guard, site compress/upstreams/ports) |
 

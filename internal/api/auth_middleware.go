@@ -68,6 +68,8 @@ func isPublicAuthPath(method, path string) bool {
 		return method == http.MethodGet
 	case "/report_xdp", "/api/report_xdp", "/api/v1/report_xdp":
 		return method == http.MethodPost
+	case "/report_l7_attack", "/api/report_l7_attack", "/api/v1/report_l7_attack":
+		return method == http.MethodPost
 	case "/report_edge_configure", "/api/report_edge_configure", "/api/v1/report_edge_configure":
 		return method == http.MethodPost
 	case "/report_cache_hit", "/api/report_cache_hit", "/api/v1/report_cache_hit":

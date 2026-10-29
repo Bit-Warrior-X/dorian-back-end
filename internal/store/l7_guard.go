@@ -24,6 +24,14 @@ type L7GuardSettings struct {
 	BlockTTL      int      `json:"block_ttl"`
 	BlockMaxTTL   int      `json:"block_max_ttl"`
 	AllowIPs      []string `json:"allow_ips"`
+	AttackDetect           bool `json:"attack_detect"`
+	AttackFloorFlood       int  `json:"attack_floor_flood"`
+	AttackFloorReset       int  `json:"attack_floor_reset"`
+	AttackFloorMalformed   int  `json:"attack_floor_malformed"`
+	AttackFloorBlocked     int  `json:"attack_floor_blocked"`
+	AttackConfirmSeconds   int  `json:"attack_confirm_seconds"`
+	AttackExitSeconds      int  `json:"attack_exit_seconds"`
+	AttackCooldownSeconds  int  `json:"attack_cooldown_seconds"`
 }
 
 type L7GuardState struct {
@@ -51,16 +59,24 @@ func NewL7GuardStore(db *sql.DB) L7GuardStore {
 
 func DefaultL7GuardSettings() L7GuardSettings {
 	return L7GuardSettings{
-		Enabled:      true,
-		XDP:          true,
-		Window:       10,
-		RSTThreshold: 100,
-		RejThreshold: 200,
-		BadThreshold: 100,
-		ReqThreshold: 1000,
-		BlockTTL:     600,
-		BlockMaxTTL:  3600,
-		AllowIPs:     []string{},
+		Enabled:                true,
+		XDP:                    true,
+		Window:                 10,
+		RSTThreshold:           100,
+		RejThreshold:           200,
+		BadThreshold:           100,
+		ReqThreshold:           1000,
+		BlockTTL:               600,
+		BlockMaxTTL:            3600,
+		AllowIPs:               []string{},
+		AttackDetect:           true,
+		AttackFloorFlood:       500,
+		AttackFloorReset:       100,
+		AttackFloorMalformed:   200,
+		AttackFloorBlocked:     200,
+		AttackConfirmSeconds:   3,
+		AttackExitSeconds:      30,
+		AttackCooldownSeconds:  60,
 	}
 }
 
@@ -212,6 +228,30 @@ func DiffL7GuardOverrides(defaults, effective L7GuardSettings) map[string]any {
 	if !sameStringSlice(effective.AllowIPs, defaults.AllowIPs) {
 		out["allow_ips"] = append([]string{}, effective.AllowIPs...)
 	}
+	if effective.AttackDetect != defaults.AttackDetect {
+		out["attack_detect"] = effective.AttackDetect
+	}
+	if effective.AttackFloorFlood != defaults.AttackFloorFlood {
+		out["attack_floor_flood"] = effective.AttackFloorFlood
+	}
+	if effective.AttackFloorReset != defaults.AttackFloorReset {
+		out["attack_floor_reset"] = effective.AttackFloorReset
+	}
+	if effective.AttackFloorMalformed != defaults.AttackFloorMalformed {
+		out["attack_floor_malformed"] = effective.AttackFloorMalformed
+	}
+	if effective.AttackFloorBlocked != defaults.AttackFloorBlocked {
+		out["attack_floor_blocked"] = effective.AttackFloorBlocked
+	}
+	if effective.AttackConfirmSeconds != defaults.AttackConfirmSeconds {
+		out["attack_confirm_seconds"] = effective.AttackConfirmSeconds
+	}
+	if effective.AttackExitSeconds != defaults.AttackExitSeconds {
+		out["attack_exit_seconds"] = effective.AttackExitSeconds
+	}
+	if effective.AttackCooldownSeconds != defaults.AttackCooldownSeconds {
+		out["attack_cooldown_seconds"] = effective.AttackCooldownSeconds
+	}
 	return out
 }
 
@@ -240,6 +280,27 @@ func NormalizeL7GuardSettings(in L7GuardSettings) (L7GuardSettings, error) {
 	}
 	if out.BlockMaxTTL < out.BlockTTL {
 		return out, fmt.Errorf("block_max_ttl must be greater than or equal to block_ttl")
+	}
+	if out.AttackFloorFlood < 10 {
+		return out, fmt.Errorf("attack_floor_flood must be at least 10")
+	}
+	if out.AttackFloorReset < 10 {
+		return out, fmt.Errorf("attack_floor_reset must be at least 10")
+	}
+	if out.AttackFloorMalformed < 10 {
+		return out, fmt.Errorf("attack_floor_malformed must be at least 10")
+	}
+	if out.AttackFloorBlocked < 10 {
+		return out, fmt.Errorf("attack_floor_blocked must be at least 10")
+	}
+	if out.AttackConfirmSeconds < 1 || out.AttackConfirmSeconds > 60 {
+		return out, fmt.Errorf("attack_confirm_seconds must be between 1 and 60")
+	}
+	if out.AttackExitSeconds < 5 || out.AttackExitSeconds > 3600 {
+		return out, fmt.Errorf("attack_exit_seconds must be between 5 and 3600")
+	}
+	if out.AttackCooldownSeconds < 0 || out.AttackCooldownSeconds > 3600 {
+		return out, fmt.Errorf("attack_cooldown_seconds must be between 0 and 3600")
 	}
 	ips, err := normalizeAllowIPs(out.AllowIPs)
 	if err != nil {
@@ -342,6 +403,46 @@ func applyL7GuardMap(dst *L7GuardSettings, payload map[string]any) {
 	}
 	if raw, ok := firstMapValue(payload, "allow_ips", "allowIps"); ok {
 		dst.AllowIPs = stringSliceFromAny(raw)
+	}
+	if raw, ok := firstMapValue(payload, "attack_detect", "attackDetect"); ok {
+		if v, ok := boolFromAny(raw); ok {
+			dst.AttackDetect = v
+		}
+	}
+	if raw, ok := firstMapValue(payload, "attack_floor_flood", "attackFloorFlood"); ok {
+		if v, ok := intFromAny(raw); ok {
+			dst.AttackFloorFlood = v
+		}
+	}
+	if raw, ok := firstMapValue(payload, "attack_floor_reset", "attackFloorReset"); ok {
+		if v, ok := intFromAny(raw); ok {
+			dst.AttackFloorReset = v
+		}
+	}
+	if raw, ok := firstMapValue(payload, "attack_floor_malformed", "attackFloorMalformed"); ok {
+		if v, ok := intFromAny(raw); ok {
+			dst.AttackFloorMalformed = v
+		}
+	}
+	if raw, ok := firstMapValue(payload, "attack_floor_blocked", "attackFloorBlocked"); ok {
+		if v, ok := intFromAny(raw); ok {
+			dst.AttackFloorBlocked = v
+		}
+	}
+	if raw, ok := firstMapValue(payload, "attack_confirm_seconds", "attackConfirmSeconds"); ok {
+		if v, ok := intFromAny(raw); ok {
+			dst.AttackConfirmSeconds = v
+		}
+	}
+	if raw, ok := firstMapValue(payload, "attack_exit_seconds", "attackExitSeconds"); ok {
+		if v, ok := intFromAny(raw); ok {
+			dst.AttackExitSeconds = v
+		}
+	}
+	if raw, ok := firstMapValue(payload, "attack_cooldown_seconds", "attackCooldownSeconds"); ok {
+		if v, ok := intFromAny(raw); ok {
+			dst.AttackCooldownSeconds = v
+		}
 	}
 }
 

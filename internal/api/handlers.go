@@ -334,6 +334,7 @@ func registerRoutes(
 	siteListeningPorts store.SiteListeningPortStore,
 	originRoutes store.SiteOriginRouteStore,
 	l7Guard store.L7GuardStore,
+	l7Attacks store.L7AttackStore,
 	certIssuer *acme.Issuer,
 ) {
 	mux.HandleFunc("/health", healthHandler)
@@ -341,6 +342,9 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
 	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
+	mux.HandleFunc("/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks))
+	mux.HandleFunc("/api/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks))
+	mux.HandleFunc("/api/v1/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks))
 	mux.HandleFunc("/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents, l7Guard))
 	mux.HandleFunc("/api/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents, l7Guard))
 	mux.HandleFunc("/api/v1/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents, l7Guard))
@@ -351,8 +355,8 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, securityEvents, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/api/v1/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
-	mux.HandleFunc("/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats))
-	mux.HandleFunc("/api/v1/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats))
+	mux.HandleFunc("/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats, l7Attacks, serverTrafficStats))
+	mux.HandleFunc("/api/v1/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats, l7Attacks, serverTrafficStats))
 	mux.HandleFunc("/dashboard/attack-console/sources", attackConsoleSourcesHandler(securityEvents))
 	mux.HandleFunc("/api/v1/dashboard/attack-console/sources", attackConsoleSourcesHandler(securityEvents))
 	mux.HandleFunc("/dashboard/attack-console/sparta-log", attackConsoleSpartaLogHandler(securityEvents, servers))

@@ -6,10 +6,13 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -86,6 +89,51 @@ func signEdgeRequest(req *http.Request, token string, body []byte, now time.Time
 
 // verifyEdgeSignature is the check Angelos must perform; kept here as the
 // reference implementation and for tests.
+// fetchEdgeL7Attack loads the live incident snapshot from Angelos
+// (`GET /API/L7/l7_attack`). Used by the attack console so charts update while
+// an incident is still active (timeline is present on the edge GET API).
+func fetchEdgeL7Attack(ctx context.Context, server store.ServerView, reqID string) (store.L7AttackIncident, error) {
+	reqID = strings.TrimSpace(reqID)
+	if strings.TrimSpace(server.IP) == "" || strings.TrimSpace(server.Token) == "" || reqID == "" {
+		return store.L7AttackIncident{}, errors.New("missing edge identity")
+	}
+	query := url.Values{}
+	query.Set("id", reqID)
+	query.Set("token", server.Token)
+	endpoint := l7EdgeURL(server.IP, "/API/L7/l7_attack") + "?" + query.Encode()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return store.L7AttackIncident{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(server.Token))
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{Timeout: 4 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return store.L7AttackIncident{}, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return store.L7AttackIncident{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return store.L7AttackIncident{}, fmt.Errorf("edge l7_attack status %d", resp.StatusCode)
+	}
+	var payload struct {
+		Status string                 `json:"status"`
+		Attack store.L7AttackIncident `json:"attack"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return store.L7AttackIncident{}, err
+	}
+	if strings.TrimSpace(payload.Attack.ID) == "" {
+		payload.Attack.ID = reqID
+	}
+	return payload.Attack, nil
+}
+
 func verifyEdgeSignature(token, method, path string, header http.Header, body []byte, now time.Time) error {
 	timestamp := strings.TrimSpace(header.Get(edgeTimestampHeader))
 	signature := strings.TrimSpace(header.Get(edgeSignatureHeader))

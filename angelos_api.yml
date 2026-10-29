@@ -59,6 +59,43 @@ tags:
       by the **panel**, not by the edge agent.
 
 paths:
+  /report_l7_attack:
+    post:
+      servers:
+        - url: https://panel.dorian.center/api
+          description: Dorian panel API (angelos → panel)
+      tags: [Edge → Panel]
+      summary: L7 attack incident start / update / stop
+      description: |
+        Angelos worker (`l7_attack_sync`) reports L7 attack incidents detected by
+        Athens (`resty.l7_attack`). One incident = one server-wide attack episode,
+        identified by `req_id` (same scheme as L4 `report_attack`).
+
+        Incidents use request counts (not bandwidth). Every request has one
+        outcome: `passed`, `blocked`, `malformed`, or `rapid_reset`. Prefer
+        blocked vs passed from `timeline` (bucket / 10 = rps), `blocked_ratio`,
+        and `peak_blocked_rps` / `peak_passed_rps`.
+
+        - `attack_start` — once when the incident opens
+        - `attack_update` — every ~30 s while active (stored; no new alert row)
+        - `attack_stop` — once with the final snapshot including `timeline`
+
+        Start/stop are retried until the panel answers 2xx; treat them as
+        idempotent by `req_id`. Token is accepted as Bearer and/or body `token`.
+        Catch-up may send multiple JSON objects in one body (start then stop).
+      operationId: reportL7Attack
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7AttackReport"
+      responses:
+        "200":
+          description: Event accepted
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
   /report_edge_configure:
     post:
       servers:
@@ -1481,6 +1518,45 @@ components:
             format: ipv4
           default: []
           description: Client IPs never blocked by l7_guard (single addresses, no CIDR)
+        attack_detect:
+          type: boolean
+          default: true
+          description: L7 attack incident detection (report_l7_attack)
+        attack_floor_flood:
+          type: integer
+          minimum: 10
+          default: 500
+          description: Minimum requests/s for the flood vector
+        attack_floor_reset:
+          type: integer
+          minimum: 10
+          default: 100
+          description: Minimum client-reset HTTP/2 streams/s for rapid_reset
+        attack_floor_malformed:
+          type: integer
+          minimum: 10
+          default: 200
+          description: Minimum malformed requests/s for malformed
+        attack_floor_blocked:
+          type: integer
+          minimum: 10
+          default: 200
+          description: Minimum 444 responses/s for blocked
+        attack_confirm_seconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+          default: 3
+        attack_exit_seconds:
+          type: integer
+          minimum: 5
+          maximum: 3600
+          default: 30
+        attack_cooldown_seconds:
+          type: integer
+          minimum: 0
+          maximum: 3600
+          default: 60
 
     L7GuardUpdate:
       type: object
@@ -1497,6 +1573,173 @@ components:
           type: boolean
           default: false
           description: Restore all defaults (ignores `l7guard`)
+
+    L7AttackReport:
+      type: object
+      required: [token, command, data, req_id, time, reported_at, attack]
+      properties:
+        token: { type: string }
+        command: { type: string, enum: [report_l7_attack] }
+        data: { type: string, enum: [attack_start, attack_update, attack_stop] }
+        req_id: { type: string, description: Incident id }
+        time: { type: string, example: "2026-10-28 15:02:11" }
+        reported_at: { type: integer, description: Unix seconds }
+        attack:
+          $ref: "#/components/schemas/L7AttackIncident"
+
+    L7AttackSummary:
+      type: object
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [active, ended] }
+        started_at: { type: integer }
+        ended_at: { type: integer, nullable: true }
+        duration: { type: integer, description: Seconds }
+        vectors: { type: array, items: { type: string } }
+        peak_rps: { type: integer }
+        total_requests: { type: integer }
+        total_blocked: { type: integer, description: Requests blocked by L7 protection }
+        total_passed: { type: integer, description: Requests let through to the sites }
+        blocked_ratio: { type: number, description: "total_blocked / total_requests (0..1)" }
+        unique_ips: { type: integer }
+        archive_path: { type: string, nullable: true, description: JSON archive on the edge }
+        start_reported: { type: boolean }
+        stop_reported: { type: boolean }
+
+    L7AttackIncident:
+      type: object
+      description: |
+        Every request has exactly one outcome, so
+        `requests = passed + blocked + malformed + rapid_reset` (totals, timeline
+        buckets, sites). L7 incidents carry request counts, not bandwidth.
+        Detail (top lists, sites, codes) may be estimated when sampling.estimated;
+        totals, vectors and timeline are exact.
+      properties:
+        id: { type: string }
+        status: { type: string, enum: [active, ended] }
+        started_at: { type: integer }
+        ended_at: { type: integer, nullable: true, description: Last second any vector was under attack }
+        updated_at: { type: integer }
+        duration: { type: integer }
+        vector_list:
+          type: array
+          items: { type: string, enum: [flood, rapid_reset, malformed, blocked] }
+        vectors:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              first_at: { type: integer }
+              last_at: { type: integer }
+              active: { type: boolean }
+              peak: { type: integer, description: Per second }
+              peak_at: { type: integer }
+              total: { type: integer }
+              enter: { type: integer }
+              exit: { type: integer }
+        peak_rps: { type: integer, description: Peak requests/s (all outcomes) }
+        peak_rps_at: { type: integer }
+        peak_blocked_rps: { type: integer, description: Peak blocked requests/s }
+        peak_blocked_rps_at: { type: integer }
+        peak_passed_rps: { type: integer, description: Peak passed requests/s }
+        peak_passed_rps_at: { type: integer }
+        blocked_ratio: { type: number, description: "totals.blocked / totals.requests (0..1)" }
+        blocked_ips: { type: integer, description: Client IPs with at least one blocked request (sampled) }
+        totals:
+          type: object
+          properties:
+            requests: { type: integer }
+            passed: { type: integer }
+            rapid_reset: { type: integer }
+            malformed: { type: integer }
+            blocked: { type: integer }
+            errors_5xx: { type: integer }
+            escalations: { type: integer }
+        unique_ips: { type: integer }
+        sampling:
+          type: object
+          properties:
+            max_factor: { type: integer }
+            estimated: { type: boolean }
+        top_ips:
+          type: array
+          items:
+            type: object
+            properties:
+              ip: { type: string }
+              requests: { type: integer }
+              blocked: { type: integer }
+              passed: { type: integer }
+        top_urls:
+          type: array
+          items:
+            type: object
+            properties:
+              url: { type: string }
+              requests: { type: integer }
+              blocked: { type: integer }
+              passed: { type: integer }
+        top_user_agents:
+          type: array
+          items:
+            type: object
+            properties:
+              user_agent: { type: string }
+              requests: { type: integer }
+        top_countries:
+          type: array
+          items:
+            type: object
+            properties:
+              country_iso: { type: string }
+              requests: { type: integer }
+              blocked: { type: integer }
+              passed: { type: integer }
+        status_codes:
+          type: object
+          additionalProperties: { type: integer }
+        protocols:
+          type: object
+          additionalProperties: { type: integer }
+        methods:
+          type: object
+          additionalProperties: { type: integer }
+        block_rules:
+          type: object
+          additionalProperties: { type: integer }
+        sites:
+          type: array
+          items:
+            type: object
+            properties:
+              site_id: { type: integer }
+              host: { type: string }
+              requests: { type: integer }
+              passed: { type: integer }
+              blocked: { type: integer }
+              rapid_reset: { type: integer }
+              malformed: { type: integer }
+              errors: { type: integer }
+        escalations:
+          type: object
+          additionalProperties: true
+        timeline:
+          type: array
+          description: 10-second buckets (attack_stop and GET API)
+          items:
+            type: object
+            properties:
+              t: { type: integer }
+              requests: { type: integer }
+              passed: { type: integer }
+              blocked: { type: integer }
+              rapid_reset: { type: integer }
+              malformed: { type: integer }
+              errors_5xx: { type: integer }
+              escalations: { type: integer }
+        detector:
+          type: object
+          additionalProperties: true
 
     L7GuardState:
       type: object

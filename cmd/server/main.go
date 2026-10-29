@@ -116,6 +116,11 @@ func main() {
 		applog.Errorf("api", "startup_failed", map[string]any{"step": "l7_guard_settings_schema", "error": err.Error()})
 		os.Exit(1)
 	}
+	l7AttackStore := store.NewL7AttackStore(connection)
+	if err := l7AttackStore.EnsureSchema(ctx); err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "l7_attacks_schema", "error": err.Error()})
+		os.Exit(1)
+	}
 	auditLogStore := store.NewAuditLogStore(connection)
 	apiTokenStore := store.NewAPITokenStore(connection)
 	licensePlanStore := store.NewLicensePlanStore(connection)
@@ -145,7 +150,7 @@ func main() {
 		Lockout:            time.Duration(cfg.LoginLockoutMinutes) * time.Minute,
 	})
 	certIssuer := acme.NewIssuer(cfg, siteStore)
-	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, l7BlockEventStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, originRouteStore, l7GuardStore, auditLogStore, apiTokenStore, licensePlanStore, notificationStore, authSessionStore, panelSettingsStore, userTokenStore, certIssuer)
+	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, l7BlockEventStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, originRouteStore, l7GuardStore, l7AttackStore, auditLogStore, apiTokenStore, licensePlanStore, notificationStore, authSessionStore, panelSettingsStore, userTokenStore, certIssuer)
 
 	// Start background worker to periodically collect IP request statistics
 	// from each server and store them into the database.

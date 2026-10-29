@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"regexp"
 	"sort"
@@ -54,6 +55,7 @@ type attackConsoleResponse struct {
 	Protection  string                    `json:"protection"`
 	SpartaLog   []attackLogLine           `json:"spartaLog"`
 	SpartaError string                    `json:"spartaError,omitempty"`
+	L7          *store.L7AttackIncident   `json:"l7,omitempty"`
 }
 
 const (
@@ -72,6 +74,8 @@ func attackConsoleHandler(
 	securityEvents store.SecurityEventStore,
 	servers store.ServerStore,
 	l4Stats store.L4AttackStatsStore,
+	l7Attacks store.L7AttackStore,
+	serverTrafficStats store.ServerTrafficStatsStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -104,10 +108,21 @@ func attackConsoleHandler(
 
 		now := time.Now().UTC()
 		start, end := attackLiveWindow(period)
-		drops := downsampleDropSeries(
-			loadDropSeries(r.Context(), l4Stats, start, end, store.TrafficScope{ServerID: serverID}),
-			attackConsoleDropLimit,
-		)
+		scope := store.TrafficScope{ServerID: serverID}
+		var drops []attackDropPoint
+		var l7Incident *store.L7AttackIncident
+		if period.Layer != "L7" {
+			drops = downsampleDropSeries(
+				loadDropSeries(r.Context(), l4Stats, start, end, scope),
+				attackConsoleDropLimit,
+			)
+		} else if l7Attacks != nil {
+			l7Incident = loadLiveL7Incident(r.Context(), servers, l7Attacks, serverID, reqID, period.Status)
+			drops = downsampleDropSeries(
+				loadL7DropSeries(r.Context(), serverTrafficStats, start, end, scope, l7Incident),
+				attackConsoleDropLimit,
+			)
+		}
 		if n := len(period.Events); n > attackConsoleEventLimit {
 			period.Events = append([]store.SecurityEvent(nil), period.Events[n-attackConsoleEventLimit:]...)
 		}
@@ -124,14 +139,38 @@ func attackConsoleHandler(
 			SourceCount: period.IPCount,
 			ActiveCount: period.ActiveIPCount,
 			AttackTypes: attackTypesFromVectors(period.Vectors),
+			L7:          l7Incident,
 		}
 		if len(response.AttackTypes) == 0 {
 			response.AttackTypes = []attackTypeCount{}
 		}
-		response.AttackTypes = mergeAttackTypesWithProtection(response.AttackTypes, period)
+		if period.Layer != "L7" {
+			response.AttackTypes = mergeAttackTypesWithProtection(response.AttackTypes, period)
+		}
 		response.Attack.Vectors = toPeriodVectors(response.AttackTypes)
 		if title := multiVectorTitle(response.AttackTypes); title != "" {
 			response.Attack.Title = title
+		}
+		if l7Incident != nil {
+			if period.IPCount == 0 && l7Incident.UniqueIPs > 0 {
+				response.SourceCount = l7Incident.UniqueIPs
+				response.Attack.IPCount = l7Incident.UniqueIPs
+			}
+			if len(response.AttackTypes) == 0 && len(l7Incident.VectorList) > 0 {
+				types := make([]attackTypeCount, 0, len(l7Incident.VectorList))
+				for _, raw := range l7Incident.VectorList {
+					label := store.L7VectorLabel(raw)
+					if label == "" {
+						continue
+					}
+					types = append(types, attackTypeCount{Type: label, Count: l7Incident.UniqueIPs})
+				}
+				response.AttackTypes = types
+				response.Attack.Vectors = toPeriodVectors(types)
+				if title := multiVectorTitle(types); title != "" {
+					response.Attack.Title = title
+				}
+			}
 		}
 
 		writeJSON(w, http.StatusOK, response)
@@ -601,6 +640,173 @@ func attackLiveWindow(period store.SecurityEventPeriod) (time.Time, time.Time) {
 		start = end.Add(-15 * time.Minute)
 	}
 	return start, end
+}
+
+func loadLiveL7Incident(
+	ctx context.Context,
+	servers store.ServerStore,
+	l7Attacks store.L7AttackStore,
+	serverID int64,
+	reqID, periodStatus string,
+) *store.L7AttackIncident {
+	var stored *store.L7AttackIncident
+	if rec, err := l7Attacks.Get(ctx, reqID); err == nil {
+		inc := rec.Incident
+		stored = &inc
+	}
+
+	// While the period is ongoing (or the stored snapshot is still active), refresh
+	// from the edge so the chart has a live timeline before attack_stop arrives.
+	needLive := strings.EqualFold(periodStatus, "ongoing")
+	if stored != nil && strings.EqualFold(strings.TrimSpace(stored.Status), "active") {
+		needLive = true
+	}
+	if !needLive || serverID <= 0 || servers == nil {
+		return stored
+	}
+	view, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		return stored
+	}
+	live, err := fetchEdgeL7Attack(ctx, view, reqID)
+	if err != nil {
+		return stored
+	}
+	data := "attack_update"
+	if strings.EqualFold(strings.TrimSpace(live.Status), "ended") {
+		data = "attack_stop"
+	}
+	if rec, upsertErr := l7Attacks.Upsert(ctx, serverID, data, live); upsertErr == nil {
+		inc := rec.Incident
+		return &inc
+	}
+	return &live
+}
+
+// loadL7DropSeries builds blocked/passed request counts for the padded console
+// window: 1-minute panel metrics for before/after context, overlaid by the
+// incident's exact 10-second timeline during the attack.
+func loadL7DropSeries(
+	ctx context.Context,
+	stats store.ServerTrafficStatsStore,
+	start, end time.Time,
+	scope store.TrafficScope,
+	incident *store.L7AttackIncident,
+) []attackDropPoint {
+	byBucket := map[int64]attackDropPoint{}
+
+	if stats != nil && scope.ServerID > 0 {
+		requests, reqErr := stats.ListRequestResponse(ctx, start, end, scope)
+		blocked, blockedErr := stats.ListBlockedRequestSeries(ctx, start, end, scope)
+		blockedByTS := map[string]int64{}
+		if blockedErr == nil {
+			for _, item := range blocked {
+				blockedByTS[item.Timestamp] = item.Count
+			}
+		}
+		if reqErr == nil {
+			for _, item := range requests {
+				ts, ok := parseConsoleTime(item.Timestamp)
+				if !ok {
+					continue
+				}
+				blockedCount := blockedByTS[item.Timestamp]
+				if blockedCount < 0 {
+					blockedCount = 0
+				}
+				if blockedCount > item.RequestCount {
+					blockedCount = item.RequestCount
+				}
+				passed := item.RequestCount - blockedCount
+				// Expand each 1-minute metric into six 10s buckets so the chart
+				// can share the incident timeline's resolution.
+				blockedParts := splitInt64(blockedCount, 6)
+				passedParts := splitInt64(passed, 6)
+				for i := 0; i < 6; i++ {
+					bucket := ts.Add(time.Duration(i) * 10 * time.Second).UTC()
+					if bucket.Before(start) || !bucket.Before(end.Add(10*time.Second)) {
+						continue
+					}
+					key := bucket.Unix()
+					byBucket[key] = attackDropPoint{
+						Timestamp: bucket.Format(time.RFC3339),
+						Blocked:   blockedParts[i],
+						Allowed:   passedParts[i],
+					}
+				}
+			}
+		}
+	}
+
+	if incident != nil {
+		for _, raw := range incident.Timeline {
+			t := int64FromAny(raw["t"])
+			if t <= 0 {
+				continue
+			}
+			blocked := int64FromAny(raw["blocked"])
+			passed := int64FromAny(raw["passed"])
+			if passed == 0 {
+				requests := int64FromAny(raw["requests"])
+				passed = requests - blocked - int64FromAny(raw["rapid_reset"]) - int64FromAny(raw["malformed"])
+				if passed < 0 {
+					passed = 0
+				}
+			}
+			bucket := time.Unix(t, 0).UTC()
+			byBucket[t] = attackDropPoint{
+				Timestamp: bucket.Format(time.RFC3339),
+				Blocked:   blocked,
+				Allowed:   passed,
+			}
+		}
+	}
+
+	drops := make([]attackDropPoint, 0, len(byBucket))
+	for _, point := range byBucket {
+		drops = append(drops, point)
+	}
+	sort.Slice(drops, func(i, j int) bool { return drops[i].Timestamp < drops[j].Timestamp })
+	return drops
+}
+
+func int64FromAny(value any) int64 {
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case float32:
+		return int64(v)
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case int32:
+		return int64(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return n
+	case string:
+		n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		return n
+	default:
+		return 0
+	}
+}
+
+func splitInt64(total int64, parts int) []int64 {
+	out := make([]int64, parts)
+	if parts <= 0 {
+		return out
+	}
+	base := total / int64(parts)
+	rem := total % int64(parts)
+	for i := 0; i < parts; i++ {
+		out[i] = base
+		if int64(i) < rem {
+			out[i]++
+		}
+	}
+	return out
 }
 
 func loadDropSeries(ctx context.Context, l4Stats store.L4AttackStatsStore, start, end time.Time, scope store.TrafficScope) []attackDropPoint {
