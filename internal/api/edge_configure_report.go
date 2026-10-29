@@ -61,6 +61,7 @@ type edgeL7EdgeSection struct {
 	TemporaryBlacklist []edgeTemporaryBlacklistEntry `json:"temporaryblacklist"`
 	ACLRules           []map[string]any              `json:"acl_rules"`
 	ACLApplyRules      []map[string]any              `json:"acl_apply_rules"`
+	L7Guard            map[string]any                `json:"l7guard"`
 	LegacyGlobal       map[string]any                `json:"legacy_global"`
 }
 
@@ -131,6 +132,7 @@ func reportEdgeConfigureHandler(
 	compressSettings store.CompressStore,
 	siteListeningPorts store.SiteListeningPortStore,
 	l7BlockEvents store.L7BlockEventStore,
+	l7Guard store.L7GuardStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -315,6 +317,17 @@ func reportEdgeConfigureHandler(
 			return
 		}
 		result.TemporaryBlacklist = len(tempPayloads)
+
+		if l7Guard != nil && payload.L7.Edge.L7Guard != nil {
+			raw, err := json.Marshal(payload.L7.Edge.L7Guard)
+			if err != nil {
+				log.Printf("[api] report_edge_configure serverID=%d encode l7guard failed: %v", server.ID, err)
+			} else if settings, err := store.DecodeL7GuardSettings(raw); err != nil {
+				log.Printf("[api] report_edge_configure serverID=%d decode l7guard failed: %v", server.ID, err)
+			} else if _, err := l7Guard.Upsert(r.Context(), server.ID, settings); err != nil {
+				log.Printf("[api] report_edge_configure serverID=%d upsert l7guard failed: %v", server.ID, err)
+			}
+		}
 		if l7BlockEvents != nil && len(tempPayloads) > 0 {
 			history := make([]store.L7BlockEventInput, 0, len(tempPayloads))
 			for _, item := range tempPayloads {

@@ -101,8 +101,12 @@ Angelos serves TLS on that port.
 | `POST /API/L7/l7_update_responsefreq` | Site | Response-code frequency limits |
 | `POST /API/L7/l7_update_useragent` | Site | User-agent rules |
 | `POST /API/L7/l7_update_temporaryblacklist` | Server | Edge reports / control-plane temp blacklist sync |
+| `POST /API/L7/l7_update_l7guard` | Server | L7 Guard abuse-detector settings (Configure edges → L7 Guard) |
+| `GET /API/L7/l7guard` | Server | Read effective L7 Guard settings (agent / diagnostics) |
 
 Anti-CC rules are included inside `l7_update_site` (`waf_rules.waf_anticc`); there is no separate incremental Anti-CC push path today.
+
+**L7 Guard push** (`l7_update_l7guard`) — server-scoped; body includes edge `token`, `serverId`, and `l7guard` (or `reset: true`). Fields: `enabled`, `xdp`, `window`, `rst_threshold`, `rej_threshold`, `bad_threshold`, `req_threshold`, `block_ttl`, `block_max_ttl`, `allow_ips`. Omitted fields use defaults. Applied within ~10s (no nginx reload). Effective settings also appear in `report_edge_configure` under `l7.edge.l7guard`.
 
 **Typical WAF rule payload shape** (whitelist example):
 
@@ -331,9 +335,9 @@ Not Angelos “outbound API”, but related edge callbacks the back-end exposes:
 |------------------|---------|
 | `POST /report_xdp` | L4 attack / XDP reports |
 | `POST /api/temporary_blacklist_added` | Temporary blacklist notified from edge |
-| `POST /api/report_edge_configure` | Periodic full edge configure snapshot (L4 lists/config, listening ports, temp blacklist, site compress/upstreams/ports) |
+| `POST /api/report_edge_configure` | Periodic full edge configure snapshot (L4 lists/config, listening ports, temp blacklist, L7 Guard, site compress/upstreams/ports) |
 
-Angelos posts `report_edge_configure` about every 60s (`EDGE_LIST_SYNC_INTERVAL`). Dorian authenticates with the edge `token` and reconciles MySQL/Redis for that server so panel and edge stay aligned.
+Angelos posts `report_edge_configure` about every 60s (`EDGE_LIST_SYNC_INTERVAL`). Dorian authenticates with the edge `token` and reconciles MySQL/Redis for that server so panel and edge stay aligned. L7 Guard settings under `l7.edge.l7guard` are upserted into panel storage.
 
 After ingest of a one-shot temp-blacklist event, Dorian may also call Angelos `l7_update_temporaryblacklist` to keep L7 in sync.
 

@@ -333,6 +333,7 @@ func registerRoutes(
 	wafRules store.WafRuleStore,
 	siteListeningPorts store.SiteListeningPortStore,
 	originRoutes store.SiteOriginRouteStore,
+	l7Guard store.L7GuardStore,
 	certIssuer *acme.Issuer,
 ) {
 	mux.HandleFunc("/health", healthHandler)
@@ -340,9 +341,9 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
 	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
-	mux.HandleFunc("/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents))
-	mux.HandleFunc("/api/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents))
-	mux.HandleFunc("/api/v1/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents))
+	mux.HandleFunc("/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents, l7Guard))
+	mux.HandleFunc("/api/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents, l7Guard))
+	mux.HandleFunc("/api/v1/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents, l7Guard))
 	mux.HandleFunc("/report_cache_hit", reportCacheHitHandler(servers, serverTrafficStats))
 	mux.HandleFunc("/api/report_cache_hit", reportCacheHitHandler(servers, serverTrafficStats))
 	mux.HandleFunc("/api/v1/report_cache_hit", reportCacheHitHandler(servers, serverTrafficStats))
@@ -560,7 +561,13 @@ func registerRoutes(
 	mux.HandleFunc("/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4, l7BlockEvents))
 	mux.HandleFunc("/api/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4, l7BlockEvents))
 	mux.HandleFunc("/api/v1/temporary_blacklist_added", temporaryBlacklistAddedHandler(servers, sites, blacklist, l4, l7BlockEvents))
-	mux.HandleFunc("/servers/", restrictServerDetail(serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings)))
+	mux.HandleFunc("/servers/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/l7-guard") {
+			restrictServerDetail(serverL7GuardHandler(servers, l7Guard)).ServeHTTP(w, r)
+			return
+		}
+		restrictServerDetail(serverDetailHandler(cfg, agentClient, servers, l4, l4Whitelist, l4Blacklist, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings)).ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/users", requireAdmin(usersHandler(account, users, mfa)))
 	mux.HandleFunc("/users/", requireAdminOrSelfUser(userHandler(account, users)))
 	mux.HandleFunc("/api/v1/users", requireAdmin(usersHandler(account, users, mfa)))
