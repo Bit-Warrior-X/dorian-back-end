@@ -405,7 +405,8 @@ CREATE TABLE IF NOT EXISTS `security_events` (
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
   PRIMARY KEY (`id`) USING BTREE,
   KEY `idx_security_events_server_created` (`server_id`,`created_at`),
-  KEY `idx_security_events_req` (`req_id`,`created_at`)
+  KEY `idx_security_events_req` (`req_id`,`created_at`),
+  KEY `idx_security_events_lifecycle` (`command`,`event_data`,`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;

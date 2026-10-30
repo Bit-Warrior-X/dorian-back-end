@@ -99,12 +99,20 @@ type BlockedSource struct {
 	Blocks        int
 }
 
+// periodDiscoverySQL identifies attack windows without scanning high-volume
+// report_block_ip rows. Lifecycle / report / protection events carry the req_id;
+// block samples are loaded later only for the matched windows.
+const periodDiscoverySQL = `(
+	event_data IN ('attack_start', 'attack_stop')
+	OR command IN ('report_attack', 'report_l7_attack', 'report_protection')
+)`
+
 func (store *securityEventStore) CountPeriodsStarted(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, error) {
 	// Look back one day so a window already open at start keeps its real first report.
 	inner, args := appendServerScope(`
 		SELECT IF(req_id = '', CONCAT('event:', id), req_id) AS period_key, MIN(created_at) AS started_at
 		FROM security_events
-		WHERE (req_id <> '' OR event_data = 'attack_start')
+		WHERE `+periodDiscoverySQL+`
 		  AND created_at >= ? AND created_at < ?`, []any{start.Add(-24 * time.Hour), end}, scope)
 	query := `SELECT COUNT(*) FROM (` + inner + ` GROUP BY period_key) p WHERE p.started_at >= ? AND p.started_at < ?`
 	args = append(args, start, end)
@@ -341,9 +349,9 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 		limit = 5000
 	}
 	useWindow := !start.IsZero() && !end.IsZero() && end.After(start)
-	// Prefer real attack windows (shared req_id). Orphan per-IP block rows without
-	// req_id (e.g. EVENT_IP_FRAG_MIDDLE_BLOCK) used to flood the newest-N list and
-	// hide ongoing floods from Overview / Alarms.
+	// Prefer real attack windows (shared req_id). Discovery ignores report_block_ip
+	// so Overview does not scan every blocked-source sample. Orphan start/stop rows
+	// without req_id still surface as notices.
 	var keyQuery string
 	var keyArgs []any
 	if useWindow {
@@ -355,7 +363,7 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 				       MIN(created_at) AS started_at,
 				       MAX(created_at) AS last_at
 				FROM security_events
-				WHERE (req_id <> '' OR event_data IN ('attack_start', 'attack_stop'))
+				WHERE `+periodDiscoverySQL+`
 				  AND created_at >= ? AND created_at < ?`, []any{start.Add(-24 * time.Hour), end}, scope)
 		keyQuery += `
 				GROUP BY period_key
@@ -368,7 +376,7 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 		keyQuery, keyArgs = appendServerScope(`
 		SELECT IF(req_id = '', CONCAT('event:', id), req_id) AS period_key, MAX(created_at) AS last_at
 		FROM security_events
-		WHERE (req_id <> '' OR event_data IN ('attack_start', 'attack_stop'))`, nil, scope)
+		WHERE `+periodDiscoverySQL, nil, scope)
 		keyQuery += " GROUP BY period_key ORDER BY last_at DESC LIMIT ?"
 		keyArgs = append(keyArgs, limit)
 	}
@@ -406,10 +414,17 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 		for i, id := range reqIDs {
 			args[i] = id
 		}
+		// Skip report_block_ip when resolving the display row — those dominate volume
+		// and discovery already guaranteed a lifecycle/report row exists.
 		if err := store.scanInto(ctx, latest, `
 			SELECT e.id, e.server_id, s.name, e.title, e.description, e.command, e.source_ip, e.ttl, e.attack_type, e.event_data, e.req_id, e.created_at, e.updated_at
 			FROM security_events e
-			JOIN (SELECT req_id, MAX(id) AS id FROM security_events WHERE req_id IN (`+sqlPlaceholders(len(reqIDs))+`) GROUP BY req_id) m ON m.id = e.id
+			JOIN (
+				SELECT req_id, MAX(id) AS id
+				FROM security_events
+				WHERE req_id IN (`+sqlPlaceholders(len(reqIDs))+`) AND command <> 'report_block_ip'
+				GROUP BY req_id
+			) m ON m.id = e.id
 			LEFT JOIN servers s ON s.id = e.server_id`, args, func(item SecurityEvent) string { return item.ReqID }); err != nil {
 			return nil, err
 		}
@@ -428,15 +443,24 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 	if err != nil {
 		return nil, err
 	}
-	ips, err := store.periodIPs(ctx, reqIDs, 24)
-	if err != nil {
-		return nil, err
-	}
+	// List view does not render sample IPs (detail/console loads them via GetPeriod).
 	timeline, err := store.periodTimeline(ctx, reqIDs)
 	if err != nil {
 		return nil, err
 	}
-	active, err := store.periodActiveIPs(ctx, reqIDs)
+	// Active block counts are only shown for live attacks — skip ended windows.
+	ongoingIDs := make([]string, 0, len(reqIDs))
+	for _, id := range reqIDs {
+		s := stats[id]
+		if s.stoppedHit {
+			continue
+		}
+		if s.ended.Valid && time.Since(s.ended.Time) > attackQuietTimeout {
+			continue
+		}
+		ongoingIDs = append(ongoingIDs, id)
+	}
+	active, err := store.periodActiveIPs(ctx, ongoingIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -459,7 +483,7 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 		for i := len(timeline[key]) - 1; i >= 0; i-- {
 			group = append(group, timeline[key][i])
 		}
-		period := groupedSecurityPeriod(key, group, stats[key], ips[key], timeline[key])
+		period := groupedSecurityPeriod(key, group, stats[key], nil, timeline[key])
 		period.ActiveIPCount = active[key]
 		period.Vectors = vectors[key]
 		if title := multiAttackPeriodTitle(period.Vectors); title != "" {

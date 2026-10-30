@@ -263,27 +263,18 @@ func (store *serverTrafficStatsStore) ListBandwidth(ctx context.Context, start, 
 }
 
 func (store *serverTrafficStatsStore) ListNicRxBandwidthByServer(ctx context.Context, start, end time.Time, scope TrafficScope) ([]ServerBandwidthPoint, error) {
-	// NIC minute samples from the edge can under-count during XDP/Sparta floods
-	// (seen ~8× low vs l4_attack_stats). Prefer the higher of the NIC sample and
-	// the L4 per-second peak for that minute so Overview matches the attack view.
-	// Both sides use the panel unit: bits/s ÷ 1024.
+	// Overview uses minute NIC samples only. Joining/aggregating write-hot
+	// l4_attack_stats (second buckets) for peak correction made this endpoint
+	// ~10s under live insert load and stalled the whole Overview. Attack Console
+	// already reads l4_attack_stats directly when operators need flood-accurate RX.
 	query := `
-		SELECT s.server_id, s.bucket_ts,
-		       GREATEST(s.bandwidth_nic_rx, COALESCE(l.peak_rate, 0)) AS bandwidth_nic_rx
-		FROM server_traffic_stats s
-		LEFT JOIN (
-			SELECT server_id,
-			       FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(bucket_ts) / 60) * 60) AS minute_ts,
-			       CAST(MAX(total_traffic) * 8 / 1024 AS UNSIGNED) AS peak_rate
-			FROM l4_attack_stats
-			WHERE bucket_ts >= ? AND bucket_ts <= ?
-			GROUP BY server_id, minute_ts
-		) l ON l.server_id = s.server_id AND l.minute_ts = s.bucket_ts
-		WHERE s.bucket_ts >= ? AND s.bucket_ts <= ?`
-	args := []any{start, end, start, end}
-	query, args = appendServerScopePrefixed(query, args, scope, "s")
+		SELECT server_id, bucket_ts, bandwidth_nic_rx
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
 	query += `
-		ORDER BY s.server_id, s.bucket_ts
+		ORDER BY server_id, bucket_ts
 		`
 	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
