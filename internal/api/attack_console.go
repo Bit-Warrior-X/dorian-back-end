@@ -75,7 +75,6 @@ func attackConsoleHandler(
 	servers store.ServerStore,
 	l4Stats store.L4AttackStatsStore,
 	l7Attacks store.L7AttackStore,
-	serverTrafficStats store.ServerTrafficStatsStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -118,10 +117,10 @@ func attackConsoleHandler(
 			)
 		} else if l7Attacks != nil {
 			l7Incident = loadLiveL7Incident(r.Context(), servers, l7Attacks, serverID, reqID, period.Status)
-			drops = downsampleDropSeries(
-				loadL7DropSeries(r.Context(), serverTrafficStats, start, end, scope, l7Incident),
-				attackConsoleDropLimit,
-			)
+			applyL7IncidentTimes(&period, l7Incident)
+			start, end = attackL7Window(period, l7Incident, now)
+			// Timeline buckets only — do not pad with 1-minute panel stats.
+			drops = downsampleDropSeries(loadL7DropSeries(l7Incident), attackConsoleDropLimit)
 		}
 		if n := len(period.Events); n > attackConsoleEventLimit {
 			period.Events = append([]store.SecurityEvent(nil), period.Events[n-attackConsoleEventLimit:]...)
@@ -642,6 +641,49 @@ func attackLiveWindow(period store.SecurityEventPeriod) (time.Time, time.Time) {
 	return start, end
 }
 
+// applyL7IncidentTimes prefers the edge incident clocks (attack.started_at /
+// ended_at) over security-event report arrival times on the period.
+func applyL7IncidentTimes(period *store.SecurityEventPeriod, incident *store.L7AttackIncident) {
+	if period == nil || incident == nil || incident.StartedAt <= 0 {
+		return
+	}
+	period.StartedAt = time.Unix(incident.StartedAt, 0).UTC().Format(time.RFC3339)
+	if incident.EndedAt != nil && *incident.EndedAt > 0 {
+		period.EndedAt = time.Unix(*incident.EndedAt, 0).UTC().Format(time.RFC3339)
+	}
+}
+
+// attackL7Window frames the console around the incident clocks. A short pad
+// keeps the first/last 10s bucket readable without pulling in minute metrics.
+func attackL7Window(period store.SecurityEventPeriod, incident *store.L7AttackIncident, now time.Time) (time.Time, time.Time) {
+	const pad = 30 * time.Second
+	start := now.Add(-15 * time.Minute)
+	if started, ok := parseConsoleTime(period.StartedAt); ok {
+		start = started.Add(-pad)
+	}
+	end := now
+	ongoing := strings.EqualFold(period.Status, "ongoing")
+	if incident != nil && strings.EqualFold(strings.TrimSpace(incident.Status), "active") {
+		ongoing = true
+	}
+	if !ongoing {
+		stopped := period.EndedAt
+		if strings.TrimSpace(stopped) == "" {
+			stopped = period.CreatedAt
+		}
+		if parsed, ok := parseConsoleTime(stopped); ok {
+			end = parsed.Add(pad)
+			if end.After(now) {
+				end = now
+			}
+		}
+	}
+	if !start.Before(end) {
+		start = end.Add(-5 * time.Minute)
+	}
+	return start, end
+}
+
 func loadLiveL7Incident(
 	ctx context.Context,
 	servers store.ServerStore,
@@ -683,85 +725,34 @@ func loadLiveL7Incident(
 	return &live
 }
 
-// loadL7DropSeries builds blocked/passed request counts for the padded console
-// window: 1-minute panel metrics for before/after context, overlaid by the
-// incident's exact 10-second timeline during the attack.
-func loadL7DropSeries(
-	ctx context.Context,
-	stats store.ServerTrafficStatsStore,
-	start, end time.Time,
-	scope store.TrafficScope,
-	incident *store.L7AttackIncident,
-) []attackDropPoint {
+// loadL7DropSeries returns the incident's 10-second timeline only. Each point's
+// timestamp is the bucket start (t); the UI draws a step/bar covering [t, t+10).
+func loadL7DropSeries(incident *store.L7AttackIncident) []attackDropPoint {
+	if incident == nil || len(incident.Timeline) == 0 {
+		return nil
+	}
 	byBucket := map[int64]attackDropPoint{}
-
-	if stats != nil && scope.ServerID > 0 {
-		requests, reqErr := stats.ListRequestResponse(ctx, start, end, scope)
-		blocked, blockedErr := stats.ListBlockedRequestSeries(ctx, start, end, scope)
-		blockedByTS := map[string]int64{}
-		if blockedErr == nil {
-			for _, item := range blocked {
-				blockedByTS[item.Timestamp] = item.Count
+	for _, raw := range incident.Timeline {
+		t := int64FromAny(raw["t"])
+		if t <= 0 {
+			continue
+		}
+		blocked := int64FromAny(raw["blocked"])
+		passed := int64FromAny(raw["passed"])
+		if passed == 0 {
+			requests := int64FromAny(raw["requests"])
+			passed = requests - blocked - int64FromAny(raw["rapid_reset"]) - int64FromAny(raw["malformed"])
+			if passed < 0 {
+				passed = 0
 			}
 		}
-		if reqErr == nil {
-			for _, item := range requests {
-				ts, ok := parseConsoleTime(item.Timestamp)
-				if !ok {
-					continue
-				}
-				blockedCount := blockedByTS[item.Timestamp]
-				if blockedCount < 0 {
-					blockedCount = 0
-				}
-				if blockedCount > item.RequestCount {
-					blockedCount = item.RequestCount
-				}
-				passed := item.RequestCount - blockedCount
-				// Expand each 1-minute metric into six 10s buckets so the chart
-				// can share the incident timeline's resolution.
-				blockedParts := splitInt64(blockedCount, 6)
-				passedParts := splitInt64(passed, 6)
-				for i := 0; i < 6; i++ {
-					bucket := ts.Add(time.Duration(i) * 10 * time.Second).UTC()
-					if bucket.Before(start) || !bucket.Before(end.Add(10*time.Second)) {
-						continue
-					}
-					key := bucket.Unix()
-					byBucket[key] = attackDropPoint{
-						Timestamp: bucket.Format(time.RFC3339),
-						Blocked:   blockedParts[i],
-						Allowed:   passedParts[i],
-					}
-				}
-			}
+		bucket := time.Unix(t, 0).UTC()
+		byBucket[t] = attackDropPoint{
+			Timestamp: bucket.Format(time.RFC3339),
+			Blocked:   blocked,
+			Allowed:   passed,
 		}
 	}
-
-	if incident != nil {
-		for _, raw := range incident.Timeline {
-			t := int64FromAny(raw["t"])
-			if t <= 0 {
-				continue
-			}
-			blocked := int64FromAny(raw["blocked"])
-			passed := int64FromAny(raw["passed"])
-			if passed == 0 {
-				requests := int64FromAny(raw["requests"])
-				passed = requests - blocked - int64FromAny(raw["rapid_reset"]) - int64FromAny(raw["malformed"])
-				if passed < 0 {
-					passed = 0
-				}
-			}
-			bucket := time.Unix(t, 0).UTC()
-			byBucket[t] = attackDropPoint{
-				Timestamp: bucket.Format(time.RFC3339),
-				Blocked:   blocked,
-				Allowed:   passed,
-			}
-		}
-	}
-
 	drops := make([]attackDropPoint, 0, len(byBucket))
 	for _, point := range byBucket {
 		drops = append(drops, point)
@@ -791,22 +782,6 @@ func int64FromAny(value any) int64 {
 	default:
 		return 0
 	}
-}
-
-func splitInt64(total int64, parts int) []int64 {
-	out := make([]int64, parts)
-	if parts <= 0 {
-		return out
-	}
-	base := total / int64(parts)
-	rem := total % int64(parts)
-	for i := 0; i < parts; i++ {
-		out[i] = base
-		if int64(i) < rem {
-			out[i]++
-		}
-	}
-	return out
 }
 
 func loadDropSeries(ctx context.Context, l4Stats store.L4AttackStatsStore, start, end time.Time, scope store.TrafficScope) []attackDropPoint {
