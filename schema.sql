@@ -213,8 +213,10 @@ CREATE TABLE IF NOT EXISTS `l4_attack_stats` (
   `tcp_ack` bigint(20) unsigned NOT NULL DEFAULT 0,
   `tcp_rst` bigint(20) unsigned NOT NULL DEFAULT 0,
   `tcp_stomp` bigint(20) unsigned NOT NULL DEFAULT 0,
+  `on_minute` tinyint(1) GENERATED ALWAYS AS (second(`bucket_ts`) = 0) STORED,
   PRIMARY KEY (`server_id`,`bucket_ts`),
   KEY `idx_bucket` (`bucket_ts`),
+  KEY `idx_l4_attack_on_minute` (`on_minute`,`bucket_ts`),
   CONSTRAINT `l4_attack_stats_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
@@ -322,6 +324,7 @@ CREATE TABLE IF NOT EXISTS `l4_live_attack` (
   PRIMARY KEY (`id`) USING BTREE,
   KEY `server_id` (`server_id`) USING BTREE,
   KEY `idx_l4_live_attack_req` (`req_id`,`created_at`),
+  KEY `idx_l4_live_attack_created` (`created_at`),
   CONSTRAINT `l4_live_attack_ibfk_1` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;

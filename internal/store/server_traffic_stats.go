@@ -395,24 +395,17 @@ func (store *serverTrafficStatsStore) ListL7TxBandwidthByServer(ctx context.Cont
 }
 
 func (store *serverTrafficStatsStore) ListNicRxBandwidthAggregate(ctx context.Context, start, end time.Time, scope TrafficScope) ([]TrafficPoint, error) {
+	// NIC minute samples only. Joining l4_attack_stats second-buckets made
+	// Analytics → L4 Traffic / Detection multi-second (or multi-ten) on long ranges.
 	query := `
-		SELECT s.bucket_ts,
-		       SUM(GREATEST(s.bandwidth_nic_rx, COALESCE(l.peak_rate, 0))) AS bandwidth_nic_rx
-		FROM server_traffic_stats s
-		LEFT JOIN (
-			SELECT server_id,
-			       FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(bucket_ts) / 60) * 60) AS minute_ts,
-			       CAST(MAX(total_traffic) * 8 / 1024 AS UNSIGNED) AS peak_rate
-			FROM l4_attack_stats
-			WHERE bucket_ts >= ? AND bucket_ts <= ?
-			GROUP BY server_id, minute_ts
-		) l ON l.server_id = s.server_id AND l.minute_ts = s.bucket_ts
-		WHERE s.bucket_ts >= ? AND s.bucket_ts <= ?`
-	args := []any{start, end, start, end}
-	query, args = appendServerScopePrefixed(query, args, scope, "s")
+		SELECT bucket_ts, SUM(bandwidth_nic_rx) AS bandwidth_nic_rx
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
 	query += `
-		GROUP BY s.bucket_ts
-		ORDER BY s.bucket_ts
+		GROUP BY bucket_ts
+		ORDER BY bucket_ts
 		`
 	rows, err := store.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -619,6 +612,55 @@ func (store *serverTrafficStatsStore) SumBlockedRequests(ctx context.Context, st
 	return total, nil
 }
 
+func topStatsSampleDuration(start, end time.Time) time.Duration {
+	// Top-N / distinct-count KPIs only need relative order. Sampling exact
+	// minute timestamps (IN list) lets idx_bucket do point lookups instead of
+	// a full range scan (ISP COUNT DISTINCT was multi-second even on 1d).
+	dur := end.Sub(start)
+	switch {
+	case dur > 14*24*time.Hour:
+		return 30 * time.Minute
+	case dur > 3*24*time.Hour:
+		return 10 * time.Minute
+	case dur > 6*time.Hour:
+		return 5 * time.Minute
+	default:
+		return 0
+	}
+}
+
+func appendTopStatsSample(query string, args []any, start, end time.Time) (string, []any) {
+	step := topStatsSampleDuration(start, end)
+	if step <= 0 {
+		return query, args
+	}
+	stamps := make([]time.Time, 0, int(end.Sub(start)/step)+2)
+	cursor := start.UTC().Truncate(step)
+	if cursor.Before(start) {
+		cursor = cursor.Add(step)
+	}
+	for !cursor.After(end) {
+		stamps = append(stamps, cursor)
+		cursor = cursor.Add(step)
+	}
+	if len(stamps) == 0 {
+		return query, args
+	}
+	// Cap IN-list size; widen step if the window is extreme.
+	const maxStamps = 2500
+	if len(stamps) > maxStamps {
+		stamps = stamps[:maxStamps]
+	}
+	placeholders := make([]string, len(stamps))
+	for i, ts := range stamps {
+		placeholders[i] = "?"
+		args = append(args, ts)
+	}
+	query += `
+		  AND bucket_ts IN (` + strings.Join(placeholders, ",") + `)`
+	return query, args
+}
+
 func (store *serverTrafficStatsStore) ListTopIPs(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]TopIPRow, error) {
 	if limit <= 0 {
 		limit = 10
@@ -629,6 +671,7 @@ func (store *serverTrafficStatsStore) ListTopIPs(ctx context.Context, start, end
 		FROM ip_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
+	query, args = appendTopStatsSample(query, args, start, end)
 	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY ip
@@ -666,6 +709,7 @@ func (store *serverTrafficStatsStore) ListTopIsps(ctx context.Context, start, en
 		FROM isp_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
+	query, args = appendTopStatsSample(query, args, start, end)
 	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY request_isp
@@ -703,6 +747,7 @@ func (store *serverTrafficStatsStore) ListTopReferers(ctx context.Context, start
 		FROM referer_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
+	query, args = appendTopStatsSample(query, args, start, end)
 	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY request_referer
@@ -740,6 +785,7 @@ func (store *serverTrafficStatsStore) ListTopUrls(ctx context.Context, start, en
 		FROM url_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
+	query, args = appendTopStatsSample(query, args, start, end)
 	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY request_url
@@ -777,6 +823,7 @@ func (store *serverTrafficStatsStore) ListTopUserAgents(ctx context.Context, sta
 		FROM useragent_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
+	query, args = appendTopStatsSample(query, args, start, end)
 	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY request_useragent
@@ -814,6 +861,7 @@ func (store *serverTrafficStatsStore) ListTopDomains(ctx context.Context, start,
 		FROM domain_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	innerArgs := []any{start, end}
+	innerQuery, innerArgs = appendTopStatsSample(innerQuery, innerArgs, start, end)
 	innerQuery, innerArgs = appendTrafficScope(innerQuery, innerArgs, scope, true)
 	if domain := strings.ToLower(strings.TrimSpace(scope.Domain)); domain != "" && scope.SiteID == 0 {
 		innerQuery += ` AND request_domain = ?`
@@ -861,6 +909,7 @@ func (store *serverTrafficStatsStore) SumIspRequests(ctx context.Context, start,
 		FROM isp_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
+	query, args = appendTopStatsSample(query, args, start, end)
 	query, args = appendTrafficScope(query, args, scope, true)
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&total); err != nil {
@@ -876,6 +925,7 @@ func (store *serverTrafficStatsStore) SumIPCountStats(ctx context.Context, start
 		FROM ip_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
+	query, args = appendTopStatsSample(query, args, start, end)
 	query, args = appendTrafficScope(query, args, scope, true)
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&total); err != nil {
@@ -891,6 +941,7 @@ func (store *serverTrafficStatsStore) SumRefererRequests(ctx context.Context, st
 		FROM referer_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
+	query, args = appendTopStatsSample(query, args, start, end)
 	query, args = appendTrafficScope(query, args, scope, true)
 	row := store.db.QueryRowContext(ctx, query, args...)
 	if err := row.Scan(&total); err != nil {
@@ -907,6 +958,7 @@ func (store *serverTrafficStatsStore) ListCountryRequests(ctx context.Context, s
 		FROM country_request_stats
 		WHERE bucket_ts >= ? AND bucket_ts <= ?`
 	args := []any{start, end}
+	query, args = appendTopStatsSample(query, args, start, end)
 	query, args = appendTrafficScope(query, args, scope, true)
 	query += `
 		GROUP BY country_code
@@ -1471,27 +1523,29 @@ func (store *serverTrafficStatsStore) SumSecurityTotals(ctx context.Context, sta
 	return totalRequest, blockedRequest, totalIp, blockedIp, nil
 }
 
+// latestLookback keeps "latest sample" lookups chart-window scoped without
+// scanning the entire selected range (and never joins write-hot l4_attack_stats).
+func latestLookback(start, end time.Time) time.Time {
+	lookback := end.Add(-30 * time.Minute)
+	if lookback.Before(start) {
+		return start
+	}
+	return lookback
+}
+
 func (store *serverTrafficStatsStore) LatestNicRxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error) {
 	var bucket time.Time
 	var bandwidthNicRx int64
+	start = latestLookback(start, end)
 	query := `
-		SELECT s.bucket_ts,
-		       SUM(GREATEST(s.bandwidth_nic_rx, COALESCE(l.peak_rate, 0))) AS bandwidth_nic_rx
-		FROM server_traffic_stats s
-		LEFT JOIN (
-			SELECT server_id,
-			       FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(bucket_ts) / 60) * 60) AS minute_ts,
-			       CAST(MAX(total_traffic) * 8 / 1024 AS UNSIGNED) AS peak_rate
-			FROM l4_attack_stats
-			WHERE bucket_ts >= ? AND bucket_ts <= ?
-			GROUP BY server_id, minute_ts
-		) l ON l.server_id = s.server_id AND l.minute_ts = s.bucket_ts
-		WHERE s.bucket_ts >= ? AND s.bucket_ts <= ?`
-	args := []any{start, end, start, end}
-	query, args = appendServerScopePrefixed(query, args, scope, "s")
+		SELECT bucket_ts, SUM(bandwidth_nic_rx) AS bandwidth_nic_rx
+		FROM server_traffic_stats
+		WHERE bucket_ts >= ? AND bucket_ts <= ?`
+	args := []any{start, end}
+	query, args = appendServerScope(query, args, scope)
 	query += `
-		GROUP BY s.bucket_ts
-		ORDER BY s.bucket_ts DESC
+		GROUP BY bucket_ts
+		ORDER BY bucket_ts DESC
 		LIMIT 1
 		`
 	row := store.db.QueryRowContext(ctx, query, args...)
@@ -1507,6 +1561,7 @@ func (store *serverTrafficStatsStore) LatestNicRxBandwidth(ctx context.Context, 
 func (store *serverTrafficStatsStore) LatestL7RxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error) {
 	var bucket time.Time
 	var bandwidthL7Rx int64
+	start = latestLookback(start, end)
 	query := `
 		SELECT bucket_ts, SUM(bandwidth_l7_rx) AS bandwidth_l7_rx
 		FROM ` + l7StatsTable(scope) + `
@@ -1531,6 +1586,7 @@ func (store *serverTrafficStatsStore) LatestL7RxBandwidth(ctx context.Context, s
 func (store *serverTrafficStatsStore) LatestL7TxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error) {
 	var bucket time.Time
 	var bandwidthL7Tx int64
+	start = latestLookback(start, end)
 	query := `
 		SELECT bucket_ts, SUM(bandwidth_l7_tx) AS bandwidth_l7_tx
 		FROM ` + l7StatsTable(scope) + `
@@ -1555,6 +1611,7 @@ func (store *serverTrafficStatsStore) LatestL7TxBandwidth(ctx context.Context, s
 func (store *serverTrafficStatsStore) LatestNicTxBandwidth(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, time.Time, error) {
 	var bucket time.Time
 	var bandwidthNicTx int64
+	start = latestLookback(start, end)
 	query := `
 		SELECT bucket_ts, SUM(bandwidth_nic_tx) AS bandwidth_nic_tx
 		FROM server_traffic_stats
@@ -1608,6 +1665,7 @@ func (store *serverTrafficStatsStore) listNicRateAggregate(ctx context.Context, 
 }
 
 func (store *serverTrafficStatsStore) latestNicRate(ctx context.Context, start, end time.Time, scope TrafficScope, column string) (float64, time.Time, error) {
+	start = latestLookback(start, end)
 	query := `
 		SELECT bucket_ts, COALESCE(SUM(` + column + `), 0)
 		FROM server_traffic_stats

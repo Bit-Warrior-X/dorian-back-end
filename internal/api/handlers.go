@@ -1180,7 +1180,13 @@ func dashboardSecurityEventsHandler(securityEvents store.SecurityEventStore) htt
 			scope = store.TrafficScope{ServerID: serverID, Restricted: viewer.restricted}
 		}
 
-		events, err := securityEvents.ListPeriods(r.Context(), limit, scope, windowStart, windowEnd)
+		layer := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("layer")))
+		if layer != "" && layer != "l4" && layer != "l7" {
+			writeError(w, http.StatusBadRequest, "invalid layer")
+			return
+		}
+
+		events, err := securityEvents.ListPeriods(r.Context(), limit, scope, windowStart, windowEnd, layer)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load security events")
 			return
@@ -1836,83 +1842,120 @@ func analyticsSummaryHandler(stats store.ServerTrafficStatsStore, sites store.Si
 			return
 		}
 
-		totalNicRxTraffic, totalNicTxTraffic, totalL7RxTraffic, totalL7TxTraffic, totalRequest, totalResponse, err := stats.SumTotals(r.Context(), start, end, scope)
-		if err != nil {
+		ctx := r.Context()
+		var (
+			totalNicRxTraffic, totalNicTxTraffic, totalL7RxTraffic, totalL7TxTraffic, totalRequest, totalResponse int64
+			nicRxBandwidthLast, nicTxBandwidthLast, l7RxBandwidthLast, l7TxBandwidthLast                         int64
+			nicRxBandwidthLastTime, nicTxBandwidthLastTime, l7RxBandwidthLastTime, l7TxBandwidthLastTime         time.Time
+			totalIp, refererCount, ispCount                                                                      int64
+			packetTotals                                                                                         store.PacketTotals
+			ppsNicRxLast, ppsNicTxLast, ppsNicDroppedLast, ppsXdpRxLast, ppsXdpBlockedLast                       float64
+			ppsNicRxLastTime, ppsNicTxLastTime, ppsNicDroppedLastTime, ppsXdpRxLastTime, ppsXdpBlockedLastTime   time.Time
+			firstErr                                                                                             error
+			errMu                                                                                                sync.Mutex
+		)
+		setErr := func(err error) {
+			if err == nil {
+				return
+			}
+			errMu.Lock()
+			if firstErr == nil {
+				firstErr = err
+			}
+			errMu.Unlock()
+		}
+
+		// Run independent summary queries concurrently — sequential fan-out was
+		// multi-ten seconds once LatestNicRx still joined l4_attack_stats.
+		var wg sync.WaitGroup
+		wg.Add(14)
+		go func() {
+			defer wg.Done()
+			var err error
+			totalNicRxTraffic, totalNicTxTraffic, totalL7RxTraffic, totalL7TxTraffic, totalRequest, totalResponse, err = stats.SumTotals(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			nicRxBandwidthLast, nicRxBandwidthLastTime, err = stats.LatestNicRxBandwidth(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			nicTxBandwidthLast, nicTxBandwidthLastTime, err = stats.LatestNicTxBandwidth(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			l7RxBandwidthLast, l7RxBandwidthLastTime, err = stats.LatestL7RxBandwidth(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			l7TxBandwidthLast, l7TxBandwidthLastTime, err = stats.LatestL7TxBandwidth(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			totalIp, err = stats.SumIPCountStats(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			refererCount, err = stats.SumRefererRequests(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			ispCount, err = stats.SumIspRequests(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			packetTotals, err = stats.SumPacketTotals(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			ppsNicRxLast, ppsNicRxLastTime, err = stats.LatestPpsNicRx(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			ppsNicTxLast, ppsNicTxLastTime, err = stats.LatestPpsNicTx(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			ppsNicDroppedLast, ppsNicDroppedLastTime, err = stats.LatestPpsNicDropped(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			ppsXdpRxLast, ppsXdpRxLastTime, err = stats.LatestPpsXdpRx(ctx, start, end, scope)
+			setErr(err)
+		}()
+		go func() {
+			defer wg.Done()
+			var err error
+			ppsXdpBlockedLast, ppsXdpBlockedLastTime, err = stats.LatestPpsXdpBlocked(ctx, start, end, scope)
+			setErr(err)
+		}()
+		wg.Wait()
+		if firstErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load analytics summary")
-			return
-		}
-
-		nicRxBandwidthLast, nicRxBandwidthLastTime, err := stats.LatestNicRxBandwidth(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load nic rx bandwidth")
-			return
-		}
-
-		nicTxBandwidthLast, nicTxBandwidthLastTime, err := stats.LatestNicTxBandwidth(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load nic tx bandwidth")
-			return
-		}
-
-		l7RxBandwidthLast, l7RxBandwidthLastTime, err := stats.LatestL7RxBandwidth(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load l7 rx bandwidth")
-			return
-		}
-
-		l7TxBandwidthLast, l7TxBandwidthLastTime, err := stats.LatestL7TxBandwidth(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load l7 tx bandwidth")
-			return
-		}
-
-		totalIp, err := stats.SumIPCountStats(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load ip count")
-			return
-		}
-
-		refererCount, err := stats.SumRefererRequests(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load referer count")
-			return
-		}
-
-		ispCount, err := stats.SumIspRequests(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load isp count")
-			return
-		}
-
-		packetTotals, err := stats.SumPacketTotals(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load packet totals")
-			return
-		}
-
-		ppsNicRxLast, ppsNicRxLastTime, err := stats.LatestPpsNicRx(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load nic rx pps")
-			return
-		}
-		ppsNicTxLast, ppsNicTxLastTime, err := stats.LatestPpsNicTx(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load nic tx pps")
-			return
-		}
-		ppsNicDroppedLast, ppsNicDroppedLastTime, err := stats.LatestPpsNicDropped(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load nic dropped pps")
-			return
-		}
-		ppsXdpRxLast, ppsXdpRxLastTime, err := stats.LatestPpsXdpRx(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load xdp rx pps")
-			return
-		}
-		ppsXdpBlockedLast, ppsXdpBlockedLastTime, err := stats.LatestPpsXdpBlocked(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load xdp blocked pps")
 			return
 		}
 
@@ -2825,6 +2868,16 @@ func l4AnalyticsSummaryHandler(stats store.L4AttackStatsStore, sites store.SiteS
 	}
 }
 
+func l4AnalyticsSeriesBucket(start, end time.Time) time.Duration {
+	// Always aggregate in SQL — shipping every 1s Sparta sample made DDoS (L4)
+	// analytics multi-second even after the Go coarsener ran.
+	bucket := analyticsChartBucket(start, end)
+	if bucket < time.Minute {
+		return time.Minute
+	}
+	return bucket
+}
+
 func l4AnalyticsTrafficSeriesHandler(stats store.L4AttackStatsStore, sites store.SiteStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -2837,13 +2890,13 @@ func l4AnalyticsTrafficSeriesHandler(stats store.L4AttackStatsStore, sites store
 			return
 		}
 
-		points, err := stats.ListTrafficSeries(r.Context(), start, end, scope)
+		points, err := stats.ListTrafficSeries(r.Context(), start, end, scope, l4AnalyticsSeriesBucket(start, end))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load l4 traffic series")
 			return
 		}
 
-		writeJSON(w, http.StatusOK, coarsenL4Traffic(points, start, end))
+		writeJSON(w, http.StatusOK, points)
 	}
 }
 
@@ -2859,13 +2912,13 @@ func l4AnalyticsProtocolSeriesHandler(stats store.L4AttackStatsStore, sites stor
 			return
 		}
 
-		points, err := stats.ListProtocolSeries(r.Context(), start, end, scope)
+		points, err := stats.ListProtocolSeries(r.Context(), start, end, scope, l4AnalyticsSeriesBucket(start, end))
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load l4 protocol series")
 			return
 		}
 
-		writeJSON(w, http.StatusOK, coarsenL4Protocols(points, start, end))
+		writeJSON(w, http.StatusOK, points)
 	}
 }
 

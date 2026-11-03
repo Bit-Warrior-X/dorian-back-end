@@ -72,7 +72,8 @@ type SecurityEventStore interface {
 	ListRecent(ctx context.Context, limit int, scope TrafficScope) ([]SecurityEvent, error)
 	// ListPeriods returns the newest attack windows, grouping reports that share a req_id.
 	// When start and end are non-zero, only periods that overlap [start, end) are returned.
-	ListPeriods(ctx context.Context, limit int, scope TrafficScope, start, end time.Time) ([]SecurityEventPeriod, error)
+	// layer may be "l4", "l7", or empty for both.
+	ListPeriods(ctx context.Context, limit int, scope TrafficScope, start, end time.Time, layer string) ([]SecurityEventPeriod, error)
 	// GetPeriod returns one attack window by its req_id.
 	GetPeriod(ctx context.Context, reqID string) (SecurityEventPeriod, error)
 	// Create records an event reported by an edge; serverID 0 stores no edge.
@@ -106,6 +107,24 @@ const periodDiscoverySQL = `(
 	event_data IN ('attack_start', 'attack_stop')
 	OR command IN ('report_attack', 'report_l7_attack', 'report_protection')
 )`
+
+func periodDiscoverySQLForLayer(layer string) string {
+	switch strings.ToLower(strings.TrimSpace(layer)) {
+	case "l4":
+		// L7 uses command=report_l7_attack (including its attack_start/stop rows).
+		return `(
+			command <> 'report_l7_attack'
+			AND (
+				event_data IN ('attack_start', 'attack_stop')
+				OR command IN ('report_attack', 'report_protection')
+			)
+		)`
+	case "l7":
+		return `(command = 'report_l7_attack')`
+	default:
+		return periodDiscoverySQL
+	}
+}
 
 func (store *securityEventStore) CountPeriodsStarted(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, error) {
 	// Look back one day so a window already open at start keeps its real first report.
@@ -340,7 +359,7 @@ type securityPeriodStats struct {
 	serverName string
 }
 
-func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, scope TrafficScope, start, end time.Time) ([]SecurityEventPeriod, error) {
+func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, scope TrafficScope, start, end time.Time, layer string) ([]SecurityEventPeriod, error) {
 	if limit <= 0 {
 		limit = 6
 	}
@@ -348,6 +367,8 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 	if limit > 5000 {
 		limit = 5000
 	}
+	layer = strings.ToLower(strings.TrimSpace(layer))
+	discovery := periodDiscoverySQLForLayer(layer)
 	useWindow := !start.IsZero() && !end.IsZero() && end.After(start)
 	// Prefer real attack windows (shared req_id). Discovery ignores report_block_ip
 	// so Overview does not scan every blocked-source sample. Orphan start/stop rows
@@ -363,7 +384,7 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 				       MIN(created_at) AS started_at,
 				       MAX(created_at) AS last_at
 				FROM security_events
-				WHERE `+periodDiscoverySQL+`
+				WHERE `+discovery+`
 				  AND created_at >= ? AND created_at < ?`, []any{start.Add(-24 * time.Hour), end}, scope)
 		keyQuery += `
 				GROUP BY period_key
@@ -376,7 +397,7 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 		keyQuery, keyArgs = appendServerScope(`
 		SELECT IF(req_id = '', CONCAT('event:', id), req_id) AS period_key, MAX(created_at) AS last_at
 		FROM security_events
-		WHERE `+periodDiscoverySQL, nil, scope)
+		WHERE `+discovery, nil, scope)
 		keyQuery += " GROUP BY period_key ORDER BY last_at DESC LIMIT ?"
 		keyArgs = append(keyArgs, limit)
 	}
@@ -475,20 +496,27 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 		if !ok {
 			continue
 		}
+		var period SecurityEventPeriod
 		if strings.HasPrefix(key, "event:") {
-			periods = append(periods, singleSecurityPeriod(row))
+			period = singleSecurityPeriod(row)
+		} else {
+			group := []SecurityEvent{row}
+			for i := len(timeline[key]) - 1; i >= 0; i-- {
+				group = append(group, timeline[key][i])
+			}
+			period = groupedSecurityPeriod(key, group, stats[key], nil, timeline[key])
+			period.ActiveIPCount = active[key]
+			period.Vectors = vectors[key]
+			if title := multiAttackPeriodTitle(period.Vectors); title != "" {
+				period.Title = title
+				period.AttackType = period.Vectors[0].Type
+			}
+		}
+		if layer == "l4" && strings.EqualFold(period.Layer, "L7") {
 			continue
 		}
-		group := []SecurityEvent{row}
-		for i := len(timeline[key]) - 1; i >= 0; i-- {
-			group = append(group, timeline[key][i])
-		}
-		period := groupedSecurityPeriod(key, group, stats[key], nil, timeline[key])
-		period.ActiveIPCount = active[key]
-		period.Vectors = vectors[key]
-		if title := multiAttackPeriodTitle(period.Vectors); title != "" {
-			period.Title = title
-			period.AttackType = period.Vectors[0].Type
+		if layer == "l7" && !strings.EqualFold(period.Layer, "L7") {
+			continue
 		}
 		periods = append(periods, period)
 	}

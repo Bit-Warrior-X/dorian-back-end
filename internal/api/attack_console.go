@@ -787,7 +787,7 @@ func int64FromAny(value any) int64 {
 func loadDropSeries(ctx context.Context, l4Stats store.L4AttackStatsStore, start, end time.Time, scope store.TrafficScope) []attackDropPoint {
 	dropByTime := map[string]*attackDropPoint{}
 	if l4Stats != nil && scope.ServerID > 0 {
-		if series, err := l4Stats.ListTrafficSeries(ctx, start, end, scope); err == nil {
+		if series, err := l4Stats.ListTrafficSeries(ctx, start, end, scope, time.Second); err == nil {
 			for _, item := range series {
 				if item.Timestamp == "" {
 					continue
