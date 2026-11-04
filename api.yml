@@ -33,12 +33,26 @@ info:
     - `serverId` narrows results to one edge node.
     - `siteId` narrows to a site domain; when `serverId` is omitted, the site's
       linked servers are used. When both are set, the server must serve that site.
+    - **Exception:** `/analytics/l4/*` and NIC bandwidth series are edge-scoped.
+      `siteId` is validated for ACL but ignored for aggregation (floods / NIC are
+      not per-site). `/dashboard/security-events` is server + `layer` only (no site).
 
     Time windows use either `range` (e.g. `30m`, `24h`, `7d`, `today`, `yesterday`)
     or explicit `start` / `end` (RFC3339 or `2006-01-02 15:04:05`).
 
+    Panel analytics prefer `/analytics/...` and `/dashboard/security-events` (plus
+    Attack Console under `/dashboard/attack-console*`). Overview chart helpers under
+    `/dashboard/bandwidth*` remain for the fleet home page; new work should use
+    `/analytics/series/*` + `/analytics/summary`.
+
+    Edge ingest (`/report_xdp`, `/report_l7_attack`, `/report_cache_hit`,
+    `/report_edge_configure`, `/temporary_blacklist_added`) is public with the edge
+    token and is registered as bare, `/api/…`, and `/api/v1/…`.
+
     The root paths listed below always work. Some groups (auth, users, audit logs,
     analytics, dashboard) also answer under `/api/v1/...`; prefer the root paths.
+    Core CRUD for `/sites`, `/servers`, and `/waf-rules` is prefix-only (no `/api/v1`
+    twin) unless noted.
 
     **Site and WAF rule sub-resources**
 
@@ -599,10 +613,110 @@ paths:
               schema:
                 $ref: "#/components/schemas/DashboardSummary"
 
+  /dashboard/attacks:
+    get:
+      tags: [Dashboard]
+      summary: Paginated attack inbox (alias of /analytics/attacks)
+      description: Same handler as `/analytics/attacks`. Prefer the analytics path for new panel work.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+        - name: layer
+          in: query
+          schema:
+            type: string
+            enum: [l4, l7]
+      responses:
+        "200":
+          description: Paginated attack periods
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+  /analytics/attacks:
+    get:
+      tags: [Analytics]
+      summary: Paginated attack inbox (L4+L7 periods with reqId)
+      description: |
+        Unified Security events feed. Prefer this over `/dashboard/security-events`
+        for panel lists. `siteId` is ACL-only (periods are edge-scoped).
+        Also available as `/dashboard/attacks`.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: layer
+          in: query
+          schema:
+            type: string
+            enum: [l4, l7]
+          description: Omit for both layers
+      responses:
+        "200":
+          description: Paginated attack periods
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, offset, limit, hasMore]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                  offset:
+                    type: integer
+                  limit:
+                    type: integer
+                  hasMore:
+                    type: boolean
+                  layer:
+                    type: string
+
+  /analytics/series/by-server/nic-rx-bandwidth:
+    get:
+      tags: [Analytics]
+      summary: Per-edge NIC RX bandwidth (Overview multi-series shape)
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Array of { serverId, bucketSeconds, points, latest }
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+
   /dashboard/security-events:
     get:
       tags: [Dashboard]
-      summary: Recent security events
+      summary: Recent security events (legacy; prefer /analytics/attacks)
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/ServerIdQuery"
@@ -1431,10 +1545,29 @@ paths:
                 items:
                   $ref: "#/components/schemas/L4ProtocolPoint"
 
+  /analytics/l4/attacks/summary:
+    get:
+      tags: [Layer 4 Analytics]
+      summary: Layer 4 attack totals for the window (edge-scoped; siteId ignored)
+      parameters:
+        - $ref: "#/components/parameters/ServerIdQuery"
+        - $ref: "#/components/parameters/SiteIdQuery"
+        - $ref: "#/components/parameters/AnalyticsRange"
+        - $ref: "#/components/parameters/AnalyticsStart"
+        - $ref: "#/components/parameters/AnalyticsEnd"
+      responses:
+        "200":
+          description: Attack summary counts
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
   /analytics/l4/attacks/recent:
     get:
       tags: [Layer 4 Analytics]
-      summary: Recent Layer 4 attacks
+      summary: Recent Layer 4 attacks (edge-scoped; siteId ignored)
       parameters:
         - $ref: "#/components/parameters/ServerIdQuery"
         - $ref: "#/components/parameters/SiteIdQuery"

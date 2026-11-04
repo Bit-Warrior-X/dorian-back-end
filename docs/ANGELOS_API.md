@@ -335,10 +335,13 @@ Not Angelos “outbound API”, but related edge callbacks the back-end exposes:
 
 | Panel / API path | Purpose |
 |------------------|---------|
-| `POST /report_xdp` | L4 attack / XDP reports |
-| `POST /api/report_l7_attack` | L7 attack incident start / update / stop (`report_l7_attack`) |
-| `POST /api/temporary_blacklist_added` | Temporary blacklist notified from edge |
-| `POST /api/report_edge_configure` | Periodic full edge configure snapshot (L4 lists/config, listening ports, temp blacklist, L7 Guard, site compress/upstreams/ports) |
+| `POST /report_xdp` · `/api/report_xdp` · `/api/v1/report_xdp` | L4 attack / XDP reports |
+| `POST /report_l7_attack` · `/api/report_l7_attack` · `/api/v1/report_l7_attack` | L7 attack incident start / update / stop |
+| `POST /temporary_blacklist_added` · `/api/temporary_blacklist_added` · `/api/v1/temporary_blacklist_added` | Temporary blacklist notified from edge |
+| `POST /report_edge_configure` · `/api/report_edge_configure` · `/api/v1/report_edge_configure` | Periodic full edge configure snapshot (L4 lists/config, listening ports, temp blacklist, L7 Guard, site compress/upstreams/ports) |
+| `POST /report_cache_hit` · `/api/report_cache_hit` · `/api/v1/report_cache_hit` | Cache hit / miss counters from Athens |
+
+Edge ingest uses the edge `token` (public auth paths). Prefer `/api/v1/…` for new agents; bare and `/api/…` remain for older Angelos builds.
 
 Angelos posts `report_edge_configure` about every 60s (`EDGE_LIST_SYNC_INTERVAL`). Dorian authenticates with the edge `token` and reconciles MySQL/Redis for that server so panel and edge stay aligned. L7 Guard settings under `l7.edge.l7guard` are upserted into panel storage.
 

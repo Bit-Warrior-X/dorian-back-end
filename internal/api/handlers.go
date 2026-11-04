@@ -342,6 +342,7 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/status", statusHandler)
 	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
 	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
+	mux.HandleFunc("/api/v1/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
 	mux.HandleFunc("/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks))
 	mux.HandleFunc("/api/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks))
 	mux.HandleFunc("/api/v1/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks))
@@ -355,6 +356,11 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, securityEvents, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
 	mux.HandleFunc("/api/v1/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
+	// Unified attack inbox (paginated periods). Prefer for Security events panel.
+	mux.HandleFunc("/analytics/attacks", analyticsAttacksHandler(securityEvents, sites))
+	mux.HandleFunc("/api/v1/analytics/attacks", analyticsAttacksHandler(securityEvents, sites))
+	mux.HandleFunc("/dashboard/attacks", analyticsAttacksHandler(securityEvents, sites))
+	mux.HandleFunc("/api/v1/dashboard/attacks", analyticsAttacksHandler(securityEvents, sites))
 	mux.HandleFunc("/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats, l7Attacks))
 	mux.HandleFunc("/api/v1/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats, l7Attacks))
 	mux.HandleFunc("/dashboard/attack-console/sources", attackConsoleSourcesHandler(securityEvents))
@@ -395,6 +401,15 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/analytics/series/nic-rx-bandwidth", analyticsNicRxBandwidthSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/series/nic-tx-bandwidth", analyticsNicTxBandwidthSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/analytics/series/nic-tx-bandwidth", analyticsNicTxBandwidthSeriesHandler(serverTrafficStats, sites))
+	// Multi-edge (groupBy=server) bandwidth — same shape as legacy /dashboard/bandwidth-*.
+	mux.HandleFunc("/analytics/series/by-server/nic-rx-bandwidth", analyticsBandwidthByServerHandler(sites, serverTrafficStats.ListNicRxBandwidthByServer))
+	mux.HandleFunc("/api/v1/analytics/series/by-server/nic-rx-bandwidth", analyticsBandwidthByServerHandler(sites, serverTrafficStats.ListNicRxBandwidthByServer))
+	mux.HandleFunc("/analytics/series/by-server/nic-tx-bandwidth", analyticsBandwidthByServerHandler(sites, serverTrafficStats.ListNicTxBandwidthByServer))
+	mux.HandleFunc("/api/v1/analytics/series/by-server/nic-tx-bandwidth", analyticsBandwidthByServerHandler(sites, serverTrafficStats.ListNicTxBandwidthByServer))
+	mux.HandleFunc("/analytics/series/by-server/l7-rx-bandwidth", analyticsBandwidthByServerHandler(sites, serverTrafficStats.ListL7RxBandwidthByServer))
+	mux.HandleFunc("/api/v1/analytics/series/by-server/l7-rx-bandwidth", analyticsBandwidthByServerHandler(sites, serverTrafficStats.ListL7RxBandwidthByServer))
+	mux.HandleFunc("/analytics/series/by-server/l7-tx-bandwidth", analyticsBandwidthByServerHandler(sites, serverTrafficStats.ListL7TxBandwidthByServer))
+	mux.HandleFunc("/api/v1/analytics/series/by-server/l7-tx-bandwidth", analyticsBandwidthByServerHandler(sites, serverTrafficStats.ListL7TxBandwidthByServer))
 	mux.HandleFunc("/analytics/series/nic-rx-pps", analyticsNicRxPpsSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/api/v1/analytics/series/nic-rx-pps", analyticsNicRxPpsSeriesHandler(serverTrafficStats, sites))
 	mux.HandleFunc("/analytics/series/nic-tx-pps", analyticsNicTxPpsSeriesHandler(serverTrafficStats, sites))
@@ -1589,6 +1604,68 @@ func dashboardBandwidthByServerHandler(stats store.ServerTrafficStatsStore, site
 	}
 }
 
+// analyticsBandwidthByServerHandler returns the Overview multi-edge bandwidth shape
+// under /analytics/series/by-server/*, supporting range or start/end like other analytics.
+func analyticsBandwidthByServerHandler(sites store.SiteStore, listFn bandwidthByServerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+
+		scope, start, end, ok := parseAnalyticsScope(w, r, sites)
+		if !ok {
+			return
+		}
+		// NIC series ignore site; L7 by-server still honors site via TrafficScope.
+		path := r.URL.Path
+		if strings.Contains(path, "nic-") {
+			scope = stripSiteScope(scope)
+		}
+
+		points, err := listFn(r.Context(), start, end, scope)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load bandwidth stats")
+			return
+		}
+
+		grouped := make(map[int64][]store.ServerBandwidthPoint)
+		for _, point := range points {
+			grouped[point.ServerID] = append(grouped[point.ServerID], point)
+		}
+
+		serverIDs := make([]int64, 0, len(grouped))
+		for id := range grouped {
+			serverIDs = append(serverIDs, id)
+		}
+		sort.Slice(serverIDs, func(i, j int) bool { return serverIDs[i] < serverIDs[j] })
+
+		rangeValue := end.Sub(start)
+		if rangeValue <= 0 {
+			rangeValue = 30 * time.Minute
+		}
+		bucket := dashboardBucketSize(rangeValue)
+		series := make([]bandwidthSeries, 0, len(serverIDs))
+		for _, id := range serverIDs {
+			raw := grouped[id]
+			var latest *bandwidthPoint
+			for _, point := range raw {
+				if latest == nil || point.Timestamp > latest.Timestamp {
+					latest = &bandwidthPoint{Timestamp: point.Timestamp, Bandwidth: point.Bandwidth}
+				}
+			}
+			series = append(series, bandwidthSeries{
+				ServerID:      id,
+				BucketSeconds: int64(bucket / time.Second),
+				Points:        aggregateBandwidth(raw, start.UTC().Truncate(bucket), bucket),
+				Latest:        latest,
+			})
+		}
+
+		writeJSON(w, http.StatusOK, series)
+	}
+}
+
 func dashboardRequestResponseHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -1996,48 +2073,49 @@ func analyticsSummaryHandler(stats store.ServerTrafficStatsStore, sites store.Si
 	}
 }
 
-func analyticsNicRxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+func wantsBandwidthByServer(r *http.Request) bool {
+	return strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("groupBy")), "server")
+}
+
+func analyticsBandwidthSeriesHandler(
+	sites store.SiteStore,
+	byServer bandwidthByServerFunc,
+	aggregate func(context.Context, time.Time, time.Time, store.TrafficScope) ([]store.TrafficPoint, error),
+	stripSite bool,
+	errMsg string,
+) http.HandlerFunc {
+	byServerHandler := analyticsBandwidthByServerHandler(sites, byServer)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if wantsBandwidthByServer(r) {
+			byServerHandler.ServeHTTP(w, r)
+			return
+		}
 		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-
 		scope, start, end, ok := parseAnalyticsScope(w, r, sites)
 		if !ok {
 			return
 		}
-
-		points, err := stats.ListNicRxBandwidthAggregate(r.Context(), start, end, scope)
+		if stripSite {
+			scope = stripSiteScope(scope)
+		}
+		points, err := aggregate(r.Context(), start, end, scope)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load nic rx bandwidth series")
+			writeError(w, http.StatusInternalServerError, errMsg)
 			return
 		}
-
 		writeJSON(w, http.StatusOK, coarsenTrafficRate(points, start, end))
 	}
 }
 
+func analyticsNicRxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
+	return analyticsBandwidthSeriesHandler(sites, stats.ListNicRxBandwidthByServer, stats.ListNicRxBandwidthAggregate, true, "failed to load nic rx bandwidth series")
+}
+
 func analyticsNicTxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		scope, start, end, ok := parseAnalyticsScope(w, r, sites)
-		if !ok {
-			return
-		}
-
-		points, err := stats.ListNicTxBandwidthAggregate(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load nic tx bandwidth series")
-			return
-		}
-
-		writeJSON(w, http.StatusOK, coarsenTrafficRate(points, start, end))
-	}
+	return analyticsBandwidthSeriesHandler(sites, stats.ListNicTxBandwidthByServer, stats.ListNicTxBandwidthAggregate, true, "failed to load nic tx bandwidth series")
 }
 
 func analyticsPacketRateSeriesHandler(
@@ -2081,47 +2159,11 @@ func analyticsXdpBlockedPpsSeriesHandler(stats store.ServerTrafficStatsStore, si
 }
 
 func analyticsL7RxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		scope, start, end, ok := parseAnalyticsScope(w, r, sites)
-		if !ok {
-			return
-		}
-
-		points, err := stats.ListL7RxBandwidthAggregate(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load l7 rx bandwidth series")
-			return
-		}
-
-		writeJSON(w, http.StatusOK, coarsenTrafficRate(points, start, end))
-	}
+	return analyticsBandwidthSeriesHandler(sites, stats.ListL7RxBandwidthByServer, stats.ListL7RxBandwidthAggregate, false, "failed to load l7 rx bandwidth series")
 }
 
 func analyticsL7TxBandwidthSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-
-		scope, start, end, ok := parseAnalyticsScope(w, r, sites)
-		if !ok {
-			return
-		}
-
-		points, err := stats.ListL7TxBandwidthAggregate(r.Context(), start, end, scope)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to load l7 tx bandwidth series")
-			return
-		}
-
-		writeJSON(w, http.StatusOK, coarsenTrafficRate(points, start, end))
-	}
+	return analyticsBandwidthSeriesHandler(sites, stats.ListL7TxBandwidthByServer, stats.ListL7TxBandwidthAggregate, false, "failed to load l7 tx bandwidth series")
 }
 
 func analyticsNicTxTrafficSeriesHandler(stats store.ServerTrafficStatsStore, sites store.SiteStore) http.HandlerFunc {
@@ -2842,6 +2884,15 @@ type l4SummaryResponse struct {
 	BlockedTraffic int64 `json:"blockedTraffic"`
 }
 
+// stripSiteScope makes L4 / NIC scopes honest: those stores are edge-only.
+// parseAnalyticsScope still validates siteId for ACL, then we drop it so callers
+// cannot think they filtered floods by site.
+func stripSiteScope(scope store.TrafficScope) store.TrafficScope {
+	scope.SiteID = 0
+	scope.Domain = ""
+	return scope
+}
+
 func l4AnalyticsSummaryHandler(stats store.L4AttackStatsStore, sites store.SiteStore) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -2853,6 +2904,7 @@ func l4AnalyticsSummaryHandler(stats store.L4AttackStatsStore, sites store.SiteS
 		if !ok {
 			return
 		}
+		scope = stripSiteScope(scope)
 
 		total, allowed, blocked, err := stats.SumTrafficTotals(r.Context(), start, end, scope)
 		if err != nil {
@@ -2889,6 +2941,7 @@ func l4AnalyticsTrafficSeriesHandler(stats store.L4AttackStatsStore, sites store
 		if !ok {
 			return
 		}
+		scope = stripSiteScope(scope)
 
 		points, err := stats.ListTrafficSeries(r.Context(), start, end, scope, l4AnalyticsSeriesBucket(start, end))
 		if err != nil {
@@ -2911,6 +2964,7 @@ func l4AnalyticsProtocolSeriesHandler(stats store.L4AttackStatsStore, sites stor
 		if !ok {
 			return
 		}
+		scope = stripSiteScope(scope)
 
 		points, err := stats.ListProtocolSeries(r.Context(), start, end, scope, l4AnalyticsSeriesBucket(start, end))
 		if err != nil {
@@ -2933,6 +2987,7 @@ func l4AnalyticsAttackSummaryHandler(stats store.L4AttackStatsStore, sites store
 		if !ok {
 			return
 		}
+		scope = stripSiteScope(scope)
 
 		summary, err := stats.SummarizeAttacks(r.Context(), start, end, scope)
 		if err != nil {
@@ -2955,6 +3010,7 @@ func l4AnalyticsRecentAttacksHandler(stats store.L4AttackStatsStore, sites store
 		if !ok {
 			return
 		}
+		scope = stripSiteScope(scope)
 
 		limit := 10
 		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {
@@ -2984,6 +3040,7 @@ func l4AnalyticsTopIpsHandler(stats store.L4AttackStatsStore, sites store.SiteSt
 		if !ok {
 			return
 		}
+		scope = stripSiteScope(scope)
 
 		limit := 10
 		if rawLimit := strings.TrimSpace(r.URL.Query().Get("limit")); rawLimit != "" {

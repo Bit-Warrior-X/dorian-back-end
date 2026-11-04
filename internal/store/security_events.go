@@ -74,6 +74,8 @@ type SecurityEventStore interface {
 	// When start and end are non-zero, only periods that overlap [start, end) are returned.
 	// layer may be "l4", "l7", or empty for both.
 	ListPeriods(ctx context.Context, limit int, scope TrafficScope, start, end time.Time, layer string) ([]SecurityEventPeriod, error)
+	// ListPeriodsPage is ListPeriods with OFFSET for inbox-style pagination.
+	ListPeriodsPage(ctx context.Context, offset, limit int, scope TrafficScope, start, end time.Time, layer string) ([]SecurityEventPeriod, error)
 	// GetPeriod returns one attack window by its req_id.
 	GetPeriod(ctx context.Context, reqID string) (SecurityEventPeriod, error)
 	// Create records an event reported by an edge; serverID 0 stores no edge.
@@ -360,12 +362,19 @@ type securityPeriodStats struct {
 }
 
 func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, scope TrafficScope, start, end time.Time, layer string) ([]SecurityEventPeriod, error) {
+	return store.ListPeriodsPage(ctx, 0, limit, scope, start, end, layer)
+}
+
+func (store *securityEventStore) ListPeriodsPage(ctx context.Context, offset, limit int, scope TrafficScope, start, end time.Time, layer string) ([]SecurityEventPeriod, error) {
 	if limit <= 0 {
 		limit = 6
 	}
 	// Detection can request the full attack history; keep a hard ceiling for safety.
 	if limit > 5000 {
 		limit = 5000
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	layer = strings.ToLower(strings.TrimSpace(layer))
 	discovery := periodDiscoverySQLForLayer(layer)
@@ -391,15 +400,15 @@ func (store *securityEventStore) ListPeriods(ctx context.Context, limit int, sco
 			) p
 			WHERE p.started_at < ? AND p.last_at >= ?
 			ORDER BY p.last_at DESC
-			LIMIT ?`
-		keyArgs = append(keyArgs, end, start, limit)
+			LIMIT ? OFFSET ?`
+		keyArgs = append(keyArgs, end, start, limit, offset)
 	} else {
 		keyQuery, keyArgs = appendServerScope(`
 		SELECT IF(req_id = '', CONCAT('event:', id), req_id) AS period_key, MAX(created_at) AS last_at
 		FROM security_events
 		WHERE `+discovery, nil, scope)
-		keyQuery += " GROUP BY period_key ORDER BY last_at DESC LIMIT ?"
-		keyArgs = append(keyArgs, limit)
+		keyQuery += " GROUP BY period_key ORDER BY last_at DESC LIMIT ? OFFSET ?"
+		keyArgs = append(keyArgs, limit, offset)
 	}
 	keyRows, err := store.db.QueryContext(ctx, keyQuery, keyArgs...)
 	if err != nil {
