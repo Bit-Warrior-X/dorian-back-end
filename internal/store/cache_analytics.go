@@ -260,11 +260,7 @@ func (store *serverTrafficStatsStore) ListCacheBySite(ctx context.Context, start
 		LEFT JOIN sites s ON s.id = t.site_id
 		WHERE t.bucket_ts >= ? AND t.bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScopePrefixed(query, args, scope, "t")
-	if scope.SiteID > 0 {
-		query += ` AND t.site_id = ?`
-		args = append(args, scope.SiteID)
-	}
+	query, args = appendSiteScope(query, args, scope, "t")
 	query += `
 		GROUP BY t.site_id
 		HAVING requests > 0 OR hit > 0 OR miss > 0 OR bypass > 0

@@ -121,9 +121,19 @@ func main() {
 		applog.Errorf("api", "startup_failed", map[string]any{"step": "l7_attacks_schema", "error": err.Error()})
 		os.Exit(1)
 	}
+	hostMetricsSampleStore := store.NewHostMetricsSampleStore(connection)
+	if err := hostMetricsSampleStore.EnsureSchema(ctx); err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "host_metrics_samples_schema", "error": err.Error()})
+		os.Exit(1)
+	}
 	auditLogStore := store.NewAuditLogStore(connection)
 	apiTokenStore := store.NewAPITokenStore(connection)
 	licensePlanStore := store.NewLicensePlanStore(connection)
+	orderStore := store.NewOrderStore(connection, secrets)
+	if err := orderStore.EnsureSchema(ctx); err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "orders_schema", "error": err.Error()})
+		os.Exit(1)
+	}
 	notificationStore := store.NewNotificationStore(connection)
 	if err := notificationStore.EnsureSchema(ctx); err != nil {
 		applog.Errorf("api", "startup_failed", map[string]any{"step": "panel_notifications_schema", "error": err.Error()})
@@ -150,11 +160,14 @@ func main() {
 		Lockout:            time.Duration(cfg.LoginLockoutMinutes) * time.Minute,
 	})
 	certIssuer := acme.NewIssuer(cfg, siteStore)
-	handler := api.NewRouter(cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, l7BlockEventStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, originRouteStore, l7GuardStore, l7AttackStore, auditLogStore, apiTokenStore, licensePlanStore, notificationStore, authSessionStore, panelSettingsStore, userTokenStore, certIssuer)
+	handler := api.NewRouter(ctx, cfg, userStore, mfaStore, loginThrottleStore, serverStore, l4Store, l4WhitelistStore, l4BlacklistStore, l4LiveAttackStore, l4AttackStatsStore, l7BlockEventStore, securityEventStore, serverTrafficStatsStore, wafWhitelistStore, wafBlacklistStore, wafGeoStore, wafAntiCcStore, wafAntiHeaderStore, wafIntervalStore, wafSecondStore, wafResponseStore, wafUserAgentStore, upstreamStore, listeningPortStore, cacheRuleStore, compressStore, blacklistStore, siteStore, wafRuleStore, siteListeningPortStore, originRouteStore, l7GuardStore, l7AttackStore, hostMetricsSampleStore, auditLogStore, apiTokenStore, licensePlanStore, notificationStore, authSessionStore, panelSettingsStore, userTokenStore, orderStore, certIssuer, connection)
 
-	// Start background worker to periodically collect IP request statistics
-	// from each server and store them into the database.
-	worker.StartIPRequestStatsCollector(ctx, cfg, connection, serverStore)
+	// Closed Sparta/Athens buckets are pushed by Angelos via report_edge_metrics.
+	// Keep the Athens :9000 scrape worker available only when explicitly enabled.
+	if cfg.MetricsScrapeEnabled {
+		worker.StartIPRequestStatsCollector(ctx, cfg, connection, serverStore)
+	}
+	worker.StartHostMetricsSampler(ctx, serverStore, hostMetricsSampleStore)
 	certIssuer.Start(ctx)
 
 	server := &http.Server{

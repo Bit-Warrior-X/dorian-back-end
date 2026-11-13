@@ -34,3 +34,20 @@ func TestAppendIDAllowList(t *testing.T) {
 		t.Fatalf("allow-list = %q %v", query, args)
 	}
 }
+
+func TestAppendSiteScopeOwnedSite(t *testing.T) {
+	restricted := TrafficScope{Restricted: true, SiteID: 9}
+	query, args := appendSiteScope("q", nil, restricted, "t")
+	if query != "q AND 1 = 0 AND t.site_id = ?" || !reflect.DeepEqual(args, []any{int64(9)}) {
+		t.Fatalf("not owned: %q %v", query, args)
+	}
+	restricted.SiteOwned = true
+	query, args = appendSiteScope("q", nil, restricted, "t")
+	if query != "q AND t.site_id = ?" || !reflect.DeepEqual(args, []any{int64(9)}) {
+		t.Fatalf("owned: %q %v", query, args)
+	}
+	query, _ = appendServerScope("q", nil, restricted)
+	if query != "q AND 1 = 0" {
+		t.Fatalf("server-scoped tables must stay restricted: %q", query)
+	}
+}

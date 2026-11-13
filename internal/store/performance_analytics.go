@@ -419,11 +419,7 @@ func (store *serverTrafficStatsStore) ListPerformanceByOrigin(ctx context.Contex
 		LEFT JOIN sites s ON s.id = p.site_id
 		WHERE p.bucket_ts >= ? AND p.bucket_ts <= ?`
 	args := []any{start, end}
-	query, args = appendServerScopePrefixed(query, args, scope, "p")
-	if scope.SiteID > 0 {
-		query += ` AND p.site_id = ?`
-		args = append(args, scope.SiteID)
-	}
+	query, args = appendSiteScope(query, args, scope, "p")
 	query += `
 		GROUP BY p.site_id
 		HAVING origin_requests > 0

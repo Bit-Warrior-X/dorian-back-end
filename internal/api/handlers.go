@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -335,23 +336,28 @@ func registerRoutes(
 	originRoutes store.SiteOriginRouteStore,
 	l7Guard store.L7GuardStore,
 	l7Attacks store.L7AttackStore,
+	hostSamples store.HostMetricsSampleStore,
 	certIssuer *acme.Issuer,
+	dbConn *sql.DB,
 ) {
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/api/v1/health", healthHandler)
 	mux.HandleFunc("/api/v1/status", statusHandler)
-	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
-	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
-	mux.HandleFunc("/api/v1/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist))
-	mux.HandleFunc("/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks))
-	mux.HandleFunc("/api/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks))
-	mux.HandleFunc("/api/v1/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks))
+	mux.HandleFunc("/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist, hostSamples))
+	mux.HandleFunc("/api/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist, hostSamples))
+	mux.HandleFunc("/api/v1/report_xdp", reportXdpHandler(securityEvents, servers, blacklist, l4LiveAttack, l4Blacklist, hostSamples))
+	mux.HandleFunc("/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks, hostSamples))
+	mux.HandleFunc("/api/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks, hostSamples))
+	mux.HandleFunc("/api/v1/report_l7_attack", reportL7AttackHandler(servers, securityEvents, l7Attacks, hostSamples))
 	mux.HandleFunc("/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents, l7Guard))
 	mux.HandleFunc("/api/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents, l7Guard))
 	mux.HandleFunc("/api/v1/report_edge_configure", reportEdgeConfigureHandler(servers, l4, l4Whitelist, l4Blacklist, listeningPorts, blacklist, sites, upstreamServers, compressSettings, siteListeningPorts, l7BlockEvents, l7Guard))
 	mux.HandleFunc("/report_cache_hit", reportCacheHitHandler(servers, serverTrafficStats))
 	mux.HandleFunc("/api/report_cache_hit", reportCacheHitHandler(servers, serverTrafficStats))
 	mux.HandleFunc("/api/v1/report_cache_hit", reportCacheHitHandler(servers, serverTrafficStats))
+	mux.HandleFunc("/report_edge_metrics", reportEdgeMetricsHandler(servers, dbConn))
+	mux.HandleFunc("/api/report_edge_metrics", reportEdgeMetricsHandler(servers, dbConn))
+	mux.HandleFunc("/api/v1/report_edge_metrics", reportEdgeMetricsHandler(servers, dbConn))
 	mux.HandleFunc("/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, securityEvents, serverTrafficStats))
 	mux.HandleFunc("/api/v1/dashboard/summary", dashboardSummaryHandler(users, servers, sites, blacklist, securityEvents, serverTrafficStats))
 	mux.HandleFunc("/dashboard/security-events", dashboardSecurityEventsHandler(securityEvents))
@@ -361,8 +367,8 @@ func registerRoutes(
 	mux.HandleFunc("/api/v1/analytics/attacks", analyticsAttacksHandler(securityEvents, sites))
 	mux.HandleFunc("/dashboard/attacks", analyticsAttacksHandler(securityEvents, sites))
 	mux.HandleFunc("/api/v1/dashboard/attacks", analyticsAttacksHandler(securityEvents, sites))
-	mux.HandleFunc("/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats, l7Attacks))
-	mux.HandleFunc("/api/v1/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats, l7Attacks))
+	mux.HandleFunc("/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats, l7Attacks, hostSamples))
+	mux.HandleFunc("/api/v1/dashboard/attack-console", attackConsoleHandler(securityEvents, servers, l4AttackStats, l7Attacks, hostSamples))
 	mux.HandleFunc("/dashboard/attack-console/sources", attackConsoleSourcesHandler(securityEvents))
 	mux.HandleFunc("/api/v1/dashboard/attack-console/sources", attackConsoleSourcesHandler(securityEvents))
 	mux.HandleFunc("/dashboard/attack-console/sparta-log", attackConsoleSpartaLogHandler(securityEvents, servers))
@@ -810,6 +816,7 @@ func reportXdpHandler(
 	blacklist store.BlacklistStore,
 	l4LiveAttack store.L4LiveAttackStore,
 	l4Blacklist store.L4BlacklistStore,
+	hostSamples store.HostMetricsSampleStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -899,6 +906,12 @@ func reportXdpHandler(
 			if err := securityEvents.Create(r.Context(), server.ID, title, description, occurredAt, securityEventReport(payload)); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to store security event")
 				return
+			}
+			// Capture host load while the L4 flood is live — waiting for the
+			// minute sampler often misses short Sparta fragments entirely.
+			if hostSamples != nil && strings.EqualFold(payload.Command, "report_attack") &&
+				strings.EqualFold(payload.Data, "attack_start") {
+				go sampleAttackHostMetrics(server.ID, servers, hostSamples)
 			}
 		}
 
@@ -1850,6 +1863,7 @@ func parseDashboardScope(r *http.Request, sites store.SiteStore) (store.TrafficS
 	if scope.ServerID == 0 {
 		scope.ServerIDs = viewer.visibleServerIDs(site.ServerIDs)
 	}
+	scope.SiteOwned = viewer.ownedSites[site.ID]
 
 	return scope, nil
 }
@@ -4110,29 +4124,8 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 		writeError(w, http.StatusBadRequest, "licenseType is required")
 		return
 	}
-	billingPeriod := deployBillingPeriod(body.BillingPeriod)
-	view, err := servers.GetView(r.Context(), serverID)
+	outView, err := performServerLicenseReissue(r.Context(), cfg, servers, serverID, licenseType, deployBillingPeriod(body.BillingPeriod))
 	if err != nil {
-		if store.IsNotFound(err) {
-			writeError(w, http.StatusNotFound, "server not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "failed to load server")
-		return
-	}
-	if strings.TrimSpace(view.Token) == "" {
-		writeError(w, http.StatusBadRequest, "server has no deployment token")
-		return
-	}
-	deployTimeout := cfg.DeployLicenseTimeoutSeconds
-	if deployTimeout <= 0 {
-		deployTimeout = 900
-	}
-	deployCtx, cancelDeploy := context.WithTimeout(r.Context(), time.Duration(deployTimeout)*time.Second)
-	defer cancelDeploy()
-	deployResp, err := deployLicenseUpgradeLicense(deployCtx, cfg, view, licenseType, billingPeriod)
-	if err != nil {
-		log.Printf("[api] POST /servers/%d/upgrade-license: deploy_license failed: %v", serverID, err)
 		var he *httpAPIErr
 		if errors.As(err, &he) {
 			writeHTTPAPIError(w, he)
@@ -4141,34 +4134,56 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	writeJSON(w, http.StatusOK, outView)
+}
+
+// performServerLicenseReissue regenerates the edge license through deploy_license
+// (license-only deploy) and persists the new tier and expiry.
+func performServerLicenseReissue(ctx context.Context, cfg config.Config, servers store.ServerStore, serverID int64, licenseType, billingPeriod string) (store.ServerView, error) {
+	view, err := servers.GetView(ctx, serverID)
+	if err != nil {
+		if store.IsNotFound(err) {
+			return store.ServerView{}, apiHTTPError(http.StatusNotFound, "server not found")
+		}
+		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to load server")
+	}
+	if strings.TrimSpace(view.Token) == "" {
+		return store.ServerView{}, apiHTTPError(http.StatusBadRequest, "server has no deployment token")
+	}
+	deployTimeout := cfg.DeployLicenseTimeoutSeconds
+	if deployTimeout <= 0 {
+		deployTimeout = 900
+	}
+	deployCtx, cancelDeploy := context.WithTimeout(ctx, time.Duration(deployTimeout)*time.Second)
+	defer cancelDeploy()
+	deployResp, err := deployLicenseUpgradeLicense(deployCtx, cfg, view, licenseType, billingPeriod)
+	if err != nil {
+		log.Printf("[api] license reissue server=%d: deploy_license failed: %v", serverID, err)
+		return store.ServerView{}, err
+	}
 	expireRaw := strings.TrimSpace(deployResp.DeployComplete.ExpireDate)
 	if expireRaw == "" {
 		expireRaw = strings.TrimSpace(deployResp.ExpireDate)
 	}
 	expiredAt := resolveDeployExpireDate(expireRaw, licenseType, billingPeriod, time.Now())
-	runtimeStatuses := probeRemoteRuntimeStatuses(r.Context(), sshTargetFromView(view))
-	deployServiceStatus := runtimeStatuses.Angelos
-	deployL4Status := runtimeStatuses.L4
-	deployL7Status := runtimeStatuses.L7
+	runtimeStatuses := probeRemoteRuntimeStatuses(ctx, sshTargetFromView(view))
 	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
 	if deployVersion == "" {
 		deployVersion = strings.TrimSpace(deployResp.Version)
 	}
 	storedLicenseType := storeLicenseTypeFromDeployResponse(deployResp, licenseType)
 	tok := strings.TrimSpace(view.Token)
-	if err := servers.UpdateDeploymentData(r.Context(), serverID, tok, "", storedLicenseType, deployVersion, "", expiredAt, deployServiceStatus, deployL4Status, deployL7Status); err != nil {
-		log.Printf("[api] POST /servers/%d/upgrade-license: UpdateDeploymentData failed: %v", serverID, err)
-		writeError(w, http.StatusInternalServerError, "failed to persist upgrade result")
-		return
+	if err := servers.UpdateDeploymentData(ctx, serverID, tok, "", storedLicenseType, deployVersion, "", expiredAt, runtimeStatuses.Angelos, runtimeStatuses.L4, runtimeStatuses.L7); err != nil {
+		log.Printf("[api] license reissue server=%d: UpdateDeploymentData failed: %v", serverID, err)
+		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to persist upgrade result")
 	}
-	outView, err := servers.GetView(r.Context(), serverID)
+	outView, err := servers.GetView(ctx, serverID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load server")
-		return
+		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to load server")
 	}
 	outView = applyRuntimeStatusesToView(outView, runtimeStatuses)
-	log.Printf("[api] POST /servers/%d/upgrade-license: success license=%q version=%q service_status=%q", serverID, outView.License, outView.Version, outView.ServiceStatus)
-	writeJSON(w, http.StatusOK, outView)
+	log.Printf("[api] license reissue server=%d: success license=%q version=%q service_status=%q", serverID, outView.License, outView.Version, outView.ServiceStatus)
+	return outView, nil
 }
 
 func parseDeployExpireDate(raw string) (*time.Time, error) {
@@ -5513,6 +5528,20 @@ func serverDetailHandler(
 			default:
 				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			}
+			return
+		}
+
+		if strings.HasSuffix(r.URL.Path, "/service-log") {
+			serverID, ok := parseIDWithSuffix(r.URL.Path, "/servers/", "/service-log")
+			if !ok {
+				writeError(w, http.StatusNotFound, "not found")
+				return
+			}
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
+			handleServerServiceLog(w, r, servers, serverID)
 			return
 		}
 

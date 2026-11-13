@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	athensAccessLogDir = "/usr/local/share/dorian/athens/nginx/logs/access"
-	spartaHourlyLogDir = "/usr/local/share/dorian/sparta/logs"
+	athensAccessLogDir  = "/usr/local/share/dorian/athens/nginx/logs/access"
+	athensErrorLogPath  = "/usr/local/share/dorian/athens/nginx/logs/athens_error.log"
+	spartaHourlyLogDir  = "/usr/local/share/dorian/sparta/logs"
 )
 
 var (
@@ -319,4 +320,36 @@ func StatEdgeHourlyLog(ctx context.Context, target SSHTarget, filePath string) (
 		return 0, parseErr
 	}
 	return n, nil
+}
+
+// TailAthensErrorLog returns the newest lines from Athens nginx error log.
+func TailAthensErrorLog(ctx context.Context, target SSHTarget, lines int) ([]string, error) {
+	if lines <= 0 || lines > 200 {
+		lines = 80
+	}
+	client, err := dialSSH(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	defer client.Close()
+
+	script := fmt.Sprintf(
+		`timeout 4 sh -c 'f=%q; [ -f "$f" ] || exit 0; tail -n %d -- "$f"'`,
+		athensErrorLogPath, lines,
+	)
+	out, err := runRemoteScript(client, script)
+	body := strings.TrimSpace(string(out))
+	if err != nil && body == "" {
+		return nil, err
+	}
+	raw := strings.Split(string(out), "\n")
+	logs := make([]string, 0, len(raw))
+	for _, line := range raw {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "-- ") {
+			continue
+		}
+		logs = append(logs, line)
+	}
+	return logs, nil
 }

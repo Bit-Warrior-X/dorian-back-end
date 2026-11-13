@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -47,7 +48,16 @@ type SecurityEventPeriod struct {
 	// Vectors counts distinct blocked sources per raw attack type, largest first.
 	Vectors []PeriodVector  `json:"vectors,omitempty"`
 	Events  []SecurityEvent `json:"events,omitempty"`
+	// RelatedReqIDs lists every Sparta req_id folded into this L4 campaign
+	// (including ReqID). Empty for single-fragment / L7 periods.
+	RelatedReqIDs []string `json:"relatedReqIds,omitempty"`
 }
+
+// l4CampaignGap folds consecutive Sparta L4 fragments on the same edge into one
+// campaign when the next start is within this gap of the previous end. Sparta
+// often rotates req_id every ~30s during one flood; without folding, Overview
+// shows many short attacks whose chart shades miss the real traffic peak.
+const l4CampaignGap = 90 * time.Second
 
 type PeriodVector struct {
 	Type  string `json:"type"`
@@ -84,9 +94,13 @@ type SecurityEventStore interface {
 	// ListBlockedSources returns one row per source IP blocked under req_id.
 	// limit caps the result (most recently blocked first). 0 uses 200.
 	ListBlockedSources(ctx context.Context, serverID int64, reqID string, limit int) ([]BlockedSource, error)
+	// ListBlockedSourcesForReqIDs is ListBlockedSources across a campaign of req_ids.
+	ListBlockedSourcesForReqIDs(ctx context.Context, serverID int64, reqIDs []string, limit int) ([]BlockedSource, error)
 	// ListBlockedSourcesPage returns a slice of blocked sources, optionally
 	// filtered by IP prefix/contains and whether the block is still active.
 	ListBlockedSourcesPage(ctx context.Context, serverID int64, reqID string, offset, limit int, match string, activeOnly bool) ([]BlockedSource, error)
+	// ListBlockedSourcesPageForReqIDs pages blocked sources across related req_ids.
+	ListBlockedSourcesPageForReqIDs(ctx context.Context, serverID int64, reqIDs []string, offset, limit int, match string, activeOnly bool) ([]BlockedSource, error)
 	// CountPeriodsStarted counts attack windows (same grouping as ListPeriods) that began in [start, end).
 	CountPeriodsStarted(ctx context.Context, start, end time.Time, scope TrafficScope) (int64, error)
 }
@@ -145,8 +159,29 @@ func (store *securityEventStore) CountPeriodsStarted(ctx context.Context, start,
 }
 
 func (store *securityEventStore) ListBlockedSources(ctx context.Context, serverID int64, reqID string, limit int) ([]BlockedSource, error) {
-	reqID = strings.TrimSpace(reqID)
-	if reqID == "" {
+	return store.ListBlockedSourcesForReqIDs(ctx, serverID, []string{reqID}, limit)
+}
+
+func normalizeReqIDList(reqIDs []string) []string {
+	out := make([]string, 0, len(reqIDs))
+	seen := map[string]struct{}{}
+	for _, id := range reqIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+func (store *securityEventStore) ListBlockedSourcesForReqIDs(ctx context.Context, serverID int64, reqIDs []string, limit int) ([]BlockedSource, error) {
+	reqIDs = normalizeReqIDList(reqIDs)
+	if len(reqIDs) == 0 {
 		return nil, nil
 	}
 	if limit <= 0 {
@@ -161,8 +196,11 @@ func (store *securityEventStore) ListBlockedSources(ctx context.Context, serverI
 			SUBSTRING_INDEX(GROUP_CONCAT(e.ttl ORDER BY e.created_at DESC SEPARATOR '\n'), '\n', 1),
 			MIN(e.created_at), MAX(e.created_at), COUNT(*)
 		FROM security_events e
-		WHERE e.req_id = ? AND e.command = 'report_block_ip' AND e.source_ip <> ''`
-	args := []any{reqID}
+		WHERE e.req_id IN (` + sqlPlaceholders(len(reqIDs)) + `) AND e.command = 'report_block_ip' AND e.source_ip <> ''`
+	args := make([]any, 0, len(reqIDs)+2)
+	for _, id := range reqIDs {
+		args = append(args, id)
+	}
 	if serverID > 0 {
 		query += ` AND e.server_id = ?`
 		args = append(args, serverID)
@@ -206,8 +244,12 @@ func sanitizeSourceMatch(raw string) string {
 }
 
 func (store *securityEventStore) ListBlockedSourcesPage(ctx context.Context, serverID int64, reqID string, offset, limit int, match string, activeOnly bool) ([]BlockedSource, error) {
-	reqID = strings.TrimSpace(reqID)
-	if reqID == "" {
+	return store.ListBlockedSourcesPageForReqIDs(ctx, serverID, []string{reqID}, offset, limit, match, activeOnly)
+}
+
+func (store *securityEventStore) ListBlockedSourcesPageForReqIDs(ctx context.Context, serverID int64, reqIDs []string, offset, limit int, match string, activeOnly bool) ([]BlockedSource, error) {
+	reqIDs = normalizeReqIDList(reqIDs)
+	if len(reqIDs) == 0 {
 		return nil, nil
 	}
 	if offset < 0 {
@@ -232,8 +274,11 @@ func (store *securityEventStore) ListBlockedSourcesPage(ctx context.Context, ser
 				COUNT(*) AS blocks,
 				MAX(CAST(REPLACE(LOWER(e.ttl), 's', '') AS UNSIGNED)) AS ttl_seconds
 			FROM security_events e
-			WHERE e.req_id = ? AND e.command = 'report_block_ip' AND e.source_ip <> ''`
-	args := []any{reqID}
+			WHERE e.req_id IN (` + sqlPlaceholders(len(reqIDs)) + `) AND e.command = 'report_block_ip' AND e.source_ip <> ''`
+	args := make([]any, 0, len(reqIDs)+4)
+	for _, id := range reqIDs {
+		args = append(args, id)
+	}
 	if serverID > 0 {
 		query += ` AND e.server_id = ?`
 		args = append(args, serverID)
@@ -379,6 +424,15 @@ func (store *securityEventStore) ListPeriodsPage(ctx context.Context, offset, li
 	layer = strings.ToLower(strings.TrimSpace(layer))
 	discovery := periodDiscoverySQLForLayer(layer)
 	useWindow := !start.IsZero() && !end.IsZero() && end.After(start)
+	// Over-fetch L4 fragments so coalesceL4CampaignPeriods can still fill `limit`
+	// after folding Sparta's short rotating req_ids into one campaign.
+	fetchLimit := limit
+	if layer != "l7" {
+		fetchLimit = limit * 4
+		if fetchLimit > 5000 {
+			fetchLimit = 5000
+		}
+	}
 	// Prefer real attack windows (shared req_id). Discovery ignores report_block_ip
 	// so Overview does not scan every blocked-source sample. Orphan start/stop rows
 	// without req_id still surface as notices.
@@ -401,14 +455,14 @@ func (store *securityEventStore) ListPeriodsPage(ctx context.Context, offset, li
 			WHERE p.started_at < ? AND p.last_at >= ?
 			ORDER BY p.last_at DESC
 			LIMIT ? OFFSET ?`
-		keyArgs = append(keyArgs, end, start, limit, offset)
+		keyArgs = append(keyArgs, end, start, fetchLimit, offset)
 	} else {
 		keyQuery, keyArgs = appendServerScope(`
 		SELECT IF(req_id = '', CONCAT('event:', id), req_id) AS period_key, MAX(created_at) AS last_at
 		FROM security_events
 		WHERE `+discovery, nil, scope)
 		keyQuery += " GROUP BY period_key ORDER BY last_at DESC LIMIT ? OFFSET ?"
-		keyArgs = append(keyArgs, limit, offset)
+		keyArgs = append(keyArgs, fetchLimit, offset)
 	}
 	keyRows, err := store.db.QueryContext(ctx, keyQuery, keyArgs...)
 	if err != nil {
@@ -528,6 +582,15 @@ func (store *securityEventStore) ListPeriodsPage(ctx context.Context, offset, li
 			continue
 		}
 		periods = append(periods, period)
+	}
+	if layer != "l7" {
+		periods = coalesceL4CampaignPeriods(periods)
+		if err := store.enrichCoalescedL4Campaigns(ctx, periods); err != nil {
+			return nil, err
+		}
+	}
+	if len(periods) > limit {
+		periods = periods[:limit]
 	}
 	return periods, nil
 }
@@ -821,6 +884,12 @@ func (store *securityEventStore) GetPeriod(ctx context.Context, reqID string) (S
 	if active, activeErr := store.periodActiveIPs(ctx, []string{reqID}); activeErr == nil {
 		period.ActiveIPCount = active[reqID]
 	}
+	if !strings.EqualFold(period.Layer, "L7") {
+		period, err = store.expandL4CampaignPeriod(ctx, period)
+		if err != nil {
+			return SecurityEventPeriod{}, err
+		}
+	}
 	return period, nil
 }
 
@@ -986,6 +1055,358 @@ func singleSecurityPeriod(event SecurityEvent) SecurityEventPeriod {
 		EventCount:  1,
 		Events:      []SecurityEvent{event},
 	}
+}
+
+// coalesceL4CampaignPeriods folds consecutive same-edge L4 fragments whose
+// windows abut within l4CampaignGap. L7 and orphan notices pass through.
+func coalesceL4CampaignPeriods(periods []SecurityEventPeriod) []SecurityEventPeriod {
+	if len(periods) <= 1 {
+		return periods
+	}
+	type stamped struct {
+		period SecurityEventPeriod
+		start  time.Time
+		end    time.Time
+	}
+	items := make([]stamped, 0, len(periods))
+	passthrough := make([]SecurityEventPeriod, 0)
+	for _, period := range periods {
+		if strings.EqualFold(period.Layer, "L7") || strings.TrimSpace(period.ReqID) == "" || period.ServerID == nil {
+			passthrough = append(passthrough, period)
+			continue
+		}
+		start, okStart := parsePeriodTime(period.StartedAt)
+		end, okEnd := parsePeriodTime(period.EndedAt)
+		if !okStart {
+			passthrough = append(passthrough, period)
+			continue
+		}
+		if !okEnd || end.Before(start) {
+			end = start
+		}
+		items = append(items, stamped{period: period, start: start, end: end})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].period.ServerID == nil || items[j].period.ServerID == nil {
+			return items[i].start.Before(items[j].start)
+		}
+		if *items[i].period.ServerID != *items[j].period.ServerID {
+			return *items[i].period.ServerID < *items[j].period.ServerID
+		}
+		return items[i].start.Before(items[j].start)
+	})
+
+	merged := make([]SecurityEventPeriod, 0, len(items))
+	for _, item := range items {
+		if len(merged) == 0 {
+			seed := item.period
+			seed.RelatedReqIDs = []string{seed.ReqID}
+			merged = append(merged, seed)
+			continue
+		}
+		prev := &merged[len(merged)-1]
+		prevStart, _ := parsePeriodTime(prev.StartedAt)
+		prevEnd, okPrevEnd := parsePeriodTime(prev.EndedAt)
+		if !okPrevEnd {
+			prevEnd = prevStart
+		}
+		sameEdge := prev.ServerID != nil && item.period.ServerID != nil && *prev.ServerID == *item.period.ServerID
+		gap := item.start.Sub(prevEnd)
+		// Overlap (negative gap) or a short quiet stretch still belongs to one flood.
+		if sameEdge && gap <= l4CampaignGap {
+			prev.RelatedReqIDs = append(prev.RelatedReqIDs, item.period.ReqID)
+			if item.end.After(prevEnd) {
+				prev.EndedAt = item.period.EndedAt
+			}
+			if item.period.Status == "ongoing" {
+				prev.Status = "ongoing"
+			}
+			prev.EventCount += item.period.EventCount
+			prev.ActiveIPCount += item.period.ActiveIPCount
+			prev.Vectors = mergePeriodVectors(prev.Vectors, item.period.Vectors)
+			prev.StopReported = prev.StopReported || item.period.StopReported
+			if title := multiAttackPeriodTitle(prev.Vectors); title != "" {
+				prev.Title = title
+			}
+			continue
+		}
+		seed := item.period
+		seed.RelatedReqIDs = []string{seed.ReqID}
+		merged = append(merged, seed)
+	}
+
+	out := append(merged, passthrough...)
+	sort.SliceStable(out, func(i, j int) bool {
+		ti, _ := parsePeriodTime(out[i].EndedAt)
+		if ti.IsZero() {
+			ti, _ = parsePeriodTime(out[i].StartedAt)
+		}
+		tj, _ := parsePeriodTime(out[j].EndedAt)
+		if tj.IsZero() {
+			tj, _ = parsePeriodTime(out[j].StartedAt)
+		}
+		return ti.After(tj)
+	})
+	return out
+}
+
+func mergePeriodVectors(a, b []PeriodVector) []PeriodVector {
+	totals := map[string]int{}
+	order := make([]string, 0, len(a)+len(b))
+	for _, item := range append(append([]PeriodVector{}, a...), b...) {
+		typ := strings.TrimSpace(item.Type)
+		if typ == "" {
+			continue
+		}
+		if _, ok := totals[typ]; !ok {
+			order = append(order, typ)
+		}
+		totals[typ] += item.Count
+	}
+	out := make([]PeriodVector, 0, len(order))
+	for _, typ := range order {
+		out = append(out, PeriodVector{Type: typ, Count: totals[typ]})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Count > out[j].Count })
+	return out
+}
+
+func parsePeriodTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if ts, err := time.Parse(time.RFC3339, raw); err == nil {
+		return ts.UTC(), true
+	}
+	if ts, err := time.Parse("2006-01-02 15:04:05", raw); err == nil {
+		return ts.UTC(), true
+	}
+	return time.Time{}, false
+}
+
+func (store *securityEventStore) enrichCoalescedL4Campaigns(ctx context.Context, periods []SecurityEventPeriod) error {
+	for i := range periods {
+		period := &periods[i]
+		if len(period.RelatedReqIDs) <= 1 || strings.EqualFold(period.Layer, "L7") {
+			continue
+		}
+		ids := normalizeReqIDList(period.RelatedReqIDs)
+		ips, err := store.periodIPs(ctx, ids, 40)
+		if err != nil {
+			return err
+		}
+		seen := map[string]struct{}{}
+		var blocked []string
+		for _, id := range ids {
+			for _, ip := range ips[id] {
+				if _, ok := seen[ip]; ok {
+					continue
+				}
+				seen[ip] = struct{}{}
+				blocked = append(blocked, ip)
+			}
+		}
+		period.BlockedIPs = blocked
+		period.IPCount = len(seen)
+		if period.IPCount == 0 {
+			stats, statsErr := store.periodStats(ctx, ids)
+			if statsErr != nil {
+				return statsErr
+			}
+			for _, id := range ids {
+				period.IPCount += stats[id].ipCount
+			}
+		}
+		vectors, err := store.periodVectors(ctx, ids)
+		if err != nil {
+			return err
+		}
+		var merged []PeriodVector
+		for _, id := range ids {
+			merged = mergePeriodVectors(merged, vectors[id])
+		}
+		period.Vectors = merged
+		if title := multiAttackPeriodTitle(period.Vectors); title != "" {
+			period.Title = title
+		}
+		desc := periodDescription(period.IPCount, period.Status)
+		period.Description = desc
+	}
+	return nil
+}
+
+func (store *securityEventStore) expandL4CampaignPeriod(ctx context.Context, seed SecurityEventPeriod) (SecurityEventPeriod, error) {
+	if seed.ServerID == nil || strings.TrimSpace(seed.ReqID) == "" {
+		return seed, nil
+	}
+	start, okStart := parsePeriodTime(seed.StartedAt)
+	end, okEnd := parsePeriodTime(seed.EndedAt)
+	if !okStart {
+		return seed, nil
+	}
+	if !okEnd || end.Before(start) {
+		end = start
+	}
+	lookStart := start.Add(-30 * time.Minute)
+	lookEnd := end.Add(30 * time.Minute)
+	rows, err := store.db.QueryContext(ctx, `
+		SELECT req_id, MIN(created_at), MAX(created_at)
+		FROM security_events
+		WHERE server_id = ?
+		  AND req_id <> ''
+		  AND command <> 'report_l7_attack'
+		  AND (`+periodDiscoverySQLForLayer("l4")+`)
+		  AND created_at >= ? AND created_at <= ?
+		GROUP BY req_id
+		ORDER BY MIN(created_at)`, *seed.ServerID, lookStart, lookEnd)
+	if err != nil {
+		return seed, err
+	}
+	defer rows.Close()
+
+	type frag struct {
+		reqID string
+		start time.Time
+		end   time.Time
+	}
+	var frags []frag
+	seedIdx := -1
+	for rows.Next() {
+		var item frag
+		if err := rows.Scan(&item.reqID, &item.start, &item.end); err != nil {
+			return seed, err
+		}
+		item.start = item.start.UTC()
+		item.end = item.end.UTC()
+		if item.reqID == seed.ReqID {
+			seedIdx = len(frags)
+		}
+		frags = append(frags, item)
+	}
+	if err := rows.Err(); err != nil {
+		return seed, err
+	}
+	if seedIdx < 0 || len(frags) <= 1 {
+		seed.RelatedReqIDs = []string{seed.ReqID}
+		return seed, nil
+	}
+
+	lo, hi := seedIdx, seedIdx
+	for lo > 0 && frags[lo].start.Sub(frags[lo-1].end) <= l4CampaignGap {
+		lo--
+	}
+	for hi+1 < len(frags) && frags[hi+1].start.Sub(frags[hi].end) <= l4CampaignGap {
+		hi++
+	}
+	ids := make([]string, 0, hi-lo+1)
+	for i := lo; i <= hi; i++ {
+		ids = append(ids, frags[i].reqID)
+	}
+	if len(ids) == 1 {
+		seed.RelatedReqIDs = ids
+		return seed, nil
+	}
+
+	stats, err := store.periodStats(ctx, ids)
+	if err != nil {
+		return seed, err
+	}
+	ips, err := store.periodIPs(ctx, ids, 40)
+	if err != nil {
+		return seed, err
+	}
+	timeline, err := store.periodTimeline(ctx, ids)
+	if err != nil {
+		return seed, err
+	}
+	vectors, err := store.periodVectors(ctx, ids)
+	if err != nil {
+		return seed, err
+	}
+
+	// Keep the earliest fragment as the canonical id so deep links stay stable
+	// when opening any req_id from the same campaign.
+	canonical := frags[lo].reqID
+	var members []SecurityEvent
+	var allTimeline []SecurityEvent
+	var allIPs []string
+	seenIP := map[string]struct{}{}
+	var mergedVectors []PeriodVector
+	var eventCount, ipCount int
+	ongoing := false
+	stopReported := false
+	for _, id := range ids {
+		s := stats[id]
+		eventCount += s.eventCount
+		if s.stoppedHit {
+			stopReported = true
+		}
+		if !(s.stoppedHit || (s.ended.Valid && time.Since(s.ended.Time) > attackQuietTimeout)) {
+			ongoing = true
+		}
+		for _, ip := range ips[id] {
+			if _, ok := seenIP[ip]; ok {
+				continue
+			}
+			seenIP[ip] = struct{}{}
+			allIPs = append(allIPs, ip)
+		}
+		ipCount = len(seenIP)
+		mergedVectors = mergePeriodVectors(mergedVectors, vectors[id])
+		allTimeline = append(allTimeline, timeline[id]...)
+	}
+	sort.SliceStable(allTimeline, func(i, j int) bool {
+		ti, _ := parsePeriodTime(allTimeline[i].CreatedAt)
+		tj, _ := parsePeriodTime(allTimeline[j].CreatedAt)
+		return ti.Before(tj)
+	})
+	if len(allTimeline) > attackConsoleEventLimitSafe() {
+		allTimeline = allTimeline[len(allTimeline)-attackConsoleEventLimitSafe():]
+	}
+	members = allTimeline
+	if len(members) == 0 {
+		members = []SecurityEvent{{ReqID: canonical, ServerID: seed.ServerID, ServerName: seed.ServerName}}
+	}
+	combinedStats := securityPeriodStats{
+		eventCount: eventCount,
+		ipCount:    ipCount,
+		started:    sql.NullTime{Time: frags[lo].start, Valid: true},
+		ended:      sql.NullTime{Time: frags[hi].end, Valid: true},
+		attackType: seed.AttackType,
+		stoppedHit: stopReported && !ongoing,
+	}
+	period := groupedSecurityPeriod(canonical, members, combinedStats, allIPs, allTimeline)
+	period.Vectors = mergedVectors
+	period.RelatedReqIDs = ids
+	period.ServerName = seed.ServerName
+	period.ServerID = seed.ServerID
+	if ongoing {
+		period.Status = "ongoing"
+	} else {
+		period.Status = "ended"
+	}
+	if title := multiAttackPeriodTitle(period.Vectors); title != "" {
+		period.Title = title
+	}
+	if active, activeErr := store.periodActiveIPs(ctx, ids); activeErr == nil {
+		total := 0
+		for _, id := range ids {
+			total += active[id]
+		}
+		period.ActiveIPCount = total
+	}
+	// Preserve the requested req_id for clients that key UI state on it, but
+	// keep RelatedReqIDs as the full campaign for sources/charts.
+	if seed.ReqID != "" {
+		period.ReqID = seed.ReqID
+		period.ID = seed.ReqID
+	}
+	return period, nil
+}
+
+func attackConsoleEventLimitSafe() int {
+	return 40
 }
 
 func groupedSecurityPeriod(reqID string, scanned []SecurityEvent, stats securityPeriodStats, ips []string, timeline []SecurityEvent) SecurityEventPeriod {

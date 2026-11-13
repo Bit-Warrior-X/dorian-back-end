@@ -96,6 +96,38 @@ paths:
         "4XX":
           $ref: "#/components/responses/AgentError"
 
+  /report_edge_metrics:
+    post:
+      servers:
+        - url: https://panel.dorian.center/api
+          description: Dorian panel API (angelos → panel)
+      tags: [Edge → Panel]
+      summary: Closed Sparta + Athens metrics (batched)
+      description: |
+        Angelos worker `metrics_sync` (~60s) pulls **closed** local buckets and
+        POSTs them here. The panel stores by `(edge_id, source, endpoint,
+        timestamp)` and does **not** scrape edge Athens `:9000` / Sparta for history
+        unless `METRICS_SCRAPE_ENABLED=true`.
+
+        Prefer reading **`items[]`** (batch). Top-level `source` / `endpoint` /
+        `timestamp` / `payload` mirror `items[0]` for simple single-bucket parsers.
+
+        License gating on the envelope (`allows_l4`, `allows_l7`) skips items the
+        edge should not have sent; Sparta `l4_traffic_stats` requires `allows_l4`,
+        Athens endpoints require `allows_l7`.
+      operationId: reportEdgeMetrics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EdgeMetricsReport"
+      responses:
+        "200":
+          description: Metrics batch accepted (all items stored or idempotently skipped)
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
   /report_edge_configure:
     post:
       servers:
@@ -2713,6 +2745,62 @@ components:
             server_default_ports_conf:
               type: string
               nullable: true
+
+    EdgeMetricsItem:
+      type: object
+      required: [endpoint, timestamp, payload]
+      properties:
+        source:
+          type: string
+          enum: [sparta, athens]
+        endpoint:
+          type: string
+          description: |
+            Sparta: `l4_traffic_stats` (alias `l4_attack_stats`).
+            Athens: `server_traffic_stats`, `site_traffic_stats`,
+            `ip_request_stats`, `url_request_stats`, `useragent_request_stats`,
+            `country_request_stats`, `isp_request_stats`, `referer_request_stats`,
+            `domain_request_stats`, `content_type_request_stats`,
+            `cache_miss_url_stats`, `block_reason_stats`.
+        endpoint_aliases:
+          type: array
+          items: { type: string }
+        timestamp:
+          type: integer
+          description: Closed bucket unix seconds
+        interval_seconds:
+          type: integer
+          default: 60
+        payload:
+          type: object
+          additionalProperties: true
+          description: Native Athens/Sparta JSON for that endpoint
+
+    EdgeMetricsReport:
+      type: object
+      required: [token, command]
+      properties:
+        token: { type: string }
+        command: { type: string, enum: [report_edge_metrics] }
+        reported_at: { type: integer }
+        interval_seconds: { type: integer, default: 60 }
+        license_type: { type: string, enum: [l4, l7, unified] }
+        allows_l4: { type: boolean }
+        allows_l7: { type: boolean }
+        item_count: { type: integer }
+        source: { type: string, enum: [sparta, athens] }
+        endpoint: { type: string }
+        endpoint_aliases:
+          type: array
+          items: { type: string }
+        timestamp: { type: integer }
+        payload:
+          type: object
+          additionalProperties: true
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeMetricsItem"
 
     EdgeConfigureReport:
       type: object

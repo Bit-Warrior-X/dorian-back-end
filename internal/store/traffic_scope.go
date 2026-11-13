@@ -16,6 +16,9 @@ type TrafficScope struct {
 	// Restricted means ServerIDs is an allow-list: an empty list matches nothing
 	// instead of every server (non-admin users with no assigned edges).
 	Restricted bool
+	// SiteOwned means the viewer holds the license of SiteID. Site-scoped tables then
+	// filter by site only, so sites on platform edges the viewer cannot see still report.
+	SiteOwned bool
 }
 
 func appendServerScope(query string, args []any, scope TrafficScope) (string, []any) {
@@ -59,9 +62,24 @@ func appendIDAllowList(query string, args []any, column string, ids []int64) (st
 
 // appendTrafficScope applies server filters and optional site_id for site-scoped tables.
 func appendTrafficScope(query string, args []any, scope TrafficScope, includeSite bool) (string, []any) {
-	query, args = appendServerScope(query, args, scope)
-	if includeSite && scope.SiteID > 0 {
-		query += " AND site_id = ?"
+	if includeSite {
+		return appendSiteScope(query, args, scope, "")
+	}
+	return appendServerScope(query, args, scope)
+}
+
+// appendSiteScope filters a site-scoped table by server and site_id. For a site the
+// viewer owns, the site filter alone is enough.
+func appendSiteScope(query string, args []any, scope TrafficScope, tableAlias string) (string, []any) {
+	if !(scope.SiteOwned && scope.SiteID > 0) {
+		query, args = appendServerScopePrefixed(query, args, scope, tableAlias)
+	}
+	if scope.SiteID > 0 {
+		column := "site_id"
+		if tableAlias != "" {
+			column = tableAlias + ".site_id"
+		}
+		query += " AND " + column + " = ?"
 		args = append(args, scope.SiteID)
 	}
 	return query, args

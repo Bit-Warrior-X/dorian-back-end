@@ -20,6 +20,20 @@ type viewerScope struct {
 	restricted bool
 	serverIDs  []int64
 	allowed    map[int64]bool
+	// ownedSites are sites licensed to the viewer, e.g. sites on platform edges
+	// whose edges stay hidden.
+	ownedSites map[int64]bool
+}
+
+// viewerOwnedSiteIDs loads the sites licensed to a user; set by NewRouter.
+var viewerOwnedSiteIDs func(ctx context.Context, userID int64) ([]int64, error)
+
+func (v viewerScope) withOwnedSites(ids []int64) viewerScope {
+	v.ownedSites = make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		v.ownedSites[id] = true
+	}
+	return v
 }
 
 type viewerScopeContextKey struct{}
@@ -45,7 +59,7 @@ func (v viewerScope) canSeeServer(id int64) bool {
 }
 
 func (v viewerScope) canSeeSite(site store.Site) bool {
-	if !v.restricted {
+	if !v.restricted || v.ownedSites[site.ID] {
 		return true
 	}
 	for _, id := range site.ServerIDs {
@@ -136,7 +150,16 @@ func withViewerScope(users store.UserStore, next http.Handler) http.Handler {
 			writeError(w, http.StatusInternalServerError, "failed to load account")
 			return
 		}
-		ctx := context.WithValue(r.Context(), viewerScopeContextKey{}, newViewerScope(user.ServerIDs))
+		scope := newViewerScope(user.ServerIDs)
+		if viewerOwnedSiteIDs != nil {
+			owned, err := viewerOwnedSiteIDs(r.Context(), principal.UserID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to load account licenses")
+				return
+			}
+			scope = scope.withOwnedSites(owned)
+		}
+		ctx := context.WithValue(r.Context(), viewerScopeContextKey{}, scope)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

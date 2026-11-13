@@ -41,6 +41,9 @@ type Config struct {
 	MetricsSiteTrafficPath      string
 	MetricsDomainRequestPath    string
 	MetricsPollIntervalSeconds  int
+	// MetricsScrapeEnabled keeps the legacy Athens :9000 pull collector.
+	// Default false — Angelos pushes closed buckets to report_edge_metrics.
+	MetricsScrapeEnabled bool
 	AcmeEmail                   string
 	AcmeDirectoryURL            string
 	AcmeDNSProvider             string
@@ -120,6 +123,7 @@ func Load() Config {
 		MetricsSiteTrafficPath:      "/site_traffic_stats",
 		MetricsDomainRequestPath:    "/domain_request_stats",
 		MetricsPollIntervalSeconds:  30,
+		MetricsScrapeEnabled:        false,
 		AcmeDirectoryURL:            "https://acme-v02.api.letsencrypt.org/directory",
 		AcmeDNSAlias:                "acme-validation.dorian.center",
 		AcmeAccountKeyPath:          "data/acme-account.pem",
@@ -234,6 +238,9 @@ func Load() Config {
 		if parsed, err := strconv.Atoi(pollRaw); err == nil && parsed > 0 {
 			cfg.MetricsPollIntervalSeconds = parsed
 		}
+	}
+	if scrapeRaw := strings.TrimSpace(os.Getenv("METRICS_SCRAPE_ENABLED")); scrapeRaw != "" {
+		cfg.MetricsScrapeEnabled = parseEnvBool(scrapeRaw, false)
 	}
 
 	if email := strings.TrimSpace(os.Getenv("ACME_EMAIL")); email != "" {
@@ -447,6 +454,7 @@ type fileConfig struct {
 	MetricsSiteTrafficPath      *string  `json:"metricsSiteTrafficPath"`
 	MetricsDomainRequestPath    *string  `json:"metricsDomainRequestPath"`
 	MetricsPollIntervalSeconds  *int     `json:"metricsPollIntervalSeconds"`
+	MetricsScrapeEnabled        *bool    `json:"metricsScrapeEnabled"`
 	Acme                        *fileAcmeConfig `json:"acme"`
 }
 
@@ -573,6 +581,9 @@ func applyFileConfig(cfg *Config, fileCfg fileConfig) {
 	if fileCfg.MetricsPollIntervalSeconds != nil && *fileCfg.MetricsPollIntervalSeconds > 0 {
 		cfg.MetricsPollIntervalSeconds = *fileCfg.MetricsPollIntervalSeconds
 	}
+	if fileCfg.MetricsScrapeEnabled != nil {
+		cfg.MetricsScrapeEnabled = *fileCfg.MetricsScrapeEnabled
+	}
 	if fileCfg.Acme != nil {
 		applyFileAcmeConfig(cfg, *fileCfg.Acme)
 	}
@@ -654,5 +665,16 @@ func loadDotEnv(path string) {
 			}
 		}
 		_ = os.Setenv(key, value)
+	}
+}
+
+func parseEnvBool(raw string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
 	}
 }

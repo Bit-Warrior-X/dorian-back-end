@@ -78,6 +78,7 @@ func parseShortUnixJournal(raw string) []JournalLine {
 }
 
 // TailServiceJournal returns the newest journal lines for a Dorian unit.
+// Lines are formatted as "[YYYY-MM-DD HH:MM:SS] message" using the journal clock.
 func TailServiceJournal(ctx context.Context, target SSHTarget, service string, lines int) ([]string, error) {
 	unit, err := serviceUnitName(service)
 	if err != nil {
@@ -92,19 +93,61 @@ func TailServiceJournal(ctx context.Context, target SSHTarget, service string, l
 	}
 	defer client.Close()
 
-	script := fmt.Sprintf(`timeout 4 journalctl -u %q -n %d --no-pager -o cat`, unit, lines)
+	script := fmt.Sprintf(`timeout 4 journalctl -u %q -n %d --no-pager -o short-unix`, unit, lines)
 	out, err := runRemoteScript(client, script)
 	if err != nil && len(strings.TrimSpace(string(out))) == 0 {
 		return nil, err
 	}
-	raw := strings.Split(string(out), "\n")
-	logs := make([]string, 0, len(raw))
-	for _, line := range raw {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "-- ") {
+	entries := parseShortUnixJournal(string(out))
+	logs := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		msg := strings.TrimSpace(entry.Message)
+		if msg == "" {
 			continue
 		}
-		logs = append(logs, line)
+		logs = append(logs, fmt.Sprintf("[%s] %s", entry.Time.UTC().Format("2006-01-02 15:04:05"), msg))
 	}
 	return logs, nil
+}
+
+// TailEdgeServiceLog returns the newest live lines for Angelos, Sparta, or Athens.
+// Sparta prefers latest.log then journal; Athens prefers athens_error.log then
+// journal; Angelos uses the systemd journal.
+func TailEdgeServiceLog(ctx context.Context, target SSHTarget, service string, lines int) ([]string, error) {
+	name := strings.ToLower(strings.TrimSpace(service))
+	if lines <= 0 || lines > 200 {
+		lines = 80
+	}
+	switch name {
+	case "sparta":
+		fileLines, err := TailSpartaLatestLog(ctx, target, lines)
+		if err == nil && len(fileLines) > 0 {
+			return fileLines, nil
+		}
+		journal, journalErr := TailServiceJournal(ctx, target, "sparta", lines)
+		if journalErr == nil && len(journal) > 0 {
+			return journal, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return journal, journalErr
+	case "athens":
+		fileLines, err := TailAthensErrorLog(ctx, target, lines)
+		if err == nil && len(fileLines) > 0 {
+			return fileLines, nil
+		}
+		journal, journalErr := TailServiceJournal(ctx, target, "athens", lines)
+		if journalErr == nil && len(journal) > 0 {
+			return journal, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		return journal, journalErr
+	case "angelos":
+		return TailServiceJournal(ctx, target, name, lines)
+	default:
+		return nil, fmt.Errorf("unsupported service %q", service)
+	}
 }

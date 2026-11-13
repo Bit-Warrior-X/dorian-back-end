@@ -155,12 +155,7 @@ func (store *l7BlockEventStore) RecordMany(ctx context.Context, inputs []L7Block
 }
 
 func appendL7EventScope(query string, args []any, scope TrafficScope) (string, []any) {
-	query, args = appendServerScopePrefixed(query, args, scope, "e")
-	if scope.SiteID > 0 {
-		query += ` AND e.site_id = ?`
-		args = append(args, scope.SiteID)
-	}
-	return query, args
+	return appendSiteScope(query, args, scope, "e")
 }
 
 func (store *l7BlockEventStore) Summarize(ctx context.Context, start, end time.Time, scope TrafficScope) (L7BlockEventSummary, error) {

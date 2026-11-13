@@ -29,6 +29,7 @@ func reportL7AttackHandler(
 	servers store.ServerStore,
 	securityEvents store.SecurityEventStore,
 	l7Attacks store.L7AttackStore,
+	hostSamples store.HostMetricsSampleStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -132,6 +133,12 @@ func reportL7AttackHandler(
 				}
 				writeError(w, http.StatusInternalServerError, "failed to store l7 attack")
 				return
+			}
+
+			// Short L7 floods often end before the minute sampler ticks; capture
+			// CPU/RAM on every start/update/stop so Attack Console can show host at peak.
+			if hostSamples != nil {
+				go sampleAttackHostMetrics(server.ID, servers, hostSamples)
 			}
 
 			if err := ensureL7AttackSecurityEvents(r, securityEvents, server.ID, data, reqID, occurredAt, record); err != nil {

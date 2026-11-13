@@ -57,10 +57,18 @@ func contentTypeForAPI(value string) string {
 }
 
 func (store *serverTrafficStatsStore) ReplaceCacheHitReport(ctx context.Context, serverID int64, input CacheHitReportInput) error {
+	if err := store.ReplaceContentTypeBucket(ctx, serverID, input.BucketTS, input.ContentTypes); err != nil {
+		return err
+	}
+	return store.ReplaceCacheMissURLBucket(ctx, serverID, input.BucketTS, input.TopMissURLs)
+}
+
+// ReplaceContentTypeBucket replaces content_type_request_stats for one edge minute.
+func (store *serverTrafficStatsStore) ReplaceContentTypeBucket(ctx context.Context, serverID int64, bucketTS time.Time, rows []CacheHitContentTypeRow) error {
 	if serverID <= 0 {
 		return fmt.Errorf("invalid server id")
 	}
-	bucket := input.BucketTS.UTC().Truncate(time.Minute)
+	bucket := bucketTS.UTC().Truncate(time.Minute)
 	if bucket.IsZero() {
 		return fmt.Errorf("invalid bucket timestamp")
 	}
@@ -77,17 +85,11 @@ func (store *serverTrafficStatsStore) ReplaceCacheHitReport(ctx context.Context,
 	); err != nil {
 		return fmt.Errorf("clear content_type_request_stats: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM cache_miss_url_stats WHERE server_id = ? AND bucket_ts = ?`,
-		serverID, bucket,
-	); err != nil {
-		return fmt.Errorf("clear cache_miss_url_stats: %w", err)
-	}
 
-	if len(input.ContentTypes) > 0 {
-		placeholders := make([]string, 0, len(input.ContentTypes))
-		args := make([]any, 0, len(input.ContentTypes)*8)
-		for _, row := range input.ContentTypes {
+	if len(rows) > 0 {
+		placeholders := make([]string, 0, len(rows))
+		args := make([]any, 0, len(rows)*8)
+		for _, row := range rows {
 			ct := normalizeContentTypeFamily(row.ContentType)
 			if row.RequestCount < 0 {
 				row.RequestCount = 0
@@ -129,10 +131,36 @@ func (store *serverTrafficStatsStore) ReplaceCacheHitReport(ctx context.Context,
 		}
 	}
 
-	if len(input.TopMissURLs) > 0 {
-		placeholders := make([]string, 0, len(input.TopMissURLs))
-		args := make([]any, 0, len(input.TopMissURLs)*9)
-		for _, row := range input.TopMissURLs {
+	return tx.Commit()
+}
+
+// ReplaceCacheMissURLBucket replaces cache_miss_url_stats for one edge minute.
+func (store *serverTrafficStatsStore) ReplaceCacheMissURLBucket(ctx context.Context, serverID int64, bucketTS time.Time, rows []CacheHitMissURLRow) error {
+	if serverID <= 0 {
+		return fmt.Errorf("invalid server id")
+	}
+	bucket := bucketTS.UTC().Truncate(time.Minute)
+	if bucket.IsZero() {
+		return fmt.Errorf("invalid bucket timestamp")
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM cache_miss_url_stats WHERE server_id = ? AND bucket_ts = ?`,
+		serverID, bucket,
+	); err != nil {
+		return fmt.Errorf("clear cache_miss_url_stats: %w", err)
+	}
+
+	if len(rows) > 0 {
+		placeholders := make([]string, 0, len(rows))
+		args := make([]any, 0, len(rows)*9)
+		for _, row := range rows {
 			domain := strings.ToLower(strings.TrimSpace(row.Domain))
 			url := strings.TrimSpace(row.URL)
 			if url == "" {
@@ -173,10 +201,7 @@ func (store *serverTrafficStatsStore) ReplaceCacheHitReport(ctx context.Context,
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return nil
+	return tx.Commit()
 }
 
 func (store *serverTrafficStatsStore) ListCacheContentTypes(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CacheContentTypeRow, error) {

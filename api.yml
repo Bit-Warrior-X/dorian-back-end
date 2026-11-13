@@ -46,7 +46,7 @@ info:
     `/analytics/series/*` + `/analytics/summary`.
 
     Edge ingest (`/report_xdp`, `/report_l7_attack`, `/report_cache_hit`,
-    `/report_edge_configure`, `/temporary_blacklist_added`) is public with the edge
+    `/report_edge_metrics`, `/report_edge_configure`, `/temporary_blacklist_added`) is public with the edge
     token and is registered as bare, `/api/…`, and `/api/v1/…`.
 
     The root paths listed below always work. Some groups (auth, users, audit logs,

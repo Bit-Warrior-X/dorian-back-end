@@ -222,6 +222,20 @@ CREATE TABLE IF NOT EXISTS `l4_attack_stats` (
 /*!40101 SET character_set_client = @saved_cs_client */;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!40101 SET character_set_client = utf8mb4 */;
+CREATE TABLE IF NOT EXISTS `host_metrics_samples` (
+  `server_id` bigint(20) NOT NULL,
+  `bucket_ts` datetime NOT NULL,
+  `cpu_percent` double NOT NULL DEFAULT 0,
+  `memory_used_bytes` bigint(20) NOT NULL DEFAULT 0,
+  `memory_total_bytes` bigint(20) NOT NULL DEFAULT 0,
+  `created_at` timestamp NOT NULL DEFAULT current_timestamp(),
+  PRIMARY KEY (`server_id`,`bucket_ts`),
+  KEY `host_metrics_samples_bucket` (`bucket_ts`),
+  CONSTRAINT `host_metrics_samples_server_fk` FOREIGN KEY (`server_id`) REFERENCES `servers` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!40101 SET character_set_client = utf8mb4 */;
 CREATE TABLE IF NOT EXISTS `l4_blacklist` (
   `id` bigint(20) NOT NULL AUTO_INCREMENT,
   `server_id` bigint(20) NOT NULL,

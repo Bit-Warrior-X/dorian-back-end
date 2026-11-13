@@ -42,6 +42,26 @@ type attackLogLine struct {
 	Text string `json:"text"`
 }
 
+type attackConsolePeakHost struct {
+	CPUPercent         float64 `json:"cpuPercent"`
+	MemoryUsedBytes    int64   `json:"memoryUsedBytes"`
+	MemoryTotalBytes   int64   `json:"memoryTotalBytes"`
+	SampledAt          string  `json:"sampledAt"`
+	SampleSkewSeconds  int64   `json:"sampleSkewSeconds"`
+	Source             string  `json:"source"`
+}
+
+type attackConsolePeak struct {
+	At           string                 `json:"at,omitempty"`
+	Layer        string                 `json:"layer"`
+	Metric       string                 `json:"metric"`
+	Value        float64                `json:"value"`
+	Blocked      int64                  `json:"blocked,omitempty"`
+	Allowed      int64                  `json:"allowed,omitempty"`
+	BlockedShare float64                `json:"blockedShare,omitempty"`
+	Host         *attackConsolePeakHost `json:"host,omitempty"`
+}
+
 type attackConsoleResponse struct {
 	Attack      store.SecurityEventPeriod `json:"attack"`
 	ServerTime  string                    `json:"serverTime"`
@@ -56,6 +76,7 @@ type attackConsoleResponse struct {
 	SpartaLog   []attackLogLine           `json:"spartaLog"`
 	SpartaError string                    `json:"spartaError,omitempty"`
 	L7          *store.L7AttackIncident   `json:"l7,omitempty"`
+	Peak        *attackConsolePeak        `json:"peak,omitempty"`
 }
 
 const (
@@ -75,6 +96,7 @@ func attackConsoleHandler(
 	servers store.ServerStore,
 	l4Stats store.L4AttackStatsStore,
 	l7Attacks store.L7AttackStore,
+	hostSamples store.HostMetricsSampleStore,
 ) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -139,7 +161,9 @@ func attackConsoleHandler(
 			ActiveCount: period.ActiveIPCount,
 			AttackTypes: attackTypesFromVectors(period.Vectors),
 			L7:          l7Incident,
+			Peak:        resolveAttackConsolePeak(period, drops, l7Incident),
 		}
+		attachAttackPeakHost(r.Context(), response.Peak, serverID, hostSamples, servers, period, l7Incident)
 		if len(response.AttackTypes) == 0 {
 			response.AttackTypes = []attackTypeCount{}
 		}
@@ -235,7 +259,11 @@ func attackConsoleSourcesHandler(securityEvents store.SecurityEventStore) http.H
 		}
 
 		now := time.Now().UTC()
-		blocked, listErr := securityEvents.ListBlockedSourcesPage(r.Context(), serverID, reqID, offset, limit, match, activeOnly)
+		reqIDs := period.RelatedReqIDs
+		if len(reqIDs) == 0 {
+			reqIDs = []string{reqID}
+		}
+		blocked, listErr := securityEvents.ListBlockedSourcesPageForReqIDs(r.Context(), serverID, reqIDs, offset, limit, match, activeOnly)
 		if listErr != nil {
 			writeError(w, http.StatusInternalServerError, "failed to load sources")
 			return
@@ -727,6 +755,11 @@ func loadLiveL7Incident(
 
 // loadL7DropSeries returns the incident's 10-second timeline only. Each point's
 // timestamp is the bucket start (t); the UI draws a step/bar covering [t, t+10).
+//
+// Outcomes are exclusive: requests = passed + blocked + malformed + rapid_reset.
+// The console "Blocked" series is all mitigated outcomes (not only IP/rule blocks),
+// otherwise malformed / rapid-reset floods show ~0 on the chart while totals.peak
+// still count every request.
 func loadL7DropSeries(incident *store.L7AttackIncident) []attackDropPoint {
 	if incident == nil || len(incident.Timeline) == 0 {
 		return nil
@@ -737,19 +770,22 @@ func loadL7DropSeries(incident *store.L7AttackIncident) []attackDropPoint {
 		if t <= 0 {
 			continue
 		}
-		blocked := int64FromAny(raw["blocked"])
+		requests := int64FromAny(raw["requests"])
 		passed := int64FromAny(raw["passed"])
-		if passed == 0 {
-			requests := int64FromAny(raw["requests"])
-			passed = requests - blocked - int64FromAny(raw["rapid_reset"]) - int64FromAny(raw["malformed"])
+		mitigated := l7MitigatedFromBucket(raw)
+		if passed == 0 && requests > 0 {
+			passed = requests - mitigated
 			if passed < 0 {
 				passed = 0
 			}
 		}
+		if mitigated == 0 && requests > passed && passed >= 0 {
+			mitigated = requests - passed
+		}
 		bucket := time.Unix(t, 0).UTC()
 		byBucket[t] = attackDropPoint{
 			Timestamp: bucket.Format(time.RFC3339),
-			Blocked:   blocked,
+			Blocked:   mitigated,
 			Allowed:   passed,
 		}
 	}
@@ -759,6 +795,14 @@ func loadL7DropSeries(incident *store.L7AttackIncident) []attackDropPoint {
 	}
 	sort.Slice(drops, func(i, j int) bool { return drops[i].Timestamp < drops[j].Timestamp })
 	return drops
+}
+
+// l7MitigatedFromBucket sums every non-passed outcome in a timeline/totals map.
+func l7MitigatedFromBucket(raw map[string]any) int64 {
+	if raw == nil {
+		return 0
+	}
+	return int64FromAny(raw["blocked"]) + int64FromAny(raw["malformed"]) + int64FromAny(raw["rapid_reset"])
 }
 
 func int64FromAny(value any) int64 {
@@ -969,4 +1013,256 @@ func parseConsoleTime(value string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+const (
+	// Minute host samples need a little slack around the attack clocks, but must
+	// stay inside the attack window — a 5-minute "nearest" fallback was picking
+	// quiet post-attack minutes and labeling them Host at peak.
+	attackPeakHostWindowPad = 60 * time.Second
+	l7AttackTimelineSeconds = 10.0
+)
+
+func l7TotalsRequestsBlocked(totals map[string]any) (requests, blocked int64) {
+	if totals == nil {
+		return 0, 0
+	}
+	requests = anyToInt64(totals["requests"])
+	// Mitigated share for the console: IP/rule blocks + malformed + rapid_reset.
+	blocked = anyToInt64(totals["blocked"]) + anyToInt64(totals["malformed"]) + anyToInt64(totals["rapid_reset"])
+	if blocked == 0 {
+		passed := anyToInt64(totals["passed"])
+		if requests > passed && passed >= 0 {
+			blocked = requests - passed
+		}
+	}
+	if requests <= 0 {
+		requests = blocked + anyToInt64(totals["passed"])
+	}
+	return requests, blocked
+}
+
+func anyToInt64(value any) int64 {
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case float64:
+		return int64(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return n
+	case string:
+		n, _ := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		return n
+	default:
+		return 0
+	}
+}
+
+func resolveAttackConsolePeak(
+	period store.SecurityEventPeriod,
+	drops []attackDropPoint,
+	l7 *store.L7AttackIncident,
+) *attackConsolePeak {
+	if strings.EqualFold(strings.TrimSpace(period.Layer), "L7") || l7 != nil {
+		return resolveL7AttackPeak(drops, l7)
+	}
+	return resolveL4AttackPeak(drops)
+}
+
+func resolveL7AttackPeak(drops []attackDropPoint, l7 *store.L7AttackIncident) *attackConsolePeak {
+	peak := &attackConsolePeak{Layer: "L7", Metric: "rps"}
+	if l7 != nil && l7.PeakRPS > 0 {
+		peak.Value = float64(l7.PeakRPS)
+		if l7.PeakRPSAt > 0 {
+			peak.At = time.Unix(l7.PeakRPSAt, 0).UTC().Format(time.RFC3339)
+		}
+		// Prefer totals-derived mitigated share: edge blocked_ratio is IP/rule
+		// blocks only and stays 0 for malformed / rapid-reset floods.
+		if req, blocked := l7TotalsRequestsBlocked(l7.Totals); req > 0 && blocked > 0 {
+			peak.BlockedShare = float64(blocked) / float64(req)
+		} else if l7.BlockedRatio > 0 {
+			peak.BlockedShare = l7.BlockedRatio
+		}
+		return peak
+	}
+
+	var bestTotal, bestBlocked int64
+	var bestAt time.Time
+	for _, point := range drops {
+		blocked := point.Blocked
+		total := blocked + point.Allowed
+		if total <= bestTotal {
+			continue
+		}
+		bestTotal = total
+		bestBlocked = blocked
+		if ts, ok := parseConsoleTime(point.Timestamp); ok {
+			bestAt = ts
+		}
+	}
+	if bestTotal <= 0 {
+		return peak
+	}
+	peak.Value = float64(bestTotal) / l7AttackTimelineSeconds
+	peak.Blocked = bestBlocked
+	peak.Allowed = bestTotal - bestBlocked
+	if bestTotal > 0 {
+		peak.BlockedShare = float64(bestBlocked) / float64(bestTotal)
+	}
+	if !bestAt.IsZero() {
+		peak.At = bestAt.UTC().Format(time.RFC3339)
+	}
+	return peak
+}
+
+func resolveL4AttackPeak(drops []attackDropPoint) *attackConsolePeak {
+	peak := &attackConsolePeak{Layer: "L4", Metric: "ingress_bytes"}
+	var bestTotal, bestBlocked int64
+	var bestAt time.Time
+	for _, point := range drops {
+		blocked := point.Blocked
+		total := blocked + point.Allowed
+		if total <= bestTotal {
+			continue
+		}
+		bestTotal = total
+		bestBlocked = blocked
+		if ts, ok := parseConsoleTime(point.Timestamp); ok {
+			bestAt = ts
+		}
+	}
+	if bestTotal <= 0 {
+		return peak
+	}
+	peak.Value = float64(bestTotal)
+	peak.Blocked = bestBlocked
+	peak.Allowed = bestTotal - bestBlocked
+	peak.BlockedShare = float64(bestBlocked) / float64(bestTotal)
+	if !bestAt.IsZero() {
+		peak.At = bestAt.UTC().Format(time.RFC3339)
+	}
+	return peak
+}
+
+func attachAttackPeakHost(
+	ctx context.Context,
+	peak *attackConsolePeak,
+	serverID int64,
+	hostSamples store.HostMetricsSampleStore,
+	servers store.ServerStore,
+	period store.SecurityEventPeriod,
+	l7 *store.L7AttackIncident,
+) {
+	if peak == nil || serverID <= 0 || hostSamples == nil {
+		return
+	}
+	ongoing := strings.EqualFold(period.Status, "ongoing")
+	if l7 != nil && strings.EqualFold(strings.TrimSpace(l7.Status), "active") {
+		ongoing = true
+	}
+
+	peakAt, ok := parseConsoleTime(peak.At)
+	if !ok {
+		// Prefer incident / period clocks so ended attacks can still resolve a host sample.
+		if l7 != nil && l7.StartedAt > 0 {
+			peakAt = time.Unix(l7.StartedAt, 0).UTC()
+			if l7.EndedAt != nil && *l7.EndedAt > l7.StartedAt {
+				peakAt = time.Unix((l7.StartedAt+*l7.EndedAt)/2, 0).UTC()
+			}
+			ok = true
+		} else if started, startOK := parseConsoleTime(period.StartedAt); startOK {
+			peakAt = started
+			if ended, endOK := parseConsoleTime(period.EndedAt); endOK && ended.After(started) {
+				peakAt = started.Add(ended.Sub(started) / 2)
+			}
+			ok = true
+		}
+	}
+	if !ok {
+		if !ongoing {
+			return
+		}
+		peakAt = time.Now().UTC()
+	}
+
+	windowStart, windowEnd := attackHostSampleWindow(period, l7, peakAt, ongoing)
+	sample, err := hostSamples.NearestInRange(ctx, serverID, peakAt, windowStart, windowEnd)
+	if err == nil {
+		peak.Host = &attackConsolePeakHost{
+			CPUPercent:        sample.CPUPercent,
+			MemoryUsedBytes:   sample.MemoryUsedBytes,
+			MemoryTotalBytes:  sample.MemoryTotalBytes,
+			SampledAt:         sample.BucketTS.UTC().Format(time.RFC3339),
+			SampleSkewSeconds: store.SampleSkewSeconds(sample, peakAt),
+			Source:            "host_metrics_samples",
+		}
+	}
+
+	// Live probe only while the attack is open — post-attack load is not "at peak".
+	if ongoing && servers != nil {
+		go sampleAttackHostMetrics(serverID, servers, hostSamples)
+	}
+}
+
+// attackHostSampleWindow bounds host lookups to the attack itself (plus one
+// minute for bucket alignment). Samples outside this range are not "at peak".
+func attackHostSampleWindow(
+	period store.SecurityEventPeriod,
+	l7 *store.L7AttackIncident,
+	peakAt time.Time,
+	ongoing bool,
+) (time.Time, time.Time) {
+	now := time.Now().UTC()
+	start := peakAt.Add(-attackPeakHostWindowPad)
+	end := peakAt.Add(attackPeakHostWindowPad)
+	if l7 != nil && l7.StartedAt > 0 {
+		start = time.Unix(l7.StartedAt, 0).UTC().Add(-attackPeakHostWindowPad)
+		if l7.EndedAt != nil && *l7.EndedAt > l7.StartedAt {
+			end = time.Unix(*l7.EndedAt, 0).UTC().Add(attackPeakHostWindowPad)
+		} else if ongoing {
+			end = now
+		}
+	} else if started, ok := parseConsoleTime(period.StartedAt); ok {
+		start = started.Add(-attackPeakHostWindowPad)
+		if ended, endOK := parseConsoleTime(period.EndedAt); endOK && ended.After(started) {
+			end = ended.Add(attackPeakHostWindowPad)
+		} else if ongoing {
+			end = now
+		} else {
+			end = started.Add(attackPeakHostWindowPad)
+		}
+	}
+	if ongoing && end.Before(now) {
+		end = now
+	}
+	if end.Before(start) {
+		start, end = end, start
+	}
+	return start, end
+}
+
+func sampleAttackHostMetrics(serverID int64, servers store.ServerStore, hostSamples store.HostMetricsSampleStore) {
+	if serverID <= 0 || servers == nil || hostSamples == nil {
+		return
+	}
+	probeCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	view, err := servers.GetView(probeCtx, serverID)
+	if err != nil {
+		return
+	}
+	metrics, err := remotesvc.ProbeHostMetrics(probeCtx, sshTargetFromView(view))
+	if err != nil {
+		return
+	}
+	_ = hostSamples.Upsert(probeCtx, store.HostMetricsSample{
+		ServerID:         serverID,
+		BucketTS:         time.Now().UTC(),
+		CPUPercent:       metrics.CPUPercent,
+		MemoryUsedBytes:  metrics.MemoryUsedBytes,
+		MemoryTotalBytes: metrics.MemoryTotalBytes,
+	})
 }

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"database/sql"
 	"net/http"
 
 	"vue-project-backend/internal/acme"
@@ -9,6 +11,7 @@ import (
 )
 
 func NewRouter(
+	ctx context.Context,
 	cfg config.Config,
 	users store.UserStore,
 	mfa store.MFAStore,
@@ -42,6 +45,7 @@ func NewRouter(
 	originRoutes store.SiteOriginRouteStore,
 	l7Guard store.L7GuardStore,
 	l7Attacks store.L7AttackStore,
+	hostSamples store.HostMetricsSampleStore,
 	auditLogs store.AuditLogStore,
 	apiTokens store.APITokenStore,
 	licensePlans store.LicensePlanStore,
@@ -49,20 +53,53 @@ func NewRouter(
 	sessions store.AuthSessionStore,
 	panelSettings store.PanelSettingsStore,
 	userTokens store.UserTokenStore,
+	orders store.OrderStore,
 	certIssuer *acme.Issuer,
+	dbConn *sql.DB,
 ) http.Handler {
 	mux := http.NewServeMux()
 
 	agentClient := NewAgentClient(cfg)
 	configureL7Edge(cfg)
 	account := newAccountServices(cfg, users, mfa, sessions, panelSettings, userTokens, auditLogs)
-	registerRoutes(mux, cfg, agentClient, account, users, mfa, loginThrottle, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, l7BlockEvents, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, originRoutes, l7Guard, l7Attacks, certIssuer)
+	registerRoutes(mux, cfg, agentClient, account, users, mfa, loginThrottle, auditLogs, apiTokens, licensePlans, servers, l4, l4Whitelist, l4Blacklist, l4LiveAttack, l4AttackStats, l7BlockEvents, securityEvents, serverTrafficStats, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, listeningPorts, cacheRules, compressSettings, blacklist, sites, wafRules, siteListeningPorts, originRoutes, l7Guard, l7Attacks, hostSamples, certIssuer, dbConn)
 	registerNotificationRoutes(mux, notifications)
 	registerAccountRoutes(mux, account)
+	orderSvc := &orderService{
+		cfg:                cfg,
+		orders:             orders,
+		users:              users,
+		servers:            servers,
+		sites:              sites,
+		upstreams:          upstreamServers,
+		siteListeningPorts: siteListeningPorts,
+		l7Deps: siteL7Stores{
+			wafWhitelist:       wafWhitelist,
+			wafBlacklist:       wafBlacklist,
+			wafGeo:             wafGeo,
+			wafAntiCc:          wafAntiCc,
+			wafAntiHeader:      wafAntiHeader,
+			wafInterval:        wafInterval,
+			wafSecond:          wafSecond,
+			wafResponse:        wafResponse,
+			wafUserAgent:       wafUserAgent,
+			upstreamServers:    upstreamServers,
+			cacheRules:         cacheRules,
+			compressSettings:   compressSettings,
+			siteListeningPorts: siteListeningPorts,
+			originRoutes:       originRoutes,
+		},
+		certIssuer:    certIssuer,
+		notifications: notifications,
+	}
+	registerOrderRoutes(mux, orderSvc)
+	orderSvc.StartLicenseLifecycle(ctx)
+	viewerOwnedSiteIDs = orders.OwnedSiteIDs
 
 	auditResolver := &auditResolver{users: users, servers: servers, sites: sites, wafRules: wafRules, tokens: apiTokens}
 
 	handler := http.Handler(mux)
+	handler = withLicenseGuard(orders, sites, handler)
 	handler = withAuditLogging(auditLogs, auditResolver, handler)
 	handler = withViewerScope(users, handler)
 	handler = withAuth(cfg, apiTokens, sessions, panelSettings, handler)

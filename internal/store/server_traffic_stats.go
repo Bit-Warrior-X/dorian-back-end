@@ -208,6 +208,8 @@ type ServerTrafficStatsStore interface {
 	ListCacheStatusSummary(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CacheStatusRow, error)
 	ListCacheBySite(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CacheSiteRow, error)
 	ReplaceCacheHitReport(ctx context.Context, serverID int64, input CacheHitReportInput) error
+	ReplaceContentTypeBucket(ctx context.Context, serverID int64, bucketTS time.Time, rows []CacheHitContentTypeRow) error
+	ReplaceCacheMissURLBucket(ctx context.Context, serverID int64, bucketTS time.Time, rows []CacheHitMissURLRow) error
 	ListCacheContentTypes(ctx context.Context, start, end time.Time, scope TrafficScope) ([]CacheContentTypeRow, error)
 	ListCacheTopMissURLs(ctx context.Context, start, end time.Time, scope TrafficScope, limit int) ([]CacheMissURLRow, error)
 

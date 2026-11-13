@@ -340,8 +340,11 @@ Not Angelos “outbound API”, but related edge callbacks the back-end exposes:
 | `POST /temporary_blacklist_added` · `/api/temporary_blacklist_added` · `/api/v1/temporary_blacklist_added` | Temporary blacklist notified from edge |
 | `POST /report_edge_configure` · `/api/report_edge_configure` · `/api/v1/report_edge_configure` | Periodic full edge configure snapshot (L4 lists/config, listening ports, temp blacklist, L7 Guard, site compress/upstreams/ports) |
 | `POST /report_cache_hit` · `/api/report_cache_hit` · `/api/v1/report_cache_hit` | Cache hit / miss counters from Athens |
+| `POST /report_edge_metrics` · `/api/report_edge_metrics` · `/api/v1/report_edge_metrics` | Closed Sparta + Athens metrics batch (`metrics_sync`, ~60s). Replaces panel scrape of Athens `:9000` / Sparta history |
 
 Edge ingest uses the edge `token` (public auth paths). Prefer `/api/v1/…` for new agents; bare and `/api/…` remain for older Angelos builds.
+
+`report_edge_metrics` stores idempotent minute buckets by `(server_id, endpoint, timestamp)`. Prefer `items[]`; top-level `source`/`endpoint`/`timestamp`/`payload` mirror a single item. Set `METRICS_SCRAPE_ENABLED=true` only if you need the legacy Athens pull collector.
 
 Angelos posts `report_edge_configure` about every 60s (`EDGE_LIST_SYNC_INTERVAL`). Dorian authenticates with the edge `token` and reconciles MySQL/Redis for that server so panel and edge stay aligned. L7 Guard settings under `l7.edge.l7guard` are upserted into panel storage.
 

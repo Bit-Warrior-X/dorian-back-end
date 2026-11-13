@@ -34,7 +34,7 @@ func (store *licensePlanStore) ListActive(ctx context.Context) ([]LicensePlan, e
 		SELECT id, title, COALESCE(tagline, ''), badge, accent,
 		       monthly_price, annual_price, sort_order
 		FROM license_plans
-		WHERE active = 1
+		WHERE active = 1 AND category = 'tier'
 		ORDER BY sort_order ASC, id ASC`)
 	if err != nil {
 		return nil, err
