@@ -214,6 +214,10 @@ func performServerCreate(
 		expireRaw = strings.TrimSpace(deployResp.ExpireDate)
 	}
 	expiredAt := resolveDeployExpireDate(expireRaw, payload.LicenseType, payload.BillingPeriod, time.Now())
+	if payload.ExpireAt != nil && !payload.ExpireAt.IsZero() {
+		t := payload.ExpireAt.UTC()
+		expiredAt = &t
+	}
 	deployToken := strings.TrimSpace(deployResp.DeployComplete.Token)
 	if deployToken == "" {
 		deployToken = token
@@ -291,6 +295,10 @@ func performServerCreate(
 		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to load server")
 	}
 	view = applyRuntimeStatusesToView(view, runtimeStatuses)
+	// Prefer dorian.v2 deploy via Angelos; SSH deploy already wrote classic bridge.
+	if err := pushLicenseBundleToEdge(opCtx, view, deployResp); err != nil {
+		log.Printf("[api] POST /servers: /API/license/deploy serverID=%d warning: %v", created.ID, err)
+	}
 	log.Printf("[api] POST /servers: success serverID=%d name=%q ip=%q version=%q angelos=%q l4=%q l7=%q",
 		created.ID, view.Name, view.IP, view.Version, deployServiceStatus, deployL4Status, deployL7Status)
 	return view, nil
@@ -623,9 +631,10 @@ func registerRoutes(
 			return err
 		})
 	}
-	mux.HandleFunc("/sites", sitesHandler(sites, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, originRoutes, certIssuer))
+	mux.HandleFunc("/sites", sitesHandler(sites, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, originRoutes, certIssuer, dbConn))
 	mux.HandleFunc("/sites/", restrictSiteDetail(sites, siteDetailHandler(sites, wafRules, servers, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts, originRoutes, certIssuer)))
 	mux.HandleFunc("/waf-rules", wafRulesHandler(wafRules))
+	mux.HandleFunc("/waf-rules/profiles", protectionProfilesHandler(dbConn))
 	mux.HandleFunc("/waf-rules/", wafRuleDetailHandler(servers, sites, wafRules, wafWhitelist, wafBlacklist, wafGeo, wafAntiCc, wafAntiHeader, wafInterval, wafSecond, wafResponse, wafUserAgent, upstreamServers, cacheRules, compressSettings, siteListeningPorts))
 }
 
@@ -973,10 +982,17 @@ func buildSecurityEvent(payload reportXdpPayload) (string, string, bool) {
 	switch command {
 	case "report_license":
 		switch data {
+		case "active":
+			// Healthy heartbeat — no security event noise.
+			return "", "", false
+		case "past_due":
+			return "License past due", "Edge license is past the paid period (≤14-day grace). Config still allowed; renew to avoid freeze.", true
 		case "expired":
-			return "License issue", "License has expired, please take action.", true
+			return "License expired", "Edge license grace ended. Config is locked (423); traffic keeps last configuration until renewed.", true
 		case "manipulated":
-			return "License issue", "License is manually manipulated, please take action.", true
+			return "License manipulated", "Edge license file failed verification. Sparta/Athens hard-stopped. Investigate immediately.", true
+		case "clock_rollback":
+			return "License clock rollback", "Edge clock moved backwards vs license issue time. Components hard-stopped. Check host time.", true
 		default:
 			if payload.Data == "" {
 				return "", "", false
@@ -3353,6 +3369,9 @@ type serverCreatePayload struct {
 	SSHAuthType      string `json:"sshAuthType"`
 	SSHPrivateKey    string `json:"sshPrivateKey"`
 	SSHKeyPassphrase string `json:"sshKeyPassphrase"`
+	// ExpireAt, when set (order provision), drives duration_days and servers.expired
+	// so classic license.lic matches panel current_period_end (no +14 grace in the file).
+	ExpireAt *time.Time `json:"-"`
 }
 
 type deployCreateServerRequest struct {
@@ -3386,8 +3405,16 @@ type deployCreateServerResponse struct {
 	ServerStatus   string                 `json:"server_status"`
 	L4Status       string                 `json:"l4_status"`
 	L7Status       string                 `json:"l7_status"`
+	License        string                 `json:"license"` // classic bridge body (legacy field)
+	MachineID      string                 `json:"machine_id"`
 	DorianVersion  deployDorianVersion    `json:"dorian_version"`
 	DeployComplete deployCompleteResponse `json:"deploy_complete"`
+	// dorian.v2 entitlement bundle (PANEL_EDGE_LICENSE_INTEGRATION §3.1)
+	Format                 string            `json:"format,omitempty"`
+	Edge                   string            `json:"edge,omitempty"`
+	Components             map[string]string `json:"components,omitempty"`
+	BridgeLicense          string            `json:"bridge_license,omitempty"`
+	BridgeLicenseEncoding  string            `json:"bridge_license_encoding,omitempty"`
 }
 
 func deployProductOS(resp deployCreateServerResponse) string {
@@ -3538,6 +3565,10 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 	if err != nil {
 		return deployCreateServerResponse{}, apiHTTPError(http.StatusBadRequest, err.Error())
 	}
+	durationDays := deployDurationDays(payload.LicenseType, payload.BillingPeriod)
+	if payload.ExpireAt != nil && !payload.ExpireAt.IsZero() {
+		durationDays = durationDaysUntil(*payload.ExpireAt, time.Now())
+	}
 	reqPayload := deployCreateServerRequest{
 		Name:          strings.TrimSpace(payload.Name),
 		IP:            strings.TrimSpace(payload.IP),
@@ -3549,7 +3580,7 @@ func createDeployLicenseServer(ctx context.Context, cfg config.Config, payload s
 		LicenseString: strings.TrimSpace(payload.LicenseFile),
 		Token:         token,
 		VersionUUID:   strings.TrimSpace(payload.VersionUUID),
-		DurationDays:  deployDurationDays(payload.LicenseType, payload.BillingPeriod),
+		DurationDays:  durationDays,
 		BillingPeriod: deployBillingPeriod(payload.BillingPeriod),
 	}
 	body, err := json.Marshal(reqPayload)
@@ -3909,7 +3940,7 @@ type deployUpgradeLicenseRequest struct {
 	BillingPeriod string `json:"billing_period,omitempty"`
 }
 
-func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view store.ServerView, licenseType, billingPeriod string) (deployCreateServerResponse, error) {
+func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view store.ServerView, licenseType, billingPeriod string, durationDaysOverride int) (deployCreateServerResponse, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.DeployLicenseBaseURL), "/")
 	if baseURL == "" {
 		logDeployLicenseClientf("abort: DEPLOY_LICENSE_BASE_URL is empty (upgrade_license)")
@@ -3923,6 +3954,10 @@ func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view st
 	if err != nil {
 		return deployCreateServerResponse{}, fmt.Errorf("stored %w", err)
 	}
+	durationDays := deployDurationDays(licenseType, billingPeriod)
+	if durationDaysOverride > 0 {
+		durationDays = durationDaysOverride
+	}
 	reqPayload := deployUpgradeLicenseRequest{
 		Name:          strings.TrimSpace(view.Name),
 		IP:            strings.TrimSpace(view.IP),
@@ -3932,7 +3967,7 @@ func deployLicenseUpgradeLicense(ctx context.Context, cfg config.Config, view st
 		SSHPort:       strings.TrimSpace(view.SSHPort),
 		Token:         strings.TrimSpace(view.Token),
 		LicenseType:   deployLicenseServiceLicenseType(licenseType),
-		DurationDays:  deployDurationDays(licenseType, billingPeriod),
+		DurationDays:  durationDays,
 		BillingPeriod: deployBillingPeriod(billingPeriod),
 	}
 	body, err := json.Marshal(reqPayload)
@@ -4124,7 +4159,7 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 		writeError(w, http.StatusBadRequest, "licenseType is required")
 		return
 	}
-	outView, err := performServerLicenseReissue(r.Context(), cfg, servers, serverID, licenseType, deployBillingPeriod(body.BillingPeriod))
+	outView, err := performServerLicenseReissue(r.Context(), cfg, servers, serverID, licenseType, deployBillingPeriod(body.BillingPeriod), nil)
 	if err != nil {
 		var he *httpAPIErr
 		if errors.As(err, &he) {
@@ -4138,8 +4173,10 @@ func handleServerUpgradeLicense(w http.ResponseWriter, r *http.Request, cfg conf
 }
 
 // performServerLicenseReissue regenerates the edge license through deploy_license
-// (license-only deploy) and persists the new tier and expiry.
-func performServerLicenseReissue(ctx context.Context, cfg config.Config, servers store.ServerStore, serverID int64, licenseType, billingPeriod string) (store.ServerView, error) {
+// (license-only deploy), prefers POST /API/license/deploy for rematerialize, and
+// persists the new tier and expiry. When expireAt is set (order renew / upgrade),
+// duration_days and servers.expired follow that instant (panel period end).
+func performServerLicenseReissue(ctx context.Context, cfg config.Config, servers store.ServerStore, serverID int64, licenseType, billingPeriod string, expireAt *time.Time) (store.ServerView, error) {
 	view, err := servers.GetView(ctx, serverID)
 	if err != nil {
 		if store.IsNotFound(err) {
@@ -4156,7 +4193,11 @@ func performServerLicenseReissue(ctx context.Context, cfg config.Config, servers
 	}
 	deployCtx, cancelDeploy := context.WithTimeout(ctx, time.Duration(deployTimeout)*time.Second)
 	defer cancelDeploy()
-	deployResp, err := deployLicenseUpgradeLicense(deployCtx, cfg, view, licenseType, billingPeriod)
+	var durationOverride int
+	if expireAt != nil && !expireAt.IsZero() {
+		durationOverride = durationDaysUntil(*expireAt, time.Now())
+	}
+	deployResp, err := deployLicenseUpgradeLicense(deployCtx, cfg, view, licenseType, billingPeriod, durationOverride)
 	if err != nil {
 		log.Printf("[api] license reissue server=%d: deploy_license failed: %v", serverID, err)
 		return store.ServerView{}, err
@@ -4166,6 +4207,10 @@ func performServerLicenseReissue(ctx context.Context, cfg config.Config, servers
 		expireRaw = strings.TrimSpace(deployResp.ExpireDate)
 	}
 	expiredAt := resolveDeployExpireDate(expireRaw, licenseType, billingPeriod, time.Now())
+	if expireAt != nil && !expireAt.IsZero() {
+		t := expireAt.UTC()
+		expiredAt = &t
+	}
 	runtimeStatuses := probeRemoteRuntimeStatuses(ctx, sshTargetFromView(view))
 	deployVersion := strings.TrimSpace(deployResp.DeployComplete.Version)
 	if deployVersion == "" {
@@ -4182,6 +4227,9 @@ func performServerLicenseReissue(ctx context.Context, cfg config.Config, servers
 		return store.ServerView{}, apiHTTPError(http.StatusInternalServerError, "failed to load server")
 	}
 	outView = applyRuntimeStatusesToView(outView, runtimeStatuses)
+	if err := pushLicenseBundleToEdge(ctx, outView, deployResp); err != nil {
+		log.Printf("[api] license reissue server=%d: /API/license/deploy warning: %v", serverID, err)
+	}
 	log.Printf("[api] license reissue server=%d: success license=%q version=%q service_status=%q", serverID, outView.License, outView.Version, outView.ServiceStatus)
 	return outView, nil
 }
@@ -6967,6 +7015,7 @@ func sitesHandler(
 	siteListeningPorts store.SiteListeningPortStore,
 	originRoutes store.SiteOriginRouteStore,
 	certIssuer *acme.Issuer,
+	dbConn *sql.DB,
 ) http.HandlerFunc {
 	deps := siteL7Stores{
 		wafWhitelist:       wafWhitelist,
@@ -7002,6 +7051,10 @@ func sitesHandler(
 			payload = payload.Normalize()
 			if payload.Domain == "" {
 				writeError(w, http.StatusBadRequest, "domain is required")
+				return
+			}
+			if err := store.ApplyDefaultProtectionWafID(r.Context(), dbConn, &payload); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to assign default protection profile")
 				return
 			}
 			applySiteSslDefaults(&payload)

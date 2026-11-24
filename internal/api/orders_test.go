@@ -32,13 +32,38 @@ func TestPriceOrderSiteOwnWithL4(t *testing.T) {
 		Edges: []store.OrderEdge{{Name: "a", IP: "1.1.1.1", L4: true}},
 		Sites: []store.OrderSite{{Domain: "a.com", Origin: "2.2.2.2:80"}, {Domain: "b.com", Origin: "2.2.2.2:80"}, {Domain: "c.com", Origin: "2.2.2.2:80"}},
 	})
-	priceOrder(&order, testCatalog, nil, time.Now())
+	priceOrder(&order, testCatalog, nil, nil, time.Now())
 	if itemQty(order.Items, store.CatalogEdgeL7) != 1 || itemQty(order.Items, store.CatalogL4Addon) != 1 ||
 		itemQty(order.Items, store.CatalogSiteOwn) != 3 || itemQty(order.Items, store.CatalogSetupFee) != 1 {
 		t.Fatalf("unexpected items: %+v", order.Items)
 	}
 	if order.Total != 250+99+30+50 {
 		t.Fatalf("total = %v", order.Total)
+	}
+}
+
+func TestPriceOrderExistingEdgeSkipsSetupFee(t *testing.T) {
+	order := store.Order{Kind: store.OrderKindNew, Purpose: store.OrderPurposeEdge, Period: periodMonth}
+	order.Details = normalizeOrderDetails(order.Purpose, store.OrderDetails{
+		Edges: []store.OrderEdge{
+			{Name: "new", IP: "1.1.1.1", SSHPassword: "x"},
+			{Name: "reg", IP: "1.1.1.2", ServerID: 42},
+		},
+	})
+	priceOrder(&order, testCatalog, nil, nil, time.Now())
+	if itemQty(order.Items, store.CatalogEdgeL4) != 2 || itemQty(order.Items, store.CatalogSetupFee) != 1 {
+		t.Fatalf("unexpected items: %+v", order.Items)
+	}
+}
+
+func TestValidateOrderExistingTargetsSkipSSHAndOrigins(t *testing.T) {
+	own := orderOwnership{l7ServerIDs: map[int64]bool{}, upgradeable: map[int64]bool{}}
+	order := store.Order{Purpose: store.OrderPurposeEdgeSite, Details: normalizeOrderDetails(store.OrderPurposeEdgeSite, store.OrderDetails{
+		Edges: []store.OrderEdge{{Name: "e", IP: "10.0.0.1", ServerID: 5}},
+		Sites: []store.OrderSite{{Domain: "shop.example.com", SiteID: 9}},
+	})}
+	if err := validateOrderForSubmit(order, own, map[string]bool{"shop.example.com": true}); err != nil {
+		t.Fatalf("existing edge+site should pass without SSH/origins: %v", err)
 	}
 }
 
@@ -59,7 +84,7 @@ func TestPriceOrderPurposes(t *testing.T) {
 			Edges: []store.OrderEdge{edge, {Name: "b", IP: "1.1.1.2"}},
 			Sites: []store.OrderSite{site},
 		})
-		priceOrder(&order, testCatalog, nil, time.Now())
+		priceOrder(&order, testCatalog, nil, nil, time.Now())
 		for code, qty := range tc.want {
 			if got := itemQty(order.Items, code); got != qty {
 				t.Errorf("%s: %s qty = %d, want %d", tc.purpose, code, got, qty)
@@ -76,7 +101,7 @@ func TestPriceOrderAddonProrated(t *testing.T) {
 		Sites:     []store.OrderSite{{Domain: "a.com", Origin: "x", Placement: "platform"}},
 		CoTermEnd: &end,
 	})
-	priceOrder(&order, testCatalog, nil, now)
+	priceOrder(&order, testCatalog, nil, nil, now)
 	if len(order.Items) != 1 || order.Items[0].UnitPrice >= 192 || order.Items[0].UnitPrice < 90 {
 		t.Fatalf("expected prorated platform site, got %+v", order.Items)
 	}
@@ -84,9 +109,24 @@ func TestPriceOrderAddonProrated(t *testing.T) {
 
 func TestPriceRenewal(t *testing.T) {
 	order := store.Order{Kind: store.OrderKindRenewal, Purpose: store.OrderPurposeRenewal, Period: periodYear}
-	priceOrder(&order, testCatalog, []store.License{{Kind: store.LicenseKindUnified}, {Kind: store.LicenseKindSitePlatform}}, time.Now())
+	priceOrder(&order, testCatalog, []store.License{{Kind: store.LicenseKindUnified}, {Kind: store.LicenseKindSitePlatform}}, nil, time.Now())
 	if order.Total != 2400+948+192 {
 		t.Fatalf("renewal total = %v (%+v)", order.Total, order.Items)
+	}
+}
+
+func TestPriceOrderSkipsCoveredExistingEdges(t *testing.T) {
+	order := store.Order{Kind: store.OrderKindNew, Purpose: store.OrderPurposeSiteOwn, Period: periodMonth}
+	order.Details = normalizeOrderDetails(order.Purpose, store.OrderDetails{
+		Edges: []store.OrderEdge{{Name: "e", IP: "1.1.1.1", ServerID: 9, L7: true}},
+		Sites: []store.OrderSite{{Domain: "a.com", Origin: "2.2.2.2", ServerIDs: []int64{9}}},
+	})
+	priceOrder(&order, testCatalog, nil, map[int64]bool{9: true}, time.Now())
+	if got := itemQty(order.Items, store.CatalogEdgeL7); got != 0 {
+		t.Fatalf("covered edge should not be billed, got EDGE_L7=%d items=%+v", got, order.Items)
+	}
+	if got := itemQty(order.Items, store.CatalogSiteOwn); got != 1 {
+		t.Fatalf("site should still be billed, got SITE_OWN=%d", got)
 	}
 }
 

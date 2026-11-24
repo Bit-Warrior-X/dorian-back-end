@@ -1918,6 +1918,36 @@ paths:
         "502":
           $ref: "#/components/responses/BadGateway"
 
+  /waf-rules/profiles:
+    get:
+      tags: [WAF Rules]
+      summary: List built-in protection profiles
+      description: >
+        Returns Off / Essential / Standard / Strict predefined packs used by
+        Configure sites → Protect. New sites without an explicit `wafId` get Standard.
+      responses:
+        "200":
+          description: Protection profiles
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    key:
+                      type: string
+                      enum: [off, essential, standard, strict]
+                    name:
+                      type: string
+                    description:
+                      type: string
+                    wafRuleId:
+                      type: integer
+                      format: int64
+                    role:
+                      type: string
+                      enum: [predefined]
   /waf-rules:
     get:
       tags: [WAF Rules]

@@ -2,12 +2,28 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"strings"
 
 	"vue-project-backend/internal/store"
 )
+
+func protectionProfilesHandler(dbConn *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		list, err := store.ListProtectionProfiles(r.Context(), dbConn)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to load protection profiles")
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
+	}
+}
 
 func parseWafRuleResourcePath(path, resource string) (wafRuleID int64, ruleID int64, isBatch bool, ok bool) {
 	trimmed := strings.TrimPrefix(path, "/waf-rules/")

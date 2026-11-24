@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ type orderService struct {
 	l7Deps             siteL7Stores
 	certIssuer         *acme.Issuer
 	notifications      store.NotificationStore
+	db                 *sql.DB
 	running            sync.Map
 }
 
@@ -62,6 +64,7 @@ func registerOrderRoutes(mux *http.ServeMux, svc *orderService) {
 	mux.HandleFunc("POST /api/v1/orders/{id}/approve", requireAdmin(svc.handleApprove))
 	mux.HandleFunc("POST /api/v1/orders/{id}/reject", requireAdmin(svc.handleReject))
 	mux.HandleFunc("GET /api/v1/licenses", svc.handleLicenses)
+	mux.HandleFunc("GET /api/v1/licenses/{id}/history", svc.handleLicenseHistory)
 	mux.HandleFunc("POST /api/v1/licenses/renew", svc.handleRenew)
 	mux.HandleFunc("POST /api/v1/licenses/{id}/cancel", svc.handleLicenseCancel)
 	mux.HandleFunc("POST /api/v1/licenses/{id}/resume", svc.handleLicenseResume)
@@ -98,6 +101,95 @@ func sanitizeOrder(order store.Order) store.Order {
 	}
 	order.Details.Edges = edges
 	return order
+}
+
+// orderAPIView is the order payload plus licenses tied to it (issued or renewed).
+type orderAPIView struct {
+	store.Order
+	Licenses []store.License `json:"licenses"`
+}
+
+func (svc *orderService) orderView(ctx context.Context, order store.Order) orderAPIView {
+	return orderAPIView{Order: sanitizeOrder(order), Licenses: svc.licensesForOrder(ctx, order)}
+}
+
+func (svc *orderService) writeOrder(w http.ResponseWriter, status int, ctx context.Context, order store.Order) {
+	writeJSON(w, status, svc.orderView(ctx, order))
+}
+
+func (svc *orderService) licensesForOrder(ctx context.Context, order store.Order) []store.License {
+	out := make([]store.License, 0)
+	seen := map[int64]bool{}
+	add := func(license store.License) {
+		if license.ID <= 0 || seen[license.ID] {
+			return
+		}
+		seen[license.ID] = true
+		out = append(out, license)
+	}
+	for _, id := range order.Details.RenewLicenseIDs {
+		if license, err := svc.orders.GetLicense(ctx, id); err == nil {
+			add(license)
+		}
+	}
+	list, err := svc.orders.ListLicenses(ctx, order.UserID)
+	if err != nil {
+		return out
+	}
+	for _, license := range list {
+		if license.OrderID != nil && *license.OrderID == order.ID {
+			add(license)
+		}
+	}
+	return out
+}
+
+// orderNotifySummary is a short human list of what the order covers (for the alarm bar).
+func orderNotifySummary(order store.Order) string {
+	parts := make([]string, 0, 8)
+	for _, item := range order.Items {
+		if item.Quantity <= 0 {
+			continue
+		}
+		label := strings.TrimSpace(item.Label)
+		if label == "" {
+			label = item.Code
+		}
+		parts = append(parts, fmt.Sprintf("%s × %d", label, item.Quantity))
+	}
+	for _, edge := range order.Details.Edges {
+		name := firstNonEmpty(edge.Name, edge.IP, fmt.Sprintf("edge #%d", edge.ServerID))
+		layers := make([]string, 0, 2)
+		if edge.L4 {
+			layers = append(layers, "L4")
+		}
+		if edge.L7 {
+			layers = append(layers, "L7")
+		}
+		if len(layers) > 0 {
+			parts = append(parts, fmt.Sprintf("Edge %s (%s)", name, strings.Join(layers, "+")))
+		} else {
+			parts = append(parts, "Edge "+name)
+		}
+	}
+	for _, id := range order.Details.UpgradeServerIDs {
+		parts = append(parts, fmt.Sprintf("L4 upgrade on edge #%d", id))
+	}
+	for _, site := range order.Details.Sites {
+		domain := firstNonEmpty(site.Domain, fmt.Sprintf("site #%d", site.SiteID))
+		if site.Placement == "platform" {
+			parts = append(parts, "Site "+domain+" (platform)")
+		} else {
+			parts = append(parts, "Site "+domain)
+		}
+	}
+	if n := len(order.Details.RenewLicenseIDs); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d license renewal%s", n, map[bool]string{true: "", false: "s"}[n == 1]))
+	}
+	if len(parts) == 0 {
+		return orderPurposeLabel(order.Purpose)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func writeOrderError(w http.ResponseWriter, err error) {
@@ -197,7 +289,14 @@ func (svc *orderService) buildOrder(ctx context.Context, customerID int64, paylo
 	if err != nil {
 		return order, nil, err
 	}
-	priceOrder(&order, catalog, renewals, time.Now().UTC())
+	coveredEdges := make(map[int64]bool)
+	for _, license := range licenses {
+		if license.Scope != store.LicenseScopeServer || !licenseStillCovers(license) {
+			continue
+		}
+		coveredEdges[license.TargetID] = true
+	}
+	priceOrder(&order, catalog, renewals, coveredEdges, time.Now().UTC())
 	return order, licenses, nil
 }
 
@@ -335,7 +434,7 @@ func (svc *orderService) handleGet(w http.ResponseWriter, r *http.Request) {
 		writeOrderError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sanitizeOrder(order))
+	svc.writeOrder(w, http.StatusOK, r.Context(), order)
 }
 
 func (svc *orderService) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -379,7 +478,7 @@ func (svc *orderService) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusCreated, sanitizeOrder(created))
+	svc.writeOrder(w, http.StatusCreated, r.Context(), created)
 }
 
 func (svc *orderService) handleUpdate(w http.ResponseWriter, r *http.Request) {
@@ -421,7 +520,7 @@ func (svc *orderService) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = user
-	writeJSON(w, http.StatusOK, sanitizeOrder(saved))
+	svc.writeOrder(w, http.StatusOK, r.Context(), saved)
 }
 
 func (svc *orderService) validate(ctx context.Context, order store.Order, licenses []store.License) error {
@@ -432,8 +531,142 @@ func (svc *orderService) validate(ctx context.Context, order store.Order, licens
 	if err := validateOrderForSubmit(order, ownershipFromLicenses(licenses), domains); err != nil {
 		return apiHTTPError(http.StatusBadRequest, err.Error())
 	}
+	if err := svc.validateExistingTargets(ctx, order); err != nil {
+		return apiHTTPError(http.StatusBadRequest, err.Error())
+	}
 	if order.Total <= 0 && order.Kind != store.OrderKindRenewal && len(order.Items) == 0 {
 		return apiHTTPError(http.StatusBadRequest, "the order is empty")
+	}
+	return nil
+}
+
+// licenseStillCovers is true while the target must not be re-ordered (use renew instead).
+func licenseStillCovers(license store.License) bool {
+	return license.Status == store.LicenseStatusActive || license.Status == store.LicenseStatusPastDue
+}
+
+func userAssignedToServer(view store.ServerView, userID int64) bool {
+	for _, id := range view.ManagedUserIds {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// validateExistingTargets checks serverId / siteId picks: they must exist, belong to
+// the customer, and not already have an active or past-due license.
+func (svc *orderService) validateExistingTargets(ctx context.Context, order store.Order) error {
+	for i, edge := range order.Details.Edges {
+		if edge.ServerID <= 0 {
+			continue
+		}
+		label := fmt.Sprintf("edge %d", i+1)
+		view, err := svc.servers.GetView(ctx, edge.ServerID)
+		if err != nil {
+			if store.IsNotFound(err) {
+				return fmt.Errorf("%s: registered edge #%d was not found", label, edge.ServerID)
+			}
+			return err
+		}
+		if !userAssignedToServer(view, order.UserID) && len(view.ManagedUserIds) > 0 {
+			return fmt.Errorf("%s: %s is not assigned to this customer", label, firstNonEmpty(view.Name, fmt.Sprintf("edge #%d", edge.ServerID)))
+		}
+		license, err := svc.orders.LicenseFor(ctx, store.LicenseScopeServer, edge.ServerID)
+		if err == nil && licenseStillCovers(license) {
+			wanted := edgeLicenseKind(edge)
+			// Edge-only orders must renew; site_own / edge_site / addon may list an
+			// already-licensed edge as the host without buying another edge license.
+			if order.Purpose == store.OrderPurposeEdge {
+				return fmt.Errorf("%s: %s already has an active license — renew it instead", label, firstNonEmpty(view.Name, fmt.Sprintf("edge #%d", edge.ServerID)))
+			}
+			if !edgeLicenseCovers(license.Kind, wanted) {
+				return fmt.Errorf("%s: %s is licensed as %s and cannot cover %s — renew or upgrade it first",
+					label, firstNonEmpty(view.Name, fmt.Sprintf("edge #%d", edge.ServerID)), license.Kind, wanted)
+			}
+		} else if err != nil && !store.IsNotFound(err) {
+			return err
+		}
+	}
+	for i, site := range order.Details.Sites {
+		if site.SiteID <= 0 {
+			continue
+		}
+		label := fmt.Sprintf("site %d", i+1)
+		existing, err := svc.sites.Get(ctx, site.SiteID)
+		if err != nil {
+			if store.IsNotFound(err) {
+				return fmt.Errorf("%s: registered site #%d was not found", label, site.SiteID)
+			}
+			return err
+		}
+		if site.Domain != "" && !strings.EqualFold(site.Domain, existing.Domain) {
+			return fmt.Errorf("%s: domain does not match registered site %s", label, existing.Domain)
+		}
+		license, err := svc.orders.LicenseFor(ctx, store.LicenseScopeSite, site.SiteID)
+		if err == nil && licenseStillCovers(license) {
+			return fmt.Errorf("%s: %s already has an active license — renew it instead", label, existing.Domain)
+		}
+		if err != nil && !store.IsNotFound(err) {
+			return err
+		}
+		if site.Placement == "own" && len(existing.ServerIDs) == 0 {
+			newL7 := false
+			for _, edge := range order.Details.Edges {
+				if edge.L7 {
+					newL7 = true
+					break
+				}
+			}
+			if !newL7 && len(site.ServerIDs) == 0 {
+				return fmt.Errorf("%s: %s has no edge yet — include an L7 edge in this order", label, existing.Domain)
+			}
+		}
+	}
+	return svc.validateNewEdgeIPsUnique(ctx, order)
+}
+
+// edgeLicenseCovers reports whether an existing edge license satisfies the kind
+// this order wants for that edge (Unified covers L4 and L7).
+func edgeLicenseCovers(have, want string) bool {
+	if have == want {
+		return true
+	}
+	if have == store.LicenseKindUnified {
+		return want == store.LicenseKindL4 || want == store.LicenseKindL7 || want == store.LicenseKindUnified
+	}
+	return false
+}
+
+// validateNewEdgeIPsUnique rejects new installs that reuse an IP already registered
+// on another edge (prevents duplicate panel rows and license stomps).
+func (svc *orderService) validateNewEdgeIPsUnique(ctx context.Context, order store.Order) error {
+	if svc.servers == nil {
+		return nil
+	}
+	views, err := svc.servers.ListWithUsers(ctx)
+	if err != nil {
+		return err
+	}
+	byIP := make(map[string]store.ServerView, len(views))
+	for _, view := range views {
+		ip := strings.TrimSpace(view.IP)
+		if ip != "" {
+			byIP[ip] = view
+		}
+	}
+	for i, edge := range order.Details.Edges {
+		if edge.ServerID > 0 {
+			continue
+		}
+		ip := strings.TrimSpace(edge.IP)
+		if ip == "" {
+			continue
+		}
+		if existing, ok := byIP[ip]; ok {
+			return fmt.Errorf("edge %d: IP %s is already registered as %s (#%d) — pick that edge instead of installing again",
+				i+1, ip, firstNonEmpty(existing.Name, "edge"), existing.ID)
+		}
 	}
 	return nil
 }
@@ -463,7 +696,7 @@ func (svc *orderService) handleSubmit(w http.ResponseWriter, r *http.Request) {
 		writeOrderError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sanitizeOrder(submitted))
+	svc.writeOrder(w, http.StatusOK, r.Context(), submitted)
 }
 
 // submit locks the quote, assigns an invoice number and waits for payment.
@@ -488,10 +721,10 @@ func (svc *orderService) submit(ctx context.Context, order store.Order) (store.O
 	}
 	svc.notify(ctx, order.UserID, order, "submitted", "info",
 		fmt.Sprintf("Order #%d submitted", order.ID),
-		fmt.Sprintf("Invoice %s for %s %.2f is awaiting payment.", order.InvoiceNo, order.Currency, order.Total))
+		fmt.Sprintf("Invoice %s for %s %.2f awaits payment. %s", order.InvoiceNo, order.Currency, order.Total, orderNotifySummary(order)))
 	svc.notifyAdmins(ctx, order, "submitted",
 		fmt.Sprintf("New order #%d awaiting payment", order.ID),
-		fmt.Sprintf("%s ordered %s for %s %.2f.", firstNonEmpty(order.UserName, order.UserEmail, "A customer"), orderPurposeLabel(order.Purpose), order.Currency, order.Total))
+		fmt.Sprintf("%s · %s %.2f · %s", firstNonEmpty(order.UserName, order.UserEmail, "Customer"), order.Currency, order.Total, orderNotifySummary(order)))
 	return svc.orders.Get(ctx, order.ID)
 }
 
@@ -514,7 +747,7 @@ func (svc *orderService) handleCancel(w http.ResponseWriter, r *http.Request) {
 		writeOrderError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sanitizeOrder(cancelled))
+	svc.writeOrder(w, http.StatusOK, r.Context(), cancelled)
 }
 
 func (svc *orderService) cancel(ctx context.Context, order store.Order, note string) (store.Order, error) {
@@ -584,7 +817,7 @@ func (svc *orderService) handlePayment(w http.ResponseWriter, r *http.Request) {
 		writeOrderError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, sanitizeOrder(order))
+	svc.writeOrder(w, http.StatusOK, r.Context(), order)
 }
 
 // markPaid moves a fully paid order on: renewals apply immediately, everything
@@ -601,7 +834,10 @@ func (svc *orderService) markPaid(ctx context.Context, order store.Order) (store
 	}
 	svc.notify(ctx, order.UserID, order, "paid", "info",
 		fmt.Sprintf("Payment received for order #%d", order.ID),
-		"Your order is paid and queued for setup.")
+		"Paid and queued for setup. "+orderNotifySummary(order))
+	svc.notifyAdmins(ctx, order, "paid",
+		fmt.Sprintf("Order #%d paid — awaiting setup", order.ID),
+		orderNotifySummary(order))
 	return svc.orders.Get(ctx, order.ID)
 }
 
@@ -644,23 +880,30 @@ func (svc *orderService) handleApprove(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	needsPlatform := false
-	for _, site := range order.Details.Sites {
-		if site.Placement == "platform" && site.SiteID == 0 {
-			needsPlatform = true
-		}
+	needsPlatform, err := svc.orderNeedsPlatformEdges(r.Context(), order)
+	if err != nil {
+		writeOrderError(w, err)
+		return
 	}
 	if needsPlatform {
 		ids := uniquePositiveIDs(payload.PlatformServerIDs)
 		if len(ids) == 0 {
-			if ids, err = svc.orders.PlatformServerIDs(r.Context()); err != nil {
+			ids = uniquePositiveIDs(order.Details.PlatformServerIDs)
+		}
+		if len(ids) == 0 {
+			writeError(w, http.StatusBadRequest, "select at least one platform edge to place these sites on")
+			return
+		}
+		for _, id := range ids {
+			kind, err := svc.orders.ServerKind(r.Context(), id)
+			if err != nil {
 				writeOrderError(w, err)
 				return
 			}
-		}
-		if len(ids) == 0 {
-			writeError(w, http.StatusBadRequest, "no platform edges are configured; mark Dorian edges as platform first")
-			return
+			if kind != "platform" {
+				writeError(w, http.StatusBadRequest, fmt.Sprintf("edge #%d is not marked as a platform edge", id))
+				return
+			}
 		}
 		order.Details.PlatformServerIDs = ids
 	}
@@ -680,7 +923,7 @@ func (svc *orderService) handleApprove(w http.ResponseWriter, r *http.Request) {
 		writeOrderError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, sanitizeOrder(saved))
+	svc.writeOrder(w, http.StatusAccepted, r.Context(), saved)
 }
 
 type orderRejectPayload struct {
@@ -717,8 +960,16 @@ func (svc *orderService) handleReject(w http.ResponseWriter, r *http.Request) {
 		writeOrderError(w, err)
 		return
 	}
-	svc.notify(r.Context(), order.UserID, cancelled, "rejected", "warning", fmt.Sprintf("Order #%d was rejected", order.ID), note)
-	writeJSON(w, http.StatusOK, sanitizeOrder(cancelled))
+	rejectBody := strings.TrimSpace(note)
+	if summary := orderNotifySummary(order); summary != "" {
+		if rejectBody != "" {
+			rejectBody += " · "
+		}
+		rejectBody += summary
+	}
+	svc.notify(r.Context(), order.UserID, cancelled, "rejected", "warning",
+		fmt.Sprintf("Order #%d was rejected", order.ID), rejectBody)
+	svc.writeOrder(w, http.StatusOK, r.Context(), cancelled)
 }
 
 func (svc *orderService) handleLicenses(w http.ResponseWriter, r *http.Request) {
@@ -794,7 +1045,7 @@ func (svc *orderService) handleRenew(w http.ResponseWriter, r *http.Request) {
 		writeOrderError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, sanitizeOrder(order))
+	svc.writeOrder(w, http.StatusCreated, r.Context(), order)
 }
 
 func (svc *orderService) createRenewalOrder(ctx context.Context, customerID, createdBy int64, licenseIDs []int64, period string) (store.Order, error) {
@@ -870,6 +1121,30 @@ func (svc *orderService) handleSetServerKind(w http.ResponseWriter, r *http.Requ
 	svc.handleServerKinds(w, r)
 }
 
+// orderNeedsPlatformEdges is true when setup must place platform sites onto
+// operator-chosen Dorian edges (new sites, or existing ones with no edges yet).
+func (svc *orderService) orderNeedsPlatformEdges(ctx context.Context, order store.Order) (bool, error) {
+	for _, site := range order.Details.Sites {
+		if site.Placement != "platform" {
+			continue
+		}
+		if site.SiteID <= 0 {
+			return true, nil
+		}
+		existing, err := svc.sites.Get(ctx, site.SiteID)
+		if err != nil {
+			if store.IsNotFound(err) {
+				return true, nil
+			}
+			return false, err
+		}
+		if len(existing.ServerIDs) == 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func orderPurposeLabel(purpose string) string {
 	switch purpose {
 	case store.OrderPurposeEdge:
@@ -901,6 +1176,7 @@ func (svc *orderService) notify(ctx context.Context, userID int64, order store.O
 	if svc.notifications == nil || userID <= 0 {
 		return
 	}
+	reqID := strconv.FormatInt(order.ID, 10)
 	if _, err := svc.notifications.Upsert(ctx, userID, store.NotificationInput{
 		EventKey: fmt.Sprintf("order-%d-%s", order.ID, event),
 		Kind:     "order",
@@ -908,6 +1184,7 @@ func (svc *orderService) notify(ctx context.Context, userID int64, order store.O
 		Title:    title,
 		Body:     body,
 		Status:   order.Status,
+		ReqID:    reqID,
 		At:       time.Now().UTC(),
 	}); err != nil {
 		log.Printf("[api] orders: notify user=%d order=%d: %v", userID, order.ID, err)

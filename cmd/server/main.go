@@ -105,6 +105,10 @@ func main() {
 		applog.Infof("api", "tls_key_encryption", map[string]any{"encrypted": sealed})
 	}
 	wafRuleStore := store.NewWafRuleStore(connection)
+	if err := store.EnsureProtectionProfiles(ctx, connection); err != nil {
+		applog.Errorf("api", "startup_failed", map[string]any{"step": "protection_profiles", "error": err.Error()})
+		os.Exit(1)
+	}
 	siteListeningPortStore := store.NewSiteListeningPortStore(connection)
 	originRouteStore := store.NewSiteOriginRouteStore(connection)
 	if err := originRouteStore.EnsureSchema(ctx); err != nil {

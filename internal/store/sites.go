@@ -748,6 +748,14 @@ func (store *siteStore) EnsureWafRule(ctx context.Context, siteID int64, wafRule
 		return *site.WafID, nil
 	}
 
+	// Prefer the built-in Standard protection profile when one exists.
+	if standardID, lookupErr := LookupProtectionProfileID(ctx, store.db, ProtectionKeyStandard); lookupErr == nil && standardID > 0 {
+		if _, err := store.db.ExecContext(ctx, `UPDATE sites SET waf_id = ? WHERE id = ?`, standardID, siteID); err != nil {
+			return 0, err
+		}
+		return standardID, nil
+	}
+
 	created, err := wafRules.Create(ctx, WafRuleInput{
 		Name: fmt.Sprintf("%s WAF", site.Domain),
 		Role: "custom",

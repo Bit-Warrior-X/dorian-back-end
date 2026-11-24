@@ -60,6 +60,28 @@ func (svc *orderService) runLicenseLifecycle(ctx context.Context, now time.Time)
 				continue
 			}
 			svc.notifyLicenseStatus(ctx, license, previous)
+			name := firstNonEmpty(license.TargetName, fmt.Sprintf("%s #%d", license.Scope, license.TargetID))
+			switch next {
+			case store.LicenseStatusCancelled:
+				svc.recordLicenseEvent(ctx, license, store.LicenseEventCancelled,
+					licenseEventTitle(store.LicenseEventCancelled, name),
+					"Ended at period end.")
+			case store.LicenseStatusExpired:
+				svc.recordLicenseEvent(ctx, license, store.LicenseEventCancelled,
+					"License expired: "+name,
+					"Grace period ended.")
+			case store.LicenseStatusPastDue:
+				svc.recordLicenseEvent(ctx, license, "past_due",
+					"License past due: "+name,
+					fmt.Sprintf("Renew before %s to avoid lock.", license.CurrentPeriodEnd.Add(pastDueGrace).Format("2 Jan 2006")))
+			}
+			// After grace / cancel: remove site entitlement and L7 traffic config.
+			if license.Scope == store.LicenseScopeSite &&
+				(next == store.LicenseStatusExpired || next == store.LicenseStatusCancelled) {
+				if err := svc.removeSiteTrafficAfterLicenseEnd(ctx, license.TargetID); err != nil {
+					log.Printf("[api] license lifecycle: site %d traffic cleanup: %v", license.TargetID, err)
+				}
+			}
 		}
 		if license.CancelAtEnd || license.Status == store.LicenseStatusCancelled {
 			continue
@@ -109,10 +131,18 @@ func (svc *orderService) notifyLicenseStatus(ctx context.Context, license store.
 		body = fmt.Sprintf("Protection keeps running. Pay the renewal before %s to avoid config lock.", license.CurrentPeriodEnd.Add(pastDueGrace).Format("2 Jan 2006"))
 	case store.LicenseStatusCancelled:
 		title = fmt.Sprintf("License ended: %s", name)
-		body = "The license was cancelled. Protection keeps its last configuration, but changes are locked. Place a new order to protect it again."
+		if license.Scope == store.LicenseScopeSite {
+			body = "The site license was cancelled. The site was removed from its edges and is no longer served. Place a new order to protect it again."
+		} else {
+			body = "The license was cancelled. Protection keeps its last configuration, but changes are locked. Place a new order to protect it again."
+		}
 	case store.LicenseStatusExpired:
 		title = fmt.Sprintf("License expired: %s", name)
-		body = "Traffic is still protected with the last configuration, but changes are locked until the license is renewed."
+		if license.Scope == store.LicenseScopeSite {
+			body = "The site license expired. The site was removed from its edges and is no longer served until renewed."
+		} else {
+			body = "Traffic is still protected with the last configuration, but changes are locked until the license is renewed."
+		}
 		severity = "critical"
 	case store.LicenseStatusActive:
 		if previous == "" {

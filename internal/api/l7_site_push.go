@@ -20,6 +20,9 @@ func (e *l7StatusError) Error() string {
 	if e == nil {
 		return "l7 request failed"
 	}
+	if msg := summarizeEdgeLicenseStatus(e.Status, e.Body); msg != "" {
+		return msg
+	}
 	body := strings.TrimSpace(e.Body)
 	if body == "" || looksLikeHTML(body) {
 		return fmt.Sprintf("l7 returned status %d", e.Status)
@@ -887,8 +890,9 @@ func callL7UpdateOriginRoutes(
 	})
 }
 
-// callL7UpdateSite pushes the full site configuration to every assigned edge
-// server via POST /API/L7/l7_update_site. Returns per-edge success/failure details.
+// callL7UpdateSite installs sites/<id>.dlic on each assigned edge when a panel
+// site license exists, then pushes full site config via POST /API/L7/l7_update_site.
+// License-first order matches PANEL_EDGE_LICENSE_INTEGRATION §4 (place site).
 // No-op (empty report) when the site has no servers.
 func callL7UpdateSite(
 	ctx context.Context,
@@ -912,14 +916,59 @@ func callL7UpdateSite(
 	if len(site.ServerIDs) == 0 {
 		return report, nil
 	}
-	return postL7ToSiteEdgeServersDetailed(ctx, servers, sites, siteID, "/API/L7/l7_update_site", func(edgeID int64, server store.ServerView) ([]byte, error) {
-		payload, err := buildL7SiteConfigPayload(ctx, site, server.ID, deps)
+	// Install sites/<id>.dlic when the panel has an active/past_due license.
+	// Order setup may also install via installSiteLicenseOnAssignedEdges first
+	// (with the order's kind/expiry) before this runs — do not hard-block here on
+	// cancelled/missing DB rows or re-orders fail before SaveLicense.
+	license, hasLicense := lookupInstallableSiteLicense(ctx, siteID)
+	for _, edgeID := range site.ServerIDs {
+		server, err := servers.GetView(ctx, edgeID)
 		if err != nil {
-			return nil, err
+			report.Failed = append(report.Failed, edgeSyncServerInfo{
+				ServerID: edgeID,
+				Name:     edgeLabel("", edgeID),
+				Error:    fmt.Sprintf("load server view: %v", err),
+			})
+			continue
 		}
-		payload.ServerID = server.ID
-		return json.Marshal(payload)
-	})
+		info := edgeSyncServerInfo{
+			ServerID: server.ID,
+			Name:     edgeLabel(server.Name, server.ID),
+			IP:       strings.TrimSpace(server.IP),
+		}
+		if hasLicense {
+			if err := installEdgeSiteLicense(
+				ctx, server, siteID, license.Kind, siteLicenseFileState(license.Status), license.CurrentPeriodEnd, "",
+			); err != nil {
+				// Older Angelos builds lack /API/license/sites and fail-open for site
+				// entitlements until the first sites/*.dlic exists. Do not skip L7 push
+				// or applySiteEdgeSync will deselect the edge from the site.
+				if edgeLicenseAPIUnsupported(err) {
+					warn := info
+					warn.Error = formatL7StatusForOperator(err)
+					report.Warnings = append(report.Warnings, warn)
+				} else {
+					info.Error = formatL7StatusForOperator(err)
+					report.Failed = append(report.Failed, info)
+					continue
+				}
+			}
+		}
+		if err := postL7ToLoadedServer(ctx, server, "/API/L7/l7_update_site", func(edgeServerID int64, loaded store.ServerView) ([]byte, error) {
+			payload, err := buildL7SiteConfigPayload(ctx, site, loaded.ID, deps)
+			if err != nil {
+				return nil, err
+			}
+			payload.ServerID = loaded.ID
+			return json.Marshal(payload)
+		}); err != nil {
+			info.Error = err.Error()
+			report.Failed = append(report.Failed, info)
+			continue
+		}
+		report.Succeeded = append(report.Succeeded, info)
+	}
+	return report, nil
 }
 
 // applySiteEdgeSync keeps only edges that synced successfully and clears

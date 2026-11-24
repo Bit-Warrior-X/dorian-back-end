@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"vue-project-backend/internal/store"
@@ -57,12 +59,56 @@ func (svc *orderService) handleLicenseCancel(w http.ResponseWriter, r *http.Requ
 		writeOrderError(w, err)
 		return
 	}
+	name := firstNonEmpty(saved.TargetName, fmt.Sprintf("%s #%d", saved.Scope, saved.TargetID))
 	if immediate {
 		svc.notifyLicenseStatus(r.Context(), saved, previous)
+		svc.recordLicenseEvent(r.Context(), saved, store.LicenseEventCancelled,
+			licenseEventTitle(store.LicenseEventCancelled, name),
+			"License ended immediately. Place a new order to protect it again.")
+		if saved.Scope == store.LicenseScopeSite {
+			if err := svc.removeSiteTrafficAfterLicenseEnd(r.Context(), saved.TargetID); err != nil {
+				log.Printf("[api] orders: site %d cancel cleanup: %v", saved.TargetID, err)
+			}
+		}
 	} else {
 		svc.notifyLicenseCancelScheduled(r.Context(), saved)
+		svc.recordLicenseEvent(r.Context(), saved, store.LicenseEventCancelScheduled,
+			licenseEventTitle(store.LicenseEventCancelScheduled, name),
+			fmt.Sprintf("Active until %s, then ends. You can undo this before then.", saved.CurrentPeriodEnd.UTC().Format("2 Jan 2006")))
 	}
 	writeJSON(w, http.StatusOK, saved)
+}
+
+// removeSiteTrafficAfterLicenseEnd drops sites/<id>.dlic, deletes L7 Redis config on
+// assigned edges, then clears panel edge assignment. Matches PANEL_EDGE_LICENSE_INTEGRATION §4
+// ("Cancel site / remove from edge"). Failures are logged by callers; billing cancel still stands.
+func (svc *orderService) removeSiteTrafficAfterLicenseEnd(ctx context.Context, siteID int64) error {
+	if siteID <= 0 {
+		return nil
+	}
+	if warns := deleteSiteLicenseOnAssignedEdges(ctx, svc.servers, svc.sites, siteID); len(warns) > 0 {
+		log.Printf("[api] orders: site %d license delete warnings: %s", siteID, strings.Join(warns, "; "))
+	}
+	report, err := callL7DeleteSite(ctx, svc.servers, svc.sites, siteID)
+	if err != nil {
+		return err
+	}
+	for _, item := range report.Failed {
+		log.Printf("[api] orders: site %d l7_delete_site failed edge=%d: %s", siteID, item.ServerID, item.Error)
+	}
+	for _, item := range report.Warnings {
+		log.Printf("[api] orders: site %d l7_delete_site warning edge=%d: %s", siteID, item.ServerID, item.Error)
+	}
+	edgeIDs, _ := siteEdgeServerIDs(ctx, svc.sites, siteID)
+	if err := svc.sites.UpdateSiteServers(ctx, siteID, nil); err != nil {
+		return fmt.Errorf("clear site edges: %w", err)
+	}
+	if len(edgeIDs) > 0 && svc.siteListeningPorts != nil {
+		if err := svc.siteListeningPorts.DeleteForServers(ctx, siteID, edgeIDs); err != nil {
+			return fmt.Errorf("clear listening ports: %w", err)
+		}
+	}
+	return nil
 }
 
 // handleLicenseResume undoes a scheduled cancellation.
@@ -85,6 +131,10 @@ func (svc *orderService) handleLicenseResume(w http.ResponseWriter, r *http.Requ
 		writeOrderError(w, err)
 		return
 	}
+	name := firstNonEmpty(saved.TargetName, fmt.Sprintf("%s #%d", saved.Scope, saved.TargetID))
+	svc.recordLicenseEvent(r.Context(), saved, store.LicenseEventResumed,
+		licenseEventTitle(store.LicenseEventResumed, name),
+		"Scheduled cancellation was undone; the license will renew as usual.")
 	writeJSON(w, http.StatusOK, saved)
 }
 

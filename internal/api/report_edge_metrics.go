@@ -12,19 +12,23 @@ import (
 )
 
 type edgeMetricsReportPayload struct {
-	Token           string                 `json:"token"`
-	Command         string                 `json:"command"`
-	ReportedAt      flexibleInt64          `json:"reported_at"`
-	IntervalSeconds flexibleInt64          `json:"interval_seconds"`
-	LicenseType     string                 `json:"license_type"`
-	AllowsL4        *bool                  `json:"allows_l4"`
-	AllowsL7        *bool                  `json:"allows_l7"`
-	ItemCount       flexibleInt64          `json:"item_count"`
-	Source          string                 `json:"source"`
-	Endpoint        string                 `json:"endpoint"`
-	EndpointAliases []string               `json:"endpoint_aliases"`
-	Timestamp       flexibleInt64          `json:"timestamp"`
-	Payload         json.RawMessage        `json:"payload"`
+	Token           string                   `json:"token"`
+	Command         string                   `json:"command"`
+	ReportedAt      flexibleInt64            `json:"reported_at"`
+	IntervalSeconds flexibleInt64            `json:"interval_seconds"`
+	LicenseType     string                   `json:"license_type"`
+	LicenseState    string                   `json:"license_state"`
+	ConfigLocked    *bool                    `json:"config_locked"`
+	DaysLeft        *flexibleInt64           `json:"days_left"`
+	DaysOverdue     *flexibleInt64           `json:"days_overdue"`
+	AllowsL4        *bool                    `json:"allows_l4"`
+	AllowsL7        *bool                    `json:"allows_l7"`
+	ItemCount       flexibleInt64            `json:"item_count"`
+	Source          string                   `json:"source"`
+	Endpoint        string                   `json:"endpoint"`
+	EndpointAliases []string                 `json:"endpoint_aliases"`
+	Timestamp       flexibleInt64            `json:"timestamp"`
+	Payload         json.RawMessage          `json:"payload"`
 	Items           []worker.EdgeMetricsItem `json:"items"`
 }
 
@@ -104,6 +108,11 @@ func reportEdgeMetricsHandler(servers store.ServerStore, dbConn *sql.DB) http.Ha
 		}
 		if payload.AllowsL7 != nil {
 			allowsL7 = *payload.AllowsL7
+		}
+		if state := strings.ToLower(strings.TrimSpace(payload.LicenseState)); state != "" {
+			locked := payload.ConfigLocked != nil && *payload.ConfigLocked
+			log.Printf("[api] report_edge_metrics server=%d license_state=%s config_locked=%v allows_l4=%v allows_l7=%v",
+				server.ID, state, locked, allowsL4, allowsL7)
 		}
 
 		result := edgeMetricsReportResult{

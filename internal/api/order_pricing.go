@@ -156,16 +156,22 @@ func prorateFactor(coTermEnd *time.Time, period string, now time.Time) float64 {
 }
 
 // priceOrder rebuilds the order lines and total from its details. renewals holds the
-// licenses named in Details.RenewLicenseIDs.
-func priceOrder(order *store.Order, catalog []store.CatalogItem, renewals []store.License, now time.Time) {
+// licenses named in Details.RenewLicenseIDs. coveredEdgeIDs are existing edges that
+// already have an active license covering this order — they are not billed again.
+func priceOrder(order *store.Order, catalog []store.CatalogItem, renewals []store.License, coveredEdgeIDs map[int64]bool, now time.Time) {
 	factor := 1.0
 	if order.Kind == store.OrderKindAddon {
 		factor = prorateFactor(order.Details.CoTermEnd, order.Period, now)
 	}
 	b := newOrderLineBuilder(catalog, order.Period, factor)
-	newEdges := 0
+	setupEdges := 0
 	for _, edge := range order.Details.Edges {
-		newEdges++
+		if edge.ServerID == 0 {
+			setupEdges++
+		}
+		if edge.ServerID > 0 && coveredEdgeIDs[edge.ServerID] {
+			continue
+		}
 		switch edgeLicenseKind(edge) {
 		case store.LicenseKindUnified:
 			b.add(store.CatalogEdgeL7, 1)
@@ -189,7 +195,8 @@ func priceOrder(order *store.Order, catalog []store.CatalogItem, renewals []stor
 			b.add(code, 1)
 		}
 	}
-	b.add(store.CatalogSetupFee, newEdges)
+	// Setup fee only for edges we still need to install (not already registered).
+	b.add(store.CatalogSetupFee, setupEdges)
 	order.Items, order.Total = b.result()
 }
 
@@ -269,7 +276,7 @@ func normalizeOrderDetails(purpose string, details store.OrderDetails) store.Ord
 		if site.Placement == "platform" {
 			site.ServerIDs = nil
 		}
-		if site.Domain == "" && len(site.Origins) == 0 {
+		if site.SiteID == 0 && site.Domain == "" && len(site.Origins) == 0 {
 			continue
 		}
 		sites = append(sites, site)
@@ -278,6 +285,17 @@ func normalizeOrderDetails(purpose string, details store.OrderDetails) store.Ord
 	details.Sites = sites
 	details.UpgradeServerIDs = uniquePositiveIDs(details.UpgradeServerIDs)
 	details.RenewLicenseIDs = uniquePositiveIDs(details.RenewLicenseIDs)
+	details.PlatformServerIDs = uniquePositiveIDs(details.PlatformServerIDs)
+	needsPlatform := false
+	for _, site := range sites {
+		if site.Placement == "platform" {
+			needsPlatform = true
+			break
+		}
+	}
+	if !needsPlatform {
+		details.PlatformServerIDs = nil
+	}
 	if purpose == store.OrderPurposeSitePlatform {
 		details.Edges = []store.OrderEdge{}
 	}
@@ -364,8 +382,22 @@ func validateOrderForSubmit(order store.Order, own orderOwnership, existingDomai
 		return fmt.Errorf("unknown order purpose %q", order.Purpose)
 	}
 	seenIPs := map[string]bool{}
+	seenServerIDs := map[int64]bool{}
 	for i, edge := range d.Edges {
 		label := fmt.Sprintf("edge %d", i+1)
+		if edge.ServerID > 0 {
+			if seenServerIDs[edge.ServerID] {
+				return fmt.Errorf("%s: edge #%d is listed twice", label, edge.ServerID)
+			}
+			seenServerIDs[edge.ServerID] = true
+			if edge.IP != "" {
+				if seenIPs[edge.IP] {
+					return fmt.Errorf("%s: IP %s is listed twice", label, edge.IP)
+				}
+				seenIPs[edge.IP] = true
+			}
+			continue
+		}
 		if edge.Name == "" {
 			return fmt.Errorf("%s: name is required", label)
 		}
@@ -391,8 +423,22 @@ func validateOrderForSubmit(order store.Order, own orderOwnership, existingDomai
 		}
 	}
 	seenDomains := map[string]bool{}
+	seenSiteIDs := map[int64]bool{}
 	for i, site := range d.Sites {
 		label := fmt.Sprintf("site %d", i+1)
+		if site.SiteID > 0 {
+			if seenSiteIDs[site.SiteID] {
+				return fmt.Errorf("%s: site #%d is listed twice", label, site.SiteID)
+			}
+			seenSiteIDs[site.SiteID] = true
+			if site.Domain != "" {
+				if seenDomains[site.Domain] {
+					return fmt.Errorf("%s: %s is listed twice", label, site.Domain)
+				}
+				seenDomains[site.Domain] = true
+			}
+			continue
+		}
 		if !orderDomainPattern.MatchString(site.Domain) {
 			return fmt.Errorf("%s: %q is not a valid domain", label, site.Domain)
 		}
@@ -400,7 +446,7 @@ func validateOrderForSubmit(order store.Order, own orderOwnership, existingDomai
 			return fmt.Errorf("%s: %s is listed twice", label, site.Domain)
 		}
 		seenDomains[site.Domain] = true
-		if existingDomains[site.Domain] && site.SiteID == 0 {
+		if existingDomains[site.Domain] {
 			return fmt.Errorf("%s: %s is already protected", label, site.Domain)
 		}
 		if len(site.Origins) == 0 {

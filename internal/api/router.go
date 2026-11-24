@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"strings"
 
 	"vue-project-backend/internal/acme"
 	"vue-project-backend/internal/config"
@@ -91,10 +92,13 @@ func NewRouter(
 		},
 		certIssuer:    certIssuer,
 		notifications: notifications,
+		db:            dbConn,
 	}
 	registerOrderRoutes(mux, orderSvc)
 	orderSvc.StartLicenseLifecycle(ctx)
 	viewerOwnedSiteIDs = orders.OwnedSiteIDs
+	panelOrderStore = orders
+	panelDeployLicenseBaseURL = strings.TrimSpace(cfg.DeployLicenseBaseURL)
 
 	auditResolver := &auditResolver{users: users, servers: servers, sites: sites, wafRules: wafRules, tokens: apiTokens}
 

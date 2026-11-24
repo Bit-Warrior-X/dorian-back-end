@@ -202,6 +202,10 @@ type OrderStore interface {
 	LicenseFor(ctx context.Context, scope string, targetID int64) (License, error)
 	ListLicenses(ctx context.Context, userID int64) ([]License, error)
 	OwnedSiteIDs(ctx context.Context, userID int64) ([]int64, error)
+	AppendLicenseEvent(ctx context.Context, event LicenseEvent) error
+	ListLicenseEvents(ctx context.Context, licenseID int64) ([]LicenseEvent, error)
+	ListLicenseEventsForTarget(ctx context.Context, scope string, targetID int64) ([]LicenseEvent, error)
+	ListOrdersForTarget(ctx context.Context, userID int64, scope string, targetID int64) ([]Order, error)
 
 	ListServerKinds(ctx context.Context) ([]PlatformServer, error)
 	PlatformServerIDs(ctx context.Context) ([]int64, error)
@@ -322,6 +326,9 @@ func (s *orderStore) EnsureSchema(ctx context.Context) error {
 			item.code, item.title, item.tagline, item.monthly, item.annual, item.sort, item.oneTime); err != nil {
 			return err
 		}
+	}
+	if err := s.ensureLicenseEventsSchema(ctx); err != nil {
+		return err
 	}
 	return s.migrateLegacyLicenses(ctx)
 }

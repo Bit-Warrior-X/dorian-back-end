@@ -1993,6 +1993,17 @@ func siteDetailHandler(
 				writeError(w, http.StatusInternalServerError, "failed to update site")
 				return
 			}
+			removedEdges := removedServerIDs(existing.ServerIDs, payload.ServerIDs)
+			addedEdges := removedServerIDs(payload.ServerIDs, existing.ServerIDs)
+			if len(removedEdges) > 0 {
+				_ = deleteSiteLicenseOnEdges(r.Context(), servers, removedEdges, id)
+			}
+			if len(addedEdges) > 0 {
+				if block := siteLicenseAssignBlock(r.Context(), id); block != "" {
+					writeError(w, http.StatusPaymentRequired, block)
+					return
+				}
+			}
 			if err := sites.UpdateSiteServers(r.Context(), id, payload.ServerIDs); err != nil {
 				writeError(w, http.StatusInternalServerError, "failed to assign servers")
 				return
@@ -2027,6 +2038,8 @@ func siteDetailHandler(
 			finalSite = withLatestCertificate(r.Context(), sites, finalSite)
 			writeJSON(w, http.StatusOK, siteResponseWithEdgeSync(finalSite, report))
 		case http.MethodDelete:
+			// Remove sites/<id>.dlic before L7 delete (PANEL_EDGE_LICENSE_INTEGRATION §4).
+			_ = deleteSiteLicenseOnAssignedEdges(r.Context(), servers, sites, id)
 			report, err := callL7DeleteSite(r.Context(), servers, sites, id)
 			if err != nil {
 				if store.IsNotFound(err) {
